@@ -66,13 +66,16 @@ resolved_group: std.ArrayList(bool) = .empty,
 /// head has its own, entirely independent picker.
 pick: Pick = .empty,
 /// This head's transient status-line message.
-echo: std.ArrayList(u8) = .empty,
+echo: Echo = .{},
 /// The selection of the scene this head shows (doc/model.md §2.6): the
 /// focused row — a stable view/node/field path, never a text cursor — is its
 /// PRIMARY extent; rows marked beside it are its others. One model with the
 /// text selections an `Editor` holds (`selection.zig`), which dispatch maps
 /// commands over the same way.
 scene_selection: SceneSelection = .empty,
+/// Type-ahead over the focused scene's rows: the prefix being typed
+/// (`type_ahead.zig`, doc/chrome.md §5.2).
+type_ahead: @import("type_ahead.zig").State = .{},
 /// Dialogs, pickers, and popups are nested semantic interactions local to
 /// this head. Their bindings are resolved here before any global keymap help.
 interactions: view_runtime.interaction.Stack = .empty,
@@ -125,6 +128,13 @@ focused_pane_gen: u32 = 0,
 /// about; offsets are clamped to that entry's length, since an edit can
 /// land between the frame and the read.
 view_range: ?ViewRange = null,
+
+/// How many keys this head has dispatched, the one being dispatched included
+/// (`wl_key_serial`). Bumped once per key at the top of dispatch — a pointer
+/// gesture is a key here too; a bare modifier is not. What a guest compares
+/// to ask "is this the very next key after mine?" — Emacs's transient map,
+/// without core holding a keymap that knows it is one.
+key_serial: u32 = 0,
 
 /// This head's pointer facts: the gesture being dispatched and what is under
 /// the pointer (`pointer.zig`). Per-head because the pointer is: another
@@ -231,7 +241,7 @@ pub const WorkingTarget = struct {
 
 /// A scene's selection (doc/model.md §2.6): extents of rows in one view. The
 /// PRIMARY extent is the focus — the path to the focused row (and field) —
-/// grown from `anchor` when a row range is being made (`set-mark` then a
+/// grown from `anchor` when a row range is being made (`selection.start` then a
 /// move: `V j` in a listing). The `others` are rows marked beside it (a
 /// C-click): each its own extent, from its anchor row to its head row in
 /// the view's focus order. The text twin is `Editor.selections`; both
@@ -239,7 +249,22 @@ pub const WorkingTarget = struct {
 pub const SceneSelection = struct {
     view: ?semantic.view.Ref = null,
     nodes: std.ArrayList(semantic.scene.NodeId) = .empty,
-    field: ?semantic.scene.FieldRef = null,
+    /// The field being EDITED — a text extent inside the focused row
+    /// (doc/chrome.md §5.2) — and the text it held when the edit began,
+    /// which cancelling restores. Null while the focus is the row itself: a
+    /// row whose leaf happens to be a field is not a field being edited, so
+    /// the `field` posture, the field caret and field input all read this,
+    /// never the shape of the focus path. ONE value, so no field is edited
+    /// without its origin, and an edit ends in one assignment that nothing
+    /// fallible precedes (`scene_edit.commit`/`cancel`). Whether the edit is
+    /// a BEGUN one — taking printable input itself, committing when the
+    /// focus leaves its row — is the head's granularity
+    /// (`scene_edit.begun`); under `text` the grammar's modes drive it.
+    /// Where the focus LANDS decides it (`scene_edit.land`).
+    edit: ?Edit = null,
+    /// Where `Edit.origin` lives, kept between edits. Read only through
+    /// `edit`.
+    origin_storage: std.ArrayList(u8) = .empty,
     /// A one-shot row anchor used when an action temporarily focuses a
     /// secondary, non-focusable node in this same view. It is head-local so
     /// another head can navigate the same view independently.
@@ -258,10 +283,28 @@ pub const SceneSelection = struct {
 
     pub const empty: SceneSelection = .{};
 
+    /// One edit: the field and the text it began from.
+    pub const Edit = struct {
+        field: semantic.scene.FieldRef,
+        /// The field's text when the edit began — what cancelling restores.
+        /// Borrowed from `origin_storage`, valid until the next edit starts.
+        origin: []const u8,
+    };
+
     pub fn deinit(self: *SceneSelection, gpa: Allocator) void {
         self.nodes.deinit(gpa);
         self.others.deinit(gpa);
+        self.origin_storage.deinit(gpa);
         self.* = .{};
+    }
+
+    /// Start editing `field`, which held `origin` as the edit began. Any
+    /// edit before it is over first, so a failed start leaves none.
+    pub fn startEdit(self: *SceneSelection, gpa: Allocator, field: semantic.scene.FieldRef, origin: []const u8) Allocator.Error!void {
+        self.edit = null;
+        self.origin_storage.clearRetainingCapacity();
+        try self.origin_storage.appendSlice(gpa, origin);
+        self.edit = .{ .field = field, .origin = self.origin_storage.items };
     }
 
     /// Focus `next`. Within the same view the extents stay — a move grows a
@@ -273,7 +316,12 @@ pub const SceneSelection = struct {
         self.nodes.clearRetainingCapacity();
         self.nodes.appendSliceAssumeCapacity(next.nodes);
         self.view = next.view;
-        self.field = next.field;
+        // An edit belongs to its field: a path naming another (or none) ends
+        // it. A path naming a new field starts nothing — an edit needs its
+        // origin, which `startEdit` is handed (`scene_edit.land`).
+        if (self.edit) |edit| if (!sameField(edit.field, next.field)) {
+            self.edit = null;
+        };
         self.navigation_anchor = null;
         self.selection_mark = false;
         if (!same_view) self.collapse();
@@ -282,7 +330,7 @@ pub const SceneSelection = struct {
     pub fn clear(self: *SceneSelection) void {
         self.view = null;
         self.nodes.clearRetainingCapacity();
-        self.field = null;
+        self.edit = null;
         self.navigation_anchor = null;
         self.selection_mark = false;
         self.collapse();
@@ -323,10 +371,18 @@ pub const SceneSelection = struct {
         self.others.clearRetainingCapacity();
         self.others.appendSliceAssumeCapacity(other.others.items);
         self.view = other.view;
-        self.field = other.field;
+        if (other.edit) |edit| try self.startEdit(gpa, edit.field, edit.origin) else {
+            self.edit = null;
+        }
         self.navigation_anchor = other.navigation_anchor;
         self.selection_mark = other.selection_mark;
         self.anchor = other.anchor;
+    }
+
+    fn sameField(a: ?semantic.scene.FieldRef, b: ?semantic.scene.FieldRef) bool {
+        const x = a orelse return b == null;
+        const y = b orelse return false;
+        return x.eql(y);
     }
 
     pub fn setNavigationAnchor(self: *SceneSelection, anchor: ?semantic.scene.NodeId) void {
@@ -337,7 +393,7 @@ pub const SceneSelection = struct {
         return .{
             .view = self.view orelse return null,
             .nodes = self.nodes.items,
-            .field = self.field,
+            .field = if (self.edit) |edit| edit.field else null,
         };
     }
 };
@@ -444,7 +500,7 @@ pub const Macros = struct {
     /// Nonzero while any replay is running — replayed keys are not recorded
     /// into a macro being recorded (vim records the `@a`, not what it did).
     depth: u8 = 0,
-    /// What `macro-play` with no register replays (vim's `@@`).
+    /// What `macro.play` with no register replays (vim's `@@`).
     last_played: ?u8 = null,
     last_recorded: ?u8 = null,
 
@@ -487,6 +543,42 @@ pub fn deinit(self: *Head, gpa: Allocator) void {
     self.* = .{};
 }
 
+/// A head's one-line message. There is one way to write it: `say`, which
+/// replaces what it says and counts the saying, so a reader tells a message
+/// said again from one still standing — the frame shows a message for
+/// `editor/echo-ms` from its saying, and a second "no hover" is a second
+/// saying though its text is the first's. There is no append: a message is
+/// composed first and said whole, so no writer can change the text without
+/// the count. `text` and `sayings` are the reads; `private` is theirs alone.
+pub const Echo = struct {
+    private: struct {
+        text: std.ArrayList(u8) = .empty,
+        said: u64 = 0,
+    } = .{},
+
+    /// Say `msg` (empty says nothing, and still counts): the line becomes it.
+    pub fn say(self: *Echo, gpa: Allocator, msg: []const u8) Allocator.Error!void {
+        self.private.said +%= 1;
+        self.private.text.clearRetainingCapacity();
+        try self.private.text.appendSlice(gpa, msg);
+    }
+
+    /// What it says now. Borrowed until the next `say`.
+    pub fn text(self: *const Echo) []const u8 {
+        return self.private.text.items;
+    }
+
+    /// Sayings so far.
+    pub fn sayings(self: *const Echo) u64 {
+        return self.private.said;
+    }
+
+    pub fn deinit(self: *Echo, gpa: Allocator) void {
+        self.private.text.deinit(gpa);
+        self.* = .{};
+    }
+};
+
 /// Set the pending sequence (owned copy); "" clears it (no allocation).
 pub fn setPending(self: *Head, gpa: Allocator, seq: []const u8) Allocator.Error!void {
     if (seq.len == 0) {
@@ -517,7 +609,7 @@ pub fn currentMode(self: *const Head) []const u8 {
 /// "Mode changes — REVISED").** Host-side (or generic) mode set: no
 /// menu-return bookkeeping. Abandons any half-typed chord (a stale
 /// `space f` must not combine with the new mode's next key). Used for
-/// buffer-switch restore and host-side save/restore (the picker), neither
+/// buffer.switch restore and host-side save/restore (the picker), neither
 /// of which should poison a menu's return target — and, RAW, by
 /// `Ctx.setMode` itself, the ONE place a `*command.Context`-holding caller
 /// should reach this from. Named `setModeRaw` (not plain `setMode`)
@@ -670,7 +762,7 @@ pub fn popTransientDiscard(self: *Head, gpa: Allocator, depth: usize) TransientP
 /// caller's own decision; any transient frame recorded against the mode
 /// being left behind is now meaningless (it named a scope in the buffer/
 /// interaction the head is LEAVING), so there is nothing honest left to pop
-/// it INTO — this is the buffer-switch/pick-open counterpart of
+/// it INTO — this is the buffer.switch/pick-open counterpart of
 /// `popTransientDiscard`, generalized to "all of them, unconditionally"
 /// rather than "the one on top, if it matches." See those callers' doc
 /// comments for why a plain overwrite (not a pop) has always been legacy's
@@ -753,12 +845,25 @@ pub fn resolvedIsGroup(self: *const Head, i: usize) bool {
 
 const t = std.testing;
 
+test "head: every message written to the echo is a saying the frame counts" {
+    const gpa = t.allocator;
+    var echo: Echo = .{};
+    defer echo.deinit(gpa);
+    try echo.say(gpa, "saved");
+    const first = echo.sayings();
+    try echo.say(gpa, "saved");
+    try t.expect(echo.sayings() != first);
+    try t.expectEqualStrings("saved", echo.text());
+    try echo.say(gpa, "");
+    try t.expectEqualStrings("", echo.text());
+}
+
 test "head: setMode/feed/pending are per-head — Keymap holds only tables" {
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);
     try km.bind(gpa, "normal", "i", "enter-insert", Keymap.prio_plugin, "vim");
-    try km.bind(gpa, "normal", "space f f", "find-file", Keymap.prio_plugin, "vim");
+    try km.bind(gpa, "normal", "space f f", "files.find", Keymap.prio_plugin, "vim");
 
     var h: Head = .empty;
     defer h.deinit(gpa);
@@ -771,7 +876,7 @@ test "head: setMode/feed/pending are per-head — Keymap holds only tables" {
     {
         const r = try h.feed(gpa, &km, "f");
         try t.expect(r == .run);
-        try t.expectEqualStrings("find-file", r.run[0]);
+        try t.expectEqualStrings("files.find", r.run[0]);
     }
     try t.expectEqual(@as(usize, 0), h.pending.len);
 }
@@ -780,10 +885,10 @@ test "head: prefix sequences — a chord resolves; a menu is a prefix, not a mod
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);
-    // A leader tree as SEQUENCES (no leader-* mode): SPC f f -> find-file, etc.
-    try km.bind(gpa, "normal", "space f f", "find-file", Keymap.prio_config, "cfg");
-    try km.bind(gpa, "normal", "space g g", "git-status", Keymap.prio_config, "cfg");
-    try km.bind(gpa, "normal", "i", "vim-insert", Keymap.prio_config, "vim");
+    // A leader tree as SEQUENCES (no leader-* mode): SPC f f -> files.find, etc.
+    try km.bind(gpa, "normal", "space f f", "files.find", Keymap.prio_config, "cfg");
+    try km.bind(gpa, "normal", "space g g", "git.status", Keymap.prio_config, "cfg");
+    try km.bind(gpa, "normal", "i", "vim.insert", Keymap.prio_config, "vim");
     try km.bind(gpa, "global", "C-w", "window-thing", Keymap.prio_config, "cfg");
 
     var h: Head = .empty;
@@ -794,7 +899,7 @@ test "head: prefix sequences — a chord resolves; a menu is a prefix, not a mod
     {
         const r = try h.feed(gpa, &km, "i");
         try t.expect(r == .run);
-        try t.expectEqualStrings("vim-insert", r.run[0]);
+        try t.expectEqualStrings("vim.insert", r.run[0]);
         try t.expectEqual(@as(usize, 0), h.pending.len);
     }
     // SPC is a prefix -> pending; f -> still pending; f -> completes -> run.
@@ -805,7 +910,7 @@ test "head: prefix sequences — a chord resolves; a menu is a prefix, not a mod
     {
         const r = try h.feed(gpa, &km, "f");
         try t.expect(r == .run);
-        try t.expectEqualStrings("find-file", r.run[0]);
+        try t.expectEqualStrings("files.find", r.run[0]);
         try t.expectEqual(@as(usize, 0), h.pending.len);
     }
     // The "global is too global" fix falls out: SPC then C-w is the CHORD
@@ -835,10 +940,10 @@ test "head: completions — chord next-keys, leaf vs group, deduped, global at t
     var km: Keymap = .empty;
     defer km.deinit(gpa);
     // A leader tree as sequences: SPC f {f,r}, SPC g g; a plain top-level key.
-    try km.bind(gpa, "normal", "space f f", "find-file", Keymap.prio_config, "cfg");
+    try km.bind(gpa, "normal", "space f f", "files.find", Keymap.prio_config, "cfg");
     try km.bind(gpa, "normal", "space f r", "recent-files", Keymap.prio_config, "cfg");
-    try km.bind(gpa, "normal", "space g g", "git-status", Keymap.prio_config, "cfg");
-    try km.bind(gpa, "normal", "i", "vim-insert", Keymap.prio_config, "vim");
+    try km.bind(gpa, "normal", "space g g", "git.status", Keymap.prio_config, "cfg");
+    try km.bind(gpa, "normal", "i", "vim.insert", Keymap.prio_config, "vim");
     try km.bind(gpa, "global", "C-w", "window-thing", Keymap.prio_config, "cfg");
     try km.setGroupName(gpa, "normal", "SPC", "leader", Keymap.prio_config, "cfg");
     try km.setGroupName(gpa, "normal", "SPC f", "files", Keymap.prio_config, "cfg");
@@ -872,7 +977,7 @@ test "head: completions — chord next-keys, leaf vs group, deduped, global at t
     try t.expect(Found.get(&h, "space") != null);
     try t.expect(Found.group(&h, "space")); // continues a chord → group
     try t.expectEqualStrings("leader", Found.get(&h, "space").?.command);
-    try t.expectEqualStrings("vim-insert", Found.get(&h, "i").?.command);
+    try t.expectEqualStrings("vim.insert", Found.get(&h, "i").?.command);
     try t.expect(!Found.group(&h, "i")); // runnable leaf
     try t.expectEqualStrings("window-thing", Found.get(&h, "C-w").?.command); // global at top
     // `space f f` and `space f r` collapse to ONE `space` group at the top.
@@ -892,11 +997,11 @@ test "head: completions — chord next-keys, leaf vs group, deduped, global at t
         try t.expect(Found.get(&h, "g") != null);
         try t.expectEqual(@as(?Keymap.Binding, null), Found.get(&h, "C-w")); // no global mid-chord
     }
-    // After `space f`: the two leaves `f`→find-file, `r`→recent-files.
+    // After `space f`: the two leaves `f`→files.find, `r`→recent-files.
     {
         const n = try h.completions(gpa, &km, "space f");
         try t.expectEqual(@as(usize, 2), n);
-        try t.expectEqualStrings("find-file", Found.get(&h, "f").?.command);
+        try t.expectEqualStrings("files.find", Found.get(&h, "f").?.command);
         try t.expect(!Found.group(&h, "f")); // a leaf now
         try t.expectEqualStrings("recent-files", Found.get(&h, "r").?.command);
     }
@@ -978,7 +1083,7 @@ test "head: two heads over one system hold independent mode, chord, pick, and ec
     var km: Keymap = .empty;
     defer km.deinit(gpa);
     try km.bind(gpa, "normal", "i", "enter-insert", Keymap.prio_plugin, "vim");
-    try km.bind(gpa, "normal", "space f f", "find-file", Keymap.prio_plugin, "vim");
+    try km.bind(gpa, "normal", "space f f", "files.find", Keymap.prio_plugin, "vim");
     try km.tagMode(gpa, "leader", "menu");
 
     var head_a: Head = .empty;
@@ -1016,10 +1121,10 @@ test "head: two heads over one system hold independent mode, chord, pick, and ec
     try t.expectEqualStrings("b-prompt", head_b.pick.prompt);
 
     // Distinct echo lines.
-    try head_a.echo.appendSlice(gpa, "from A");
-    try head_b.echo.appendSlice(gpa, "from B");
-    try t.expectEqualStrings("from A", head_a.echo.items);
-    try t.expectEqualStrings("from B", head_b.echo.items);
+    try head_a.echo.say(gpa, "from A");
+    try head_b.echo.say(gpa, "from B");
+    try t.expectEqualStrings("from A", head_a.echo.text());
+    try t.expectEqualStrings("from B", head_b.echo.text());
 
     // Opening A's pick set A's mode to "pick" (Pick.open routes mode changes
     // through the ctx's own head); B's mode is untouched by it.
@@ -1043,7 +1148,8 @@ test "head: semantic focus and interaction scopes are independent" {
     const view_ref: semantic.view.Ref = .{ .authority = .here, .slot = 7, .generation = 2 };
     const field_ref: semantic.scene.FieldRef = .{ .authority = .here, .slot = 3, .generation = 4 };
     const nodes = [_]semantic.scene.NodeId{ @enumFromInt(11), @enumFromInt(12) };
-    try a.scene_selection.set(gpa, .{ .view = view_ref, .nodes = &nodes, .field = field_ref });
+    try a.scene_selection.set(gpa, .{ .view = view_ref, .nodes = &nodes });
+    try a.scene_selection.startEdit(gpa, field_ref, "");
     try t.expectEqual(@as(usize, 2), a.scene_selection.path().?.nodes.len);
     try t.expect(b.scene_selection.path() == null);
 

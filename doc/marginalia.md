@@ -172,6 +172,11 @@ the init ORDER that actually matters (`caps`/`actions`/`slot_host` borrow
 
 ### 2c. Keymap introspection — two listing doors
 
+*Retired (doc/chrome.md §1.4).* Both doors below are gone: marginalia asks
+`keysFor` (`wl_keys_for`) which keys run a command in the context a pick was
+opened from, instead of scanning every mode's table blind to context. What
+follows is the record of the design they had.
+
 The missing lookup is command → key. `wl_menu_binding_*` cannot serve it: it
 reads the current head's *resolved menu list* (`head.completions` /
 `head.resolveBindings`), which is a head-scoped, mode-scoped, position-scoped

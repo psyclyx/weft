@@ -47,6 +47,8 @@ pub fn hostEnviron() @import("std").process.Environ {
     return plugin.g_environ;
 }
 pub const resolvePeerWp = plugin.resolvePeerWp;
+/// Where a plugin says something from a background entry — no head asked.
+pub const noteBackground = plugin.noteBackground;
 
 const fs = @import("wasm_host/fs.zig");
 pub const PeerFsBridge = fs.PeerFsBridge;
@@ -63,12 +65,33 @@ pub const deliverSignals = activation.deliverSignals;
 /// the app's frame boundary, which delivers `on_context_changed`.
 const context = @import("wasm_host/context.zig");
 pub const notifyContextChanged = context.notifyContextChanged;
+pub const notifySubjectChanged = context.notifySubjectChanged;
 pub const hearsContext = context.hearsContext;
 pub const context_doors = struct {
     pub const setBody = context.setBody;
     pub const getBody = context.getBody;
+    pub const changedBody = context.changedBody;
+    pub const placesBody = context.placesBody;
+    pub const watchBody = context.watchBody;
     pub const hContextSet = context.hContextSet;
     pub const hContextGet = context.hContextGet;
+    pub const hContextChanged = context.hContextChanged;
+    pub const hPlaces = context.hPlaces;
+    pub const hSubjectWatch = context.hSubjectWatch;
+};
+
+/// The tool doors — tool backing and the designation trio — whose bodies
+/// both membranes run. Re-exported for the same function-pointer proof.
+const tool = @import("wasm_host/tool.zig");
+pub const tool_doors = struct {
+    pub const toolBackingBody = tool.toolBackingBody;
+    pub const designationBody = tool.designationBody;
+    pub const designateBody = tool.designateBody;
+    pub const openerBody = tool.openerBody;
+    pub const hToolBacking = tool.hToolBacking;
+    pub const hEntryDesignation = tool.hEntryDesignation;
+    pub const hEntryDesignate = tool.hEntryDesignate;
+    pub const hDesignationOpener = tool.hDesignationOpener;
 };
 
 /// The plugin-plane proc doors, whose bodies BOTH membranes run (doc/place.md
@@ -87,6 +110,14 @@ pub const proc_doors = struct {
 const declare = @import("wasm_host/declare.zig");
 pub const declare_doors = struct {
     pub const doors = declare.doors;
+    pub const wasmDoor = declare.wasmDoorFor;
+};
+
+/// What a name is called and which key runs it (doc/chrome.md §1.2-1.3) —
+/// read doors both planes run, for the same gate.
+const commands_host = @import("wasm_host/commands.zig");
+pub const command_read_doors = struct {
+    pub const doors = commands_host.read_doors;
     pub const wasmDoor = declare.wasmDoorFor;
 };
 

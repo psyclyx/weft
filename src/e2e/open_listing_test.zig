@@ -47,7 +47,7 @@ const ConfigApp = struct {
         // Mirror main.zig: the grammar's resting mode is where fresh buffers
         // open, and a no-file launch shows the dashboard.
         try self.ed.buffers.setDefaultMode(gpa, self.ed.head.currentMode());
-        self.ed.run("dashboard");
+        self.ed.run("dashboard.open");
         self.ed.applyWindow();
     }
 
@@ -79,7 +79,7 @@ const ide_keys: Keys = .{ .down = "Down", .up = "Up", .step_out = null };
 
 /// Whether the focused row of the focused listing is named `want`.
 fn onRow(ed: *Editor, want: []const u8) bool {
-    if (ed.head.scene_selection.field == null) return false;
+    if (ed.head.scene_selection.path() == null) return false;
     const name = ed.draftHere(ed.gpa) catch return false;
     defer ed.gpa.free(name);
     return std.mem.eql(u8, name, want);
@@ -121,7 +121,7 @@ const Listing = union(enum) {
 
     fn focus(self: Listing, ed: *Editor) void {
         switch (self) {
-            .sidebar => ed.run("window-focus-left"),
+            .sidebar => ed.run("window.focus-left"),
             .entry => |id| ed.buffers.switchTo(ed.gpa, id, ed.head, ed.keymap) catch {},
         }
         ed.applyWindow();
@@ -154,7 +154,7 @@ fn keyboardWalk(ed: *Editor, keys: Keys, listing: Listing) !void {
 
     deeper.focus(ed);
     // Back up to sub/.
-    if (keys.step_out) |key| ed.press(key, "") else ed.run("hierarchy-step-out");
+    if (keys.step_out) |key| ed.press(key, "") else ed.run("target.open-container");
     try goToRow(ed, keys, "inner.txt");
     ed.press("Return", "");
     try expectPrimaryText(ed, "INNER\n");
@@ -173,7 +173,7 @@ test "e2e/files: helix.js — Return opens a file from the listing, at its root 
     var app: ConfigApp = undefined;
     try app.init(t.allocator, "helix.js");
     defer app.deinit();
-    app.ed.run("files");
+    app.ed.run("files.browse");
     app.ed.applyWindow();
     try keyboardWalk(&app.ed, vim_keys, .here(&app.ed));
 }
@@ -184,7 +184,7 @@ test "e2e/files: ide.js — Return opens a file from a listing in the main pane,
     defer app.deinit();
     // The sidebar shows `.` already; a listing in the main pane is an ordinary
     // `open` of a directory.
-    app.ed.runStr("open", "sub");
+    app.ed.runStr("file.open", "sub");
     app.ed.applyWindow();
     const ed = &app.ed;
     const listing: Listing = .here(ed);
@@ -292,7 +292,7 @@ test "e2e/files: a row whose file was swapped for a link after listing opens wha
     defer app.deinit();
     const ed = &app.ed;
     try core.file.writeBytesMakingDirs(gpa, "private", "private/secret.txt", "SECRET\n");
-    ed.run("files");
+    ed.run("files.browse");
     ed.applyWindow();
     try goToRow(ed, vim_keys, "alpha.txt");
     // Between the listing and the activation, the leaf becomes a link to a
@@ -316,7 +316,7 @@ test "e2e/files: config.js — V j d over rows removes every row of the range, a
     const ed = &app.ed;
     try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
     try core.file.writeBytes(gpa, "gamma.txt", "GAMMA\n");
-    ed.run("files");
+    ed.run("files.browse");
     ed.applyWindow();
     try goToRow(ed, vim_keys, "alpha.txt");
 
@@ -348,7 +348,7 @@ test "e2e/files: config.js — `yy` over two marked rows copies both, as one tra
     const ed = &app.ed;
     try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
     try core.file.writeBytes(gpa, "gamma.txt", "GAMMA\n");
-    ed.run("files");
+    ed.run("files.browse");
     ed.applyWindow();
     try goToRow(ed, vim_keys, "alpha.txt");
     const alpha = try primaryRowIndex(ed);
@@ -369,4 +369,311 @@ test "e2e/files: config.js — `yy` over two marked rows copies both, as one tra
     ed.press("p", "");
     var buf: [256]u8 = undefined;
     try t.expectEqualStrings("alpha.txt gamma.txt", try @import("ide_test.zig").rowsChanged(ed, "copy", &buf));
+}
+
+test "e2e/files: config.js — `V j y` over rows copies the range as one transfer, and `p` lands both" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
+    try core.file.writeBytes(gpa, "gamma.txt", "GAMMA\n");
+    ed.run("files.browse");
+    ed.applyWindow();
+    try goToRow(ed, vim_keys, "alpha.txt");
+
+    // Visual `y` is a transfer key, as `yy` is: the range is ONE copy.
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("y", "");
+    try t.expect(ed.head.scene_selection.anchor == null);
+    try t.expect(std.mem.indexOf(u8, ed.mode(), "visual") == null);
+    try goToRow(ed, vim_keys, "gamma.txt");
+    ed.press("p", "");
+    var buf: [256]u8 = undefined;
+    try t.expectEqualStrings("alpha.txt beta.txt", try @import("ide_test.zig").rowsChanged(ed, "copy", &buf));
+}
+
+test "e2e/files: config.js — `V j d` over rows cuts the range as one transfer: both flagged, and `p` lands both" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
+    try core.file.writeBytes(gpa, "gamma.txt", "GAMMA\n");
+    ed.run("files.browse");
+    ed.applyWindow();
+    try goToRow(ed, vim_keys, "alpha.txt");
+
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("d", "");
+    try t.expectEqual(@as(usize, 2), rowsFlaggedDeleted(ed));
+    try goToRow(ed, vim_keys, "gamma.txt");
+    ed.press("p", "");
+    var buf: [256]u8 = undefined;
+    try t.expectEqualStrings("alpha.txt beta.txt", try @import("ide_test.zig").rowsChanged(ed, "copy", &buf));
+}
+
+test "e2e/files: config.js — visual `y`/`d`/`p` in a text buffer are text: lines yanked, put and deleted" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "lines.txt", "one\ntwo\nthree");
+    ed.runStr("file.open", "lines.txt");
+    ed.applyWindow();
+
+    ed.chord("g g");
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("y", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.press("G", "");
+    ed.press("p", "");
+    // The lines land once, each on its own: the register holds them as `yy`
+    // does, without the last line break, which the put supplies.
+    try expectPrimaryText(ed, "one\ntwo\nthree\none\ntwo");
+
+    ed.chord("g g");
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("d", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    try expectPrimaryText(ed, "three\none\ntwo");
+
+    // Visual `P` is normal `P`'s put, as it was when visual fell through to it.
+    ed.press("v", "");
+    ed.press("P", "");
+    const visual_put = try primaryText(ed);
+    defer gpa.free(visual_put);
+    ed.press("Escape", "");
+    ed.press("u", "");
+    try expectPrimaryText(ed, "three\none\ntwo");
+    ed.press("P", "");
+    try expectPrimaryText(ed, visual_put);
+}
+
+test "e2e/files: config.js — `V` then `d` over two carets deletes both lines: linewise holds for every extent" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "carets.txt", "a1\nb1\nc1\na2\nb2\nc2\n");
+    ed.runStr("file.open", "carets.txt");
+    ed.applyWindow();
+    ed.chord("g g");
+    // A second caret on `a2`: `V j` grows a line range from each, and `d`
+    // maps over both, last first. Each run is linewise, not only the first
+    // to read the visual state.
+    try ed.buffers.active().textEditor().?.addSelection(gpa, .{ .anchor = 9, .head = 9 });
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("d", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    try expectPrimaryText(ed, "c1\nc2\n");
+}
+
+test "e2e/files: config.js — `V` with no motion covers the current line: `d`, `y`, `>`, `<` and `c` act on it" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "one-line.txt", "one\ntwo\nthree\n");
+    ed.runStr("file.open", "one-line.txt");
+    ed.applyWindow();
+
+    // `V d` on `two`, from mid-line: the line goes, as vim's does.
+    ed.chord("g g");
+    ed.press("j", "");
+    ed.press("l", "");
+    ed.press("V", "");
+    ed.press("d", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    try expectPrimaryText(ed, "one\nthree\n");
+
+    // `V y` yanks the line linewise: `p` puts it on a line of its own.
+    ed.chord("g g");
+    ed.press("V", "");
+    ed.press("y", "");
+    ed.press("p", "");
+    try expectPrimaryText(ed, "one\none\nthree\n");
+
+    // `V >` and `V <` shift the line.
+    ed.chord("g g");
+    ed.press("V", "");
+    ed.press("greater", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.applyWindow();
+    const shifted = try primaryText(ed);
+    defer gpa.free(shifted);
+    try t.expect(!std.mem.startsWith(u8, shifted, "one\n"));
+    try t.expect(std.mem.endsWith(u8, shifted, "one\none\nthree\n"[3..]));
+    ed.press("V", "");
+    ed.press("less", "");
+    try expectPrimaryText(ed, "one\none\nthree\n");
+
+    // `V c` replaces the line with what is typed.
+    ed.press("V", "");
+    ed.press("c", "");
+    try t.expectEqualStrings("insert", ed.mode());
+    ed.typeText("ONE\n");
+    ed.press("Escape", "");
+    try expectPrimaryText(ed, "ONE\none\nthree\n");
+}
+
+/// The mode chip the status line draws for the mode the editor is in.
+fn chip(ed: *Editor) []const u8 {
+    return if (ed.keymap.modeDisplay(ed.mode())) |d| d.name else "";
+}
+
+test "e2e/files: config.js — the visual chip names the kind the operators act on, however visual is entered or switched" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "kinds.txt", "one\ntwo\nthree\nfour\n");
+    ed.runStr("file.open", "kinds.txt");
+    ed.applyWindow();
+
+    // `V`: linewise, and says so.
+    ed.chord("g g");
+    ed.press("V", "");
+    try t.expectEqualStrings("V-LINE", chip(ed));
+    // `V` again leaves visual, as vim's does.
+    ed.press("V", "");
+    try t.expectEqualStrings("normal", ed.mode());
+
+    // `v` then `V`: the selection turns linewise where it stands — the chip
+    // says V-LINE and `d` takes both lines the charwise selection touched.
+    ed.chord("g g");
+    ed.press("l", "");
+    ed.press("v", "");
+    try t.expectEqualStrings("VISUAL", chip(ed));
+    ed.press("j", "");
+    ed.press("V", "");
+    try t.expectEqualStrings("visual", ed.mode());
+    try t.expectEqualStrings("V-LINE", chip(ed));
+    ed.press("d", "");
+    try expectPrimaryText(ed, "three\nfour\n");
+
+    // `V` then `v`: charwise again, the anchor kept — `v` again leaves.
+    ed.chord("g g");
+    ed.press("V", "");
+    ed.press("v", "");
+    try t.expectEqualStrings("visual", ed.mode());
+    try t.expectEqualStrings("VISUAL", chip(ed));
+    ed.press("v", "");
+    try t.expectEqualStrings("normal", ed.mode());
+
+    // `o` swaps the ends and stays linewise: still V-LINE, still both lines.
+    ed.chord("g g");
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("o", "");
+    try t.expectEqualStrings("visual", ed.mode());
+    try t.expectEqualStrings("V-LINE", chip(ed));
+    try expectPrimaryText(ed, "three\nfour\n"); // `o` opened no line
+    ed.press("k", ""); // the head is on the first line now: nothing above it
+    ed.press("y", "");
+    ed.press("j", ""); // onto `four`, the last line
+    ed.press("p", "");
+    try expectPrimaryText(ed, "three\nfour\nthree\nfour\n");
+
+    // `gv` brings the last visual selection back with its kind: after a `V`
+    // selection, V-LINE; after a `v` one, VISUAL.
+    ed.chord("g g");
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("Escape", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.chord("g v");
+    try t.expectEqualStrings("visual", ed.mode());
+    try t.expectEqualStrings("V-LINE", chip(ed));
+    ed.press("d", "");
+    try expectPrimaryText(ed, "three\nfour\n");
+    ed.chord("g g");
+    ed.press("v", "");
+    ed.press("l", "");
+    ed.press("Escape", "");
+    ed.chord("g v");
+    try t.expectEqualStrings("visual", ed.mode());
+    try t.expectEqualStrings("VISUAL", chip(ed));
+    ed.press("d", ""); // charwise: the line survives what it lost
+    const left = try primaryText(ed);
+    defer gpa.free(left);
+    try t.expect(std.mem.endsWith(u8, left, "ee\nfour\n") and left.len < "three\nfour\n".len);
+}
+
+test "e2e/files: config.js — `gv` is the entry's own last selection ('< '>), carried by edits and absent elsewhere" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "marks-a.txt", "top\none\ntwo\nthree\n");
+    try core.file.writeBytes(gpa, "marks-b.txt", "xxxx\nyyyy\nzzzz\n");
+    ed.runStr("file.open", "marks-a.txt");
+    ed.applyWindow();
+
+    // Lines `one` and `two`, linewise, then left.
+    ed.chord("g g");
+    ed.press("j", "");
+    ed.press("V", "");
+    ed.press("j", "");
+    ed.press("Escape", "");
+
+    // Another file has no last selection: `gv` there selects nothing.
+    ed.runStr("file.open", "marks-b.txt");
+    ed.applyWindow();
+    ed.chord("g v");
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.press("d", "");
+    ed.press("d", "");
+    try expectPrimaryText(ed, "yyyy\nzzzz\n");
+
+    // Back in the first, text typed above the selection carries it along.
+    ed.runStr("file.open", "marks-a.txt");
+    ed.applyWindow();
+    ed.chord("g g");
+    ed.press("A", "");
+    ed.typeText("XX");
+    ed.press("Escape", "");
+    ed.chord("g v");
+    try t.expectEqualStrings("visual", ed.mode());
+    try t.expectEqualStrings("V-LINE", chip(ed));
+    ed.press("d", "");
+    try expectPrimaryText(ed, "topXX\nthree\n");
+}
+
+test "e2e/files: config.js — `V d` over rows with no motion flags the focused row" {
+    const gpa = t.allocator;
+    var app: ConfigApp = undefined;
+    try app.init(gpa, "config.js");
+    defer app.deinit();
+    const ed = &app.ed;
+    try core.file.writeBytes(gpa, "beta.txt", "BETA\n");
+    ed.run("files.browse");
+    ed.applyWindow();
+    try goToRow(ed, vim_keys, "alpha.txt");
+
+    ed.press("V", "");
+    try t.expect(ed.head.scene_selection.primaryRows() != null);
+    ed.press("d", "");
+    try t.expectEqual(@as(usize, 1), rowsFlaggedDeleted(ed));
+    try t.expect(std.mem.indexOf(u8, ed.mode(), "visual") == null);
+}
+
+fn primaryText(ed: *Editor) ![]u8 {
+    ed.applyWindow();
+    const primary = ed.win_layout.primaryPane() orelse return error.NoPrimaryPane;
+    const entry = ed.buffers.get(primary.pane().buffer_id) orelse return error.NoEntry;
+    const text_editor = entry.textEditor() orelse return error.PrimaryShowsNoFile;
+    return text_editor.text().toOwnedSlice(ed.gpa);
 }

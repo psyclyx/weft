@@ -63,7 +63,7 @@ fn expectText(ed: *Editor, want: []const u8) !void {
 /// Open `name` holding `body` as the focused text entry, resting in helix.
 fn openFile(ed: *Editor, name: []const u8, body: []const u8) !void {
     try core.file.writeBytes(ed.gpa, name, body);
-    ed.runStr("open", name);
+    ed.runStr("file.open", name);
     try t.expectEqualStrings("helix-normal", ed.mode());
 }
 
@@ -89,6 +89,23 @@ fn expectSelections(ed: *Editor, want: []const [2]usize) !void {
         try t.expectEqual(w[0], e.anchor);
         try t.expectEqual(w[1], e.head);
     }
+}
+
+test "e2e/helix: `:` reads a short name and a label, and lists an ambiguous one — the same reading as vim's" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "h.txt", "x\n");
+    const names = h.ShortNames;
+    try names.bind(ed);
+    names.ex(ed, "frob-widget", "Return");
+    names.ex(ed, "Polish-The-Gadget", "Return");
+    try t.expectEqual(@as(usize, 2), names.ran[0]);
+    names.ex(ed, "twin", "Return");
+    try t.expectEqual(@as(usize, 0), names.ran[1] + names.ran[2]);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zzq.twin") != null);
 }
 
 test "e2e/helix: motions select, counts repeat them, and `v` extends" {
@@ -555,7 +572,7 @@ test "e2e/helix: the / register is shared — vim pastes the pattern helix searc
     // The same register, read by the other grammar: vim's `"/p`.
     try h.loadVimAlongside(ed);
     try t.expectEqualStrings("normal", ed.mode());
-    ed.run("vim-goto-top");
+    ed.run("vim.goto-top");
     ed.press("quotedbl", "");
     ed.press("slash", "");
     ed.press("p", ""); // weft's vim puts a fragment at the caret
@@ -670,6 +687,45 @@ test "e2e/helix: an operation flashes every selection, not just the primary" {
     try t.expectEqual(@as(usize, 2), set.len);
     try t.expectEqual(@as(usize, 0), set[0].start);
     try t.expectEqual(@as(usize, 6), set[1].start);
+}
+
+test "e2e/helix: y and d act on exactly what is highlighted — the caret's character is inside it, either way round" {
+    // Helix's selection covers the character its caret is on, as vim's
+    // visual does; here the stored range IS what is covered (`w` from `o`
+    // stores 0..4, "one "), and the caret draws on its last character. So
+    // what the view highlights and what y and d take are one range.
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    const body = "one two three\n";
+    try openFile(ed, "hl.txt", body);
+
+    for ([_][]const u8{ "w", "e", "ee", "wb", "eb", "2w", "v2e" }) |seq| {
+        keys(ed, "gg");
+        keys(ed, seq);
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        var snap = try core.TextSnapshot.of(textEd(ed), arena.allocator());
+        defer snap.release(ed.gpa);
+        // What the view draws: the highlight, and the caret in it.
+        const lit = snap.selectionRange(snap.primary) orelse return error.NothingHighlighted;
+        const caret = h.view.View.caretDrawOffset(&snap, snap.primary, ed.session.cursor_cfg.placeFor(ed.mode()));
+        errdefer std.debug.print("[e2e/helix] '{s}': lit {d}..{d}, caret {d}\n", .{ seq, lit.start, lit.end, caret });
+        try t.expect(caret >= lit.start and caret < lit.end);
+
+        keys(ed, "y");
+        const yanked = (ed.register.get(0) orelse return error.NothingYanked).slice();
+        try t.expectEqualStrings(body[lit.start..lit.end], yanked);
+        keys(ed, "d");
+        var want: [body.len]u8 = undefined;
+        const kept = try std.fmt.bufPrint(&want, "{s}{s}", .{ body[0..lit.start], body[lit.end..] });
+        try expectText(ed, kept);
+        keys(ed, "u");
+        try expectText(ed, body);
+        if (std.mem.eql(u8, ed.mode(), "helix-select")) ed.press("Escape", "");
+    }
 }
 
 test "e2e/helix: the caret draws on a forward selection's last character" {

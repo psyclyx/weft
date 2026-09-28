@@ -24,7 +24,7 @@
 //! part-way back drops the forward half (helix does the same). The first
 //! `back` from the tip records where you are, so `forward` can return there.
 //!
-//! **Not `navigate-back`.** `buffer-back` (a tool's `q`, `std.navigation.back`'s
+//! **Not `buffer.back`.** `buffer.back` (a tool's `q`, `std.navigation.back`'s
 //! core route) LEAVES the current entry for the one before it, always — that is
 //! what closing a tool means. The jumplist's previous position is often in the
 //! same entry (the search you ran in the git status buffer), which would make
@@ -51,6 +51,11 @@ pub const Jump = struct {
     /// was taken. An anchor is meaningless in any other document, so it is
     /// read only while a document with this id is held.
     doc: ?Document.Id = null,
+    /// Which in-memory instance of `doc` the anchor was taken in
+    /// (`Document.incarnation`). A document kept in the store and restored
+    /// comes back with the same id and a fresh anchor set, so the id alone
+    /// cannot say whether `anchor` still indexes anything.
+    incarnation: u64 = 0,
     anchor: ?Document.AnchorHandle = null,
     /// The position as last known: where the jump was taken, or where its
     /// anchor had moved to when its document died. What a freshly opened
@@ -114,7 +119,7 @@ fn resolve(buffers: *Buffers, jump: Jump) Resolved {
 /// document the anchor is in, else the offset it last knew, clamped.
 fn offsetIn(b: *Buffers.Buffer, jump: Jump) ?usize {
     const ed = b.textEditor() orelse return null;
-    if (jump.anchor) |a| if (jump.doc) |doc| if (ed.doc.id.eql(doc)) return ed.doc.anchorOffset(a);
+    if (jump.anchor) |a| if (jump.doc) |doc| if (ed.doc.id.eql(doc) and ed.doc.incarnation == jump.incarnation) return ed.doc.anchorOffset(a);
     const off = jump.offset orelse return null;
     return @min(off, ed.text().byteLen());
 }
@@ -123,6 +128,7 @@ fn release(buffers: *Buffers, gpa: Allocator, jump: Jump) void {
     gpa.free(jump.designation);
     const a = jump.anchor orelse return;
     const doc = buffers.documentById(jump.doc orelse return) orelse return;
+    if (doc.incarnation != jump.incarnation) return; // restored since: not its anchor set
     doc.removeAnchor(a);
 }
 
@@ -141,7 +147,7 @@ fn same(buffers: *Buffers, jump: Jump, at: Here) bool {
 pub fn settle(list: *JumpList, doc: *Document) void {
     for (list.items.items) |*j| {
         const in = j.doc orelse continue;
-        if (!in.eql(doc.id)) continue;
+        if (!in.eql(doc.id) or j.incarnation != doc.incarnation) continue;
         if (j.anchor) |a| j.offset = doc.anchorOffset(a);
         j.anchor = null;
         j.doc = null;
@@ -179,6 +185,7 @@ fn append(list: *JumpList, gpa: Allocator, buffers: *Buffers, at: Here) Allocato
     if (at.offset) |off| if (at.doc) |doc_id| if (buffers.documentById(doc_id)) |doc| {
         jump.anchor = try doc.addAnchor(gpa, @min(off, doc.text().byteLen()), .left);
         jump.doc = doc_id;
+        jump.incarnation = doc.incarnation;
     };
     errdefer if (jump.anchor) |a| buffers.documentById(jump.doc.?).?.removeAnchor(a);
     try list.items.append(gpa, jump);
@@ -191,7 +198,7 @@ fn append(list: *JumpList, gpa: Allocator, buffers: *Buffers, at: Here) Allocato
 /// Opens a designation whose entry is no longer live — the `open` command,
 /// for a caller that has a `Context`. A jump to a closed entry is refused
 /// (and stepped over) when there is no opener, or when opening fails: a
-/// process that has exited, a document released past the parked bound.
+/// process that has exited, a document released past the kept bounds (`Buffers.documents`).
 pub const Reopen = struct {
     context: ?*anyopaque = null,
     open: ?*const fn (context: ?*anyopaque, designation: []const u8) bool = null,
@@ -320,9 +327,9 @@ pub fn describe(list: *const JumpList, gpa: Allocator, buffers: *Buffers, out: *
 
 // ── Commands ─────────────────────────────────────────────────────────
 //
-// `jump-back`/`jump-forward` take an optional count, as an integer or as the
+// `jump.back`/`jump.forward` take an optional count, as an integer or as the
 // digits a grammar accumulated (`runStr`), so a count prefix reaches them from
-// either plane. `jump-push` is the door a grammar with no guest code (a
+// either plane. `jump.push` is the door a grammar with no guest code (a
 // config's bound key) reaches `wl_jump_push` through.
 
 const command = @import("command.zig");
@@ -343,8 +350,7 @@ pub fn countArg(args: []const Value, i: usize) error{TypeMismatch}!usize {
 }
 
 fn say(ctx: *Context, msg: []const u8) void {
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    ctx.head.echo.say(ctx.gpa, msg) catch {};
 }
 
 /// Reopen through the ordinary `open`: whatever it does for a designation
@@ -356,7 +362,7 @@ pub fn reopenWith(ctx: *Context) Reopen {
 
 fn openThroughCommand(raw: ?*anyopaque, text: []const u8) bool {
     const ctx: *Context = @ptrCast(@alignCast(raw.?));
-    const result = command.run(ctx.commands, ctx, "open", &.{.{ .string = text }}) catch return false;
+    const result = command.run(ctx.commands, ctx, "file.open", &.{.{ .string = text }}) catch return false;
     return switch (result) {
         .string => false, // a refusal, said in words
         else => true,
@@ -382,7 +388,7 @@ fn cJumpPush(ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Val
     return .nil;
 }
 
-/// `jumplist-pick`: every entry, newest first, through the head's picker.
+/// `jump.pick`: every entry, newest first, through the head's picker.
 /// A row's key is its list index, so accepting lands on exactly that entry
 /// even when two rows read alike.
 fn cJumplistPick(ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value {
@@ -441,13 +447,52 @@ fn pickCleanup(data: ?*anyopaque, gpa: Allocator) void {
     gpa.destroy(keys);
 }
 
+/// `jump.line [n]`: the caret to the start of line `n` (1-based, held to
+/// the last line), leaving a jump where it was; with no `n`, ask for one.
+/// Core's, so every grammar has it — it is what a click on the status
+/// line's position runs.
+fn cJumpLine(ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value {
+    _ = data;
+    const ed = (ctx.entry() orelse return .nil).textEditor() orelse {
+        say(ctx, "go to line: this entry holds no text");
+        return .nil;
+    };
+    if (args.len > 0 and args[0] != .nil) {
+        const n = countArg(args, 0) catch {
+            say(ctx, "go to line: a line number");
+            return .nil;
+        };
+        try goToLine(ctx, ed, n);
+        return .nil;
+    }
+    try ctx.head.pick.openWith(ctx, "go to line", &.{}, .{ .handler = lineAccept }, .{ .allow_free_text = true });
+    return .nil;
+}
+
+fn lineAccept(ctx: *Context, data: ?*anyopaque, outcome: pick_types.Outcome) anyerror!void {
+    _ = data;
+    const text = std.mem.trim(u8, outcome.text() orelse return, " \t");
+    const n = std.fmt.parseInt(usize, text, 10) catch return say(ctx, "go to line: a line number");
+    const ed = (ctx.entry() orelse return).textEditor() orelse return;
+    try goToLine(ctx, ed, n);
+}
+
+fn goToLine(ctx: *Context, ed: *@import("Editor.zig"), n: usize) !void {
+    try pushHere(&ctx.head.jumps, ctx.gpa, ctx.buffers);
+    const rope = ed.text();
+    const row = @min(n -| 1, rope.lineCount() -| 1);
+    ed.clearSelection();
+    ed.placeCursor(rope.lineRange(row).start);
+}
+
 const count_arg: []const command.ArgSpec = &.{.{ .name = "count", .type = .nil, .optional = true }};
 
 const table = [_]command.Command{
-    .{ .name = "jump-back", .summary = "Go back along the jumplist (C-o).", .args = count_arg, .handler = travelCmd(.back) },
-    .{ .name = "jump-forward", .summary = "Go forward along the jumplist (C-i).", .args = count_arg, .handler = travelCmd(.forward) },
-    .{ .name = "jump-push", .summary = "Remember the caret as a jump.", .args = &.{}, .handler = cJumpPush },
-    .{ .name = "jumplist-pick", .summary = "Pick a position from the jumplist.", .args = &.{}, .handler = cJumplistPick },
+    .{ .name = "jump.back", .summary = "Go back to where you were before the last jump.", .args = count_arg, .handler = travelCmd(.back), .meta = .{ .label = "Back", .icon = "arrow-left" } },
+    .{ .name = "jump.forward", .summary = "Go forward again along the jumps you went back through.", .args = count_arg, .handler = travelCmd(.forward), .meta = .{ .label = "Forward", .icon = "arrow-right" } },
+    .{ .name = "jump.push", .summary = "Remember the caret's position as a jump.", .args = &.{}, .handler = cJumpPush, .meta = .{ .label = "Remember Position" } },
+    .{ .name = "jump.pick", .summary = "Pick a position from the jumplist and go there.", .args = &.{}, .handler = cJumplistPick, .meta = .{ .label = "Jump to Position", .icon = "history", .prompts = true } },
+    .{ .name = "jump.line", .summary = "Go to a line by its number.", .args = &.{.{ .name = "line", .type = .nil, .optional = true }}, .handler = cJumpLine, .meta = .{ .label = "Go to Line", .prompts = true } },
 };
 
 pub fn install(gpa: Allocator, commands: *command.Commands) !void {

@@ -13,6 +13,7 @@ const view_mod = @import("view.zig");
 const region = @import("region.zig");
 const window_layout = @import("window_layout.zig");
 const skia_mod = @import("weft_skia");
+const icons = @import("icons.zig");
 
 /// `view.build` over `editor` as it is now: the snapshot a frame takes
 /// (`core.TextSnapshot`), released once the pane is built.
@@ -175,6 +176,162 @@ test "harness: renderer-neutral paths reach the raster backend" {
     try t.expect(hasContent(pixels, 80, 15, 15, 70, 70));
 }
 
+/// The RGB bytes at (x, y).
+fn pixelAt(pixels: []const u8, w: u32, x: u32, y: u32) [3]u8 {
+    const p = (@as(usize, y) * w + x) * 4;
+    return pixels[p..][0..3].*;
+}
+
+test "harness: a rounded rect fills its middle and leaves its corners to the background" {
+    const gpa = t.allocator;
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    const red: scene.Color = .{ 1, 0, 0, 1 };
+    var items = [_]scene.DrawItem{
+        .{ .rrect = .{ .x = 10, .y = 10, .w = 60, .h = 40, .radius = 12, .color = red } },
+        // An outline: its middle stays background, its edge is drawn.
+        .{ .rrect = .{ .x = 10, .y = 60, .w = 60, .h = 16, .radius = 8, .color = red, .stroke_width = 2 } },
+    };
+    const pixels = try rasterize(gpa, &view, &.{&items}, 80, 80);
+    defer gpa.free(pixels);
+    try t.expectEqual([3]u8{ 255, 0, 0 }, pixelAt(pixels, 80, 40, 30)); // centre: fill
+    try t.expectEqual(bg[0..3].*, pixelAt(pixels, 80, 10, 10)); // corner: rounded away
+    try t.expectEqual(bg[0..3].*, pixelAt(pixels, 80, 69, 49));
+    try t.expectEqual([3]u8{ 255, 0, 0 }, pixelAt(pixels, 80, 10, 30)); // a straight edge is not
+    try t.expectEqual(bg[0..3].*, pixelAt(pixels, 80, 40, 68)); // the outline's hollow middle
+    try t.expect(hasContent(pixels, 80, 30, 59, 50, 62)); // ... and its top edge
+}
+
+test "harness: a blurred rect spreads past its box, fading" {
+    const gpa = t.allocator;
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    var items = [_]scene.DrawItem{.{ .rrect = .{ .x = 20, .y = 20, .w = 40, .h = 40, .radius = 6, .color = .{ 0, 0, 0, 1 }, .blur = 4 } }};
+    const pixels = try rasterize(gpa, &view, &.{&items}, 80, 80);
+    defer gpa.free(pixels);
+    // Outside the box, a shadow: darker than the background, lighter than
+    // the box's own middle.
+    const halo = pixelAt(pixels, 80, 17, 40);
+    try t.expect(halo[0] < bg[0]);
+    try t.expect(pixelAt(pixels, 80, 40, 40)[0] < halo[0]);
+}
+
+test "harness: a clip keeps glyphs inside it, and lifts for what follows" {
+    const gpa = t.allocator;
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    const glyph_m: u32 = try view.face_set.monoFont().glyphIndex('M');
+    const white: scene.Color = .{ 1, 1, 1, 1 };
+    var items = [_]scene.DrawItem{
+        .{ .clip = .{ .x = 0, .y = 0, .w = 20, .h = 40 } },
+        .{ .glyph = .{ .font_id = 1, .glyph_id = glyph_m, .x = 4, .y = 20, .size = 16, .color = white } },
+        .{ .glyph = .{ .font_id = 1, .glyph_id = glyph_m, .x = 40, .y = 20, .size = 16, .color = white } },
+        .{ .clip = null },
+        .{ .glyph = .{ .font_id = 1, .glyph_id = glyph_m, .x = 60, .y = 20, .size = 16, .color = white } },
+    };
+    const pixels = try rasterize(gpa, &view, &.{&items}, 80, 40);
+    defer gpa.free(pixels);
+    try t.expect(hasContent(pixels, 80, 0, 0, 20, 40)); // inside the clip
+    try t.expect(!hasContent(pixels, 80, 36, 0, 56, 40)); // clipped away
+    try t.expect(hasContent(pixels, 80, 58, 0, 80, 40)); // after the lift
+}
+
+test "harness: an icon draws as a tinted path, closed subpaths included" {
+    const gpa = t.allocator;
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    var set = try icons.Set.parse(gpa, "lucide", &icons.lucide);
+    defer set.deinit();
+    const circle = set.get("circle").?;
+    var items = [_]scene.DrawItem{.{ .path = .{
+        .commands = circle.commands,
+        .x = 8,
+        .y = 8,
+        .scale = 48.0 / circle.size,
+        .stroke_width = circle.stroke_width,
+        .color = .{ 0, 1, 0, 1 },
+        .cap = .round,
+        .join = .round,
+    } }};
+    const pixels = try rasterize(gpa, &view, &.{&items}, 64, 64);
+    defer gpa.free(pixels);
+    // The ring is drawn in the tint; its middle is not.
+    const ring = pixelAt(pixels, 64, 32, 12);
+    try t.expect(ring[1] > 150 and ring[0] < 100);
+    try t.expectEqual(bg[0..3].*, pixelAt(pixels, 64, 32, 32));
+}
+
+test "harness: tabs are laid out by each chrome style, and hover lights a widget tab's close glyph" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    var ed = try makeEditor(gpa, pool, "hello tabs\n");
+    defer ed.deinit(gpa);
+    const w: u32 = 640;
+    const h: u32 = 200;
+    const projection = scene.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
+    const w2p = scene.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
+    const tabs = [_]view_mod.Tab{
+        .{ .name = "a.zig", .active = true, .id = 1 },
+        .{ .name = "b.md", .active = false, .id = 2 },
+        .{ .name = "c.txt", .active = false, .id = 3 },
+    };
+
+    const Frame = struct {
+        fn draw(g: std.mem.Allocator, v: *view_mod.View, e: *const core.Editor, hud: view_mod.Hud, fw: u32, fh: u32, m: scene.Transform2D, hits: *[6]view_mod.ChromeHit) ![]u8 {
+            var arena = std.heap.ArenaAllocator.init(g);
+            defer arena.deinit();
+            v.resetFrame();
+            var top: usize = 0;
+            var built = try buildOf(g, v, arena.allocator(), e, hud, &top, fullFrame(fw, fh), .{}, m);
+            defer built.deinit(g);
+            var n: usize = 0;
+            for (v.build_chrome) |c| if (c.kind == .tab) {
+                hits[n] = c;
+                n += 1;
+            };
+            try t.expectEqual(@as(usize, 6), n);
+            return rasterize(g, v, &.{built.items}, fw, fh);
+        }
+    };
+
+    for ([_]view_mod.chrome.Style{ .text, .text_icons, .widget }) |style| {
+        view.chrome = style;
+        var hits: [6]view_mod.ChromeHit = undefined;
+        const pixels = try Frame.draw(gpa, &view, &ed, .{ .mode = "normal", .tabs = &tabs }, w, h, w2p, &hits);
+        defer gpa.free(pixels);
+        // Body then close, tab by tab, left to right, never overlapping, and
+        // every one of them drawn.
+        for (hits, 0..) |c, i| {
+            try t.expectEqual(i / 2, c.index);
+            try t.expectEqual(if (i % 2 == 0) view_mod.TabPart.body else view_mod.TabPart.close, c.part);
+            if (i > 0) try t.expect(c.rect.x >= hits[i - 1].rect.x + hits[i - 1].rect.w - 0.01);
+            if (c.part == .body) try t.expect(hasContent(pixels, w, @intFromFloat(c.rect.x), @intFromFloat(c.rect.y), @intFromFloat(c.rect.x + c.rect.w), @intFromFloat(c.rect.y + c.rect.h)));
+        }
+        if (style != .widget) continue;
+        // The pointer on the second tab's close glyph: the frame input says
+        // so, and the glyph appears (under `widget` an inactive tab shows none
+        // until hovered); the first tab is untouched.
+        const close = hits[3].rect;
+        var lit: [6]view_mod.ChromeHit = undefined;
+        const hovered = try Frame.draw(gpa, &view, &ed, .{ .mode = "normal", .tabs = &tabs, .pointer = .{
+            .at = .{ close.x + close.w / 2, close.y + close.h / 2 },
+            .chrome = .{ .kind = .tab, .index = 1, .part = .close },
+        } }, w, h, w2p, &lit);
+        defer gpa.free(hovered);
+        try t.expect(!hasContent(pixels, w, @intFromFloat(close.x), @intFromFloat(close.y), @intFromFloat(close.x + close.w), @intFromFloat(close.y + close.h)));
+        try t.expect(hasContent(hovered, w, @intFromFloat(close.x), @intFromFloat(close.y), @intFromFloat(close.x + close.w), @intFromFloat(close.y + close.h)));
+        const first = hits[0].rect;
+        for (@as(usize, @intFromFloat(first.y))..@as(usize, @intFromFloat(first.y + first.h))) |row| {
+            const a = (row * w + @as(usize, @intFromFloat(first.x))) * 4;
+            const b = a + @as(usize, @intFromFloat(first.w)) * 4;
+            try t.expectEqualSlices(u8, pixels[a..b], hovered[a..b]);
+        }
+    }
+}
+
 test "harness: a single pane renders text into the body" {
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
@@ -195,6 +352,46 @@ test "harness: a single pane renders text into the body" {
     writePpm(gpa, ".zig-cache/tmp/weft-harness-single.ppm", pixels, w, h) catch {};
 }
 
+test "harness: the status row spans its pane edge to edge, flush with the bottom — no margin, no leftover cell" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    var ed = try makeEditor(gpa, pool, "flush\n");
+    defer ed.deinit(gpa);
+
+    // A pane that does not start at the window's corner, and whose width is
+    // no whole number of cells: the row must still cover every pixel of it.
+    const w: u32 = 400;
+    const h: u32 = 200;
+    const pane: region.Rect = .{ .x = 37, .y = 11, .w = 301.5, .h = 173 };
+    const projection = scene.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
+    const w2p = scene.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    view.resetFrame();
+    var tr: usize = 0;
+    var built = try buildOf(gpa, &view, arena.allocator(), &ed, .{ .mode = "normal" }, &tr, pane, .{}, w2p);
+    defer built.deinit(gpa);
+    const pixels = try rasterize(gpa, &view, &.{built.items}, w, h);
+    defer gpa.free(pixels);
+    writePpm(gpa, ".zig-cache/tmp/weft-harness-status-flush.ppm", pixels, w, h) catch {};
+
+    const bottom: u32 = @intFromFloat(pane.y + pane.h - 1);
+    const top: u32 = @intFromFloat(@ceil(pane.y + pane.h - view.line_h));
+    // Its first and last pixel columns, on its first and last pixel rows.
+    const left: u32 = @intFromFloat(pane.x);
+    const right: u32 = @intFromFloat(@floor(pane.x + pane.w - 1));
+    for ([_]u32{ left, right }) |x| for ([_]u32{ top, bottom }) |y| {
+        try t.expect(hasContent(pixels, w, x, y, x + 1, y + 1));
+    };
+    // And nothing past the pane on either side: the row is the pane's, not
+    // the window's.
+    try t.expect(!hasContent(pixels, w, left - 1, top, left, bottom + 1));
+    try t.expect(!hasContent(pixels, w, right + 2, top, right + 3, bottom + 1));
+}
+
 test "harness: which-key panel does not collide with the status line" {
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
@@ -206,9 +403,9 @@ test "harness: which-key panel does not collide with the status line" {
     defer ed.deinit(gpa);
 
     const hints = [_]core.Keymap.Binding{
-        .{ .key = "f", .command = "find-file" },
+        .{ .key = "f", .command = "files.find" },
         .{ .key = "c", .command = "collab" },
-        .{ .key = "space", .command = "palette" },
+        .{ .key = "space", .command = "palette.open" },
     };
     const w: u32 = 320;
     const h: u32 = 240;

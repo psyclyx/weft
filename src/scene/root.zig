@@ -2,7 +2,8 @@
 //!
 //! This is the vocabulary produced by the view and consumed by a renderer.
 //! It deliberately contains no atlas key, GPU handle, surface, or platform
-//! policy: a frame is a sequence of explicit filled rectangles and glyphs.
+//! policy: a frame is a sequence of explicit rectangles, glyphs and paths —
+//! plus, for core chrome only, rounded rectangles and clips.
 //!
 //! Colors in this module are straight-alpha linear-light RGBA. The view may
 //! author colors in sRGB and convert them once at its boundary; a renderer
@@ -198,7 +199,9 @@ pub const GlyphItem = struct {
     color: Color,
 };
 
-pub const PathVerb = enum(u32) { move, line, cubic };
+/// `close` ends the current subpath with a line back to its start (an
+/// icon's closed outline joins cleanly instead of butting two stroke ends).
+pub const PathVerb = enum(u32) { move, line, cubic, close };
 pub const StrokeCap = enum(u32) { butt, round, square };
 pub const StrokeJoin = enum(u32) { miter, round, bevel };
 
@@ -221,11 +224,46 @@ pub const PathItem = struct {
     join: StrokeJoin = .miter,
 };
 
+/// A rounded rectangle: core chrome's pill, tab, menu and shadow shape
+/// (doc/presentation.md D2). One uniform corner radius, clamped by the
+/// renderer to half the shorter side. `stroke_width == 0` fills the shape;
+/// a positive width outlines it instead, centred on the edge — a filled and
+/// outlined box is two items. `blur` softens the edge by a Gaussian of that
+/// sigma, which is what a drop shadow is.
+pub const RRectItem = struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    w: f32 = 0,
+    h: f32 = 0,
+    radius: f32 = 0,
+    color: Color = .{ 1, 1, 1, 1 },
+    stroke_width: f32 = 0,
+    blur: f32 = 0,
+};
+
+/// An axis-aligned clip in pixel space.
+pub const ClipRect = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+};
+
 /// The complete renderer-neutral scene vocabulary currently needed by the UI.
+///
+/// `clip` REPLACES the current clip for the items after it — a rect clips
+/// them to it, null lifts it. Clips do not nest: the view emits one around a
+/// run that must not spill (a tab's label), not a stack. A renderer starts
+/// every item list unclipped and leaves none behind it.
+///
+/// These are for core's own chrome only; no plugin door emits them
+/// (doc/presentation.md D2).
 pub const DrawItem = union(enum) {
     rect: RectItem,
     glyph: GlyphItem,
     path: PathItem,
+    rrect: RRectItem,
+    clip: ?ClipRect,
 };
 
 /// One channel, sRGB-encoded → linear light.

@@ -6,7 +6,7 @@
 //! Declares NO capabilities. It used to hold `fs_read` for one reason — a
 //! VCS-marker climb up from the active buffer — and that climb was a second
 //! detector of a fact the host already establishes when a file is opened;
-//! `project-root` reads it through `weft.placeRoot()` now (`doc/place.md`
+//! `project.show-root` reads it through `weft.placeRoot()` now (`doc/place.md`
 //! §4.2). What remains is pure list arithmetic over the kv store.
 
 const std = @import("std");
@@ -36,13 +36,73 @@ var list_buf: std.ArrayList(u8) = .empty;
 // (`doc/place.md` §4.2). Two detectors of one fact were one too many, and the
 // second cost a grant over the whole filesystem.
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "project-remember", .arity = .whole, .call = remember, .summary = "remember this project so it shows up in recents" },
-    .{ .name = "project-recent", .arity = .whole, .call = recent, .summary = "open a project you were in recently" },
-    .{ .name = "project-recent-roots", .arity = .whole, .call = recentRoots, .summary = "list recently visited project roots" },
-    .{ .name = "project-root", .arity = .whole, .call = projectRoot, .summary = "say where this project's root is" },
+    // Plumbing and diagnostics: in the palette, not in a menu — a
+    // conventional File menu has no "remember" or "where is the root" row.
+    .{ .name = "project.remember", .arity = .whole, .call = remember, .summary = "Remember this project so it shows up in recents.", .label = "Remember Project" },
+    // The list as text, for the dashboard's section and a picker to read;
+    // a person chooses from `project.open-recent`.
+    .{ .name = "project.recent", .arity = .whole, .call = recent, .summary = "List the files you visited recently.", .internal = true },
+    .{ .name = "project.recent-roots", .arity = .whole, .call = recentRoots, .summary = "List recently visited project roots.", .internal = true },
+    .{ .name = "project.show-root", .arity = .whole, .call = projectRoot, .summary = "Say where this project's root is.", .label = "Show Project Root" },
+    .{ .name = "project.open-recent", .arity = .whole, .call = openRecent, .summary = "Choose a file you visited recently and open it.", .label = "Open Recent", .prompts = true, .menu = "File", .group = "open", .order = 6, .icon = "history" },
 };
 comptime {
-    weft.plugin(&cmds, .{}).exportAll();
+    weft.plugin(&cmds, .{ .pick = onPickAccept }).exportAll();
+}
+
+const pick_recent = 0;
+
+/// `project.open-recent`: the recent files, most recent first, as a picker —
+/// File › Open Recent….
+fn openRecent() void {
+    const list = weft.kvGet(recent_key) orelse "";
+    if (list.len == 0) return weft.echo("no recent files");
+    const owned = weft.allocator.dupe(u8, list) catch return;
+    defer weft.allocator.free(owned);
+    weft.pickBegin("recent", pick_recent);
+    weft.pickCategory("file");
+    var lines = std.mem.splitScalar(u8, owned, '\n');
+    while (lines.next()) |path| if (path.len > 0) weft.pickAdd(path, "");
+    weft.pickEnd();
+}
+
+fn onPickAccept(pick_id: u32) void {
+    if (pick_id != pick_recent) return;
+    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
+    defer outcome.deinit(weft.allocator);
+    switch (outcome) {
+        .candidate => |c| {
+            weft.runStr("file.open", c.text);
+            // A recent that no longer opens (its host is gone, its peer no
+            // longer shares it) leaves the list rather than being offered
+            // again: `open` said why, and what it opened is not it.
+            if (!isActive(c.text)) forget(c.text);
+        },
+        .input, .cancelled => {},
+    }
+}
+
+/// Whether the entry now active is the one `name` (a recent) names.
+fn isActive(name: []const u8) bool {
+    if (weft.path()) |p| if (std.mem.eql(u8, p, name)) return true;
+    if (weft.designation()) |d| if (std.mem.eql(u8, d, name)) return true;
+    return false;
+}
+
+/// Drop `name` from the recent list.
+fn forget(name: []const u8) void {
+    const alloc = weft.allocator;
+    const existing = alloc.dupe(u8, weft.kvGet(recent_key) orelse "") catch return;
+    defer alloc.free(existing);
+    var kept: std.ArrayList(u8) = .empty;
+    defer kept.deinit(alloc);
+    var lines = std.mem.splitScalar(u8, existing, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0 or std.mem.eql(u8, line, name)) continue;
+        if (kept.items.len > 0) kept.append(alloc, '\n') catch return;
+        kept.appendSlice(alloc, line) catch return;
+    }
+    weft.kvPut(recent_key, kept.items);
 }
 
 /// Every buffer focus records the file. The root no longer needs recording:
@@ -54,15 +114,20 @@ fn on_activate() callconv(.c) void {
     _ = recordActive();
 }
 
-/// Push the active buffer's path onto the recent list (front, deduped, capped).
-/// Returns the new count, or -1 when the buffer has no path (a tool buffer).
+/// Push the active buffer's file onto the recent list (front, deduped,
+/// capped), named so `file.open` reopens the same file: a local file by its
+/// absolute path (`open`'s sugar for `weft://here/file/…`), a remote one by
+/// its designation — its path alone would reopen whatever is at that path
+/// HERE. Returns the new count, or -1 when the buffer is no file (a tool
+/// buffer, a scratch).
 fn recordActive() i32 {
     const alloc = weft.allocator;
     // Copy both borrowed reads out before the next call reuses the shim
     // scratch. Owned, not copied into a fixed field: a truncated path names a
     // DIFFERENT file, and a recents list that quietly offers you one is worse
     // than a recents list that is short.
-    const path = alloc.dupe(u8, weft.path() orelse return -1) catch return -1;
+    const name = weft.path() orelse remoteFile(weft.designation() orelse return -1) orelse return -1;
+    const path = alloc.dupe(u8, name) catch return -1;
     defer alloc.free(path);
     const root = alloc.dupe(u8, weft.placeRoot()) catch return -1;
     defer alloc.free(root);
@@ -79,7 +144,17 @@ fn recordActive() i32 {
     return @intCast(countLines(list));
 }
 
-/// The `project-remember` command: record + report the count.
+/// `designation` when it names a file (`weft://<authority>/file/…`), else
+/// null — a document or a projection is not a recent file.
+fn remoteFile(designation: []const u8) ?[]const u8 {
+    const scheme = "weft://";
+    if (!std.mem.startsWith(u8, designation, scheme)) return null;
+    const rest = designation[scheme.len..];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+    return if (std.mem.startsWith(u8, rest[slash..], "/file/")) designation else null;
+}
+
+/// The `project.remember` command: record + report the count.
 fn remember() void {
     weft.setResultInt(recordActive());
 }
@@ -93,7 +168,7 @@ fn recentRoots() void {
     weft.setResultStr(weft.kvGet(recent_roots_key) orelse "");
 }
 
-/// `project-root` command: the project this command is in, absolute — which is
+/// `project.show-root` command: the project this command is in, absolute — which is
 /// WHERE it dispatches (`doc/place.md`). One door, no detection.
 ///
 /// This used to be a climb: copy the active buffer's path, walk up probing

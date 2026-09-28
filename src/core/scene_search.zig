@@ -113,14 +113,14 @@ test "semantic view edits: search uses scene identity without a text document" {
     try t.expect(env.buffers.active().textEditor() == null);
     const effect = try @import("action_here.zig").invokeHere(&env.ctx, model.action.standard.search, 0);
     try t.expect(effect.? == .handled);
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "beta" }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "beta" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expectEqual(@as(model.scene.NodeId, @enumFromInt(3)), env.head.scene_selection.path().?.leaf().?);
 
     // Replacement invalidates the candidate snapshot even if its node survives.
     try t.expect(try open(&env.ctx));
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "alpha" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "alpha" }});
     try services.replaceView(gpa, owner, view, 2, scene);
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expectEqual(@as(model.scene.NodeId, @enumFromInt(3)), env.head.scene_selection.path().?.leaf().?);
 }

@@ -13,6 +13,9 @@ const region = @import("../region.zig");
 const view = @import("../view.zig");
 const data = @import("semantic_data.zig");
 const popup = @import("popup.zig");
+const chrome_mod = @import("chrome.zig");
+const menu_mod = @import("menu.zig");
+const status_layout = @import("status_layout.zig");
 
 const View = view.View;
 const Run = view.Run;
@@ -38,6 +41,43 @@ pub const Span = struct {
     compact_below: u16 = 0,
     hide_below: u16 = 0,
     selection: ?struct { anchor: usize, caret: usize } = null,
+    /// The chrome role this span is drawn as: an action node is a button
+    /// (a menubar's title when its role says `menubar-item`), a node whose
+    /// role is `separator` a divider. Null: plain text, as every label and
+    /// field is. A menu's own rows are the menu widget's (`menu.zig`).
+    chrome: ?chrome_mod.Role = null,
+    /// A menubar title's underlined letter (its `mnemonic` fact), and
+    /// whether its menu is open (`lit`).
+    mnemonic: ?usize = null,
+    lit: bool = false,
+    /// The node's `icon` fact — an icon name in the theme's set.
+    icon: ?[]const u8 = null,
+    /// Why the action cannot run (its `reason` fact): the button reads
+    /// disabled and its tooltip says why.
+    reason: []const u8 = "",
+    /// The action's `name` fact, which a key hint is looked up by.
+    name: []const u8 = "",
+    /// Its column is where nesting put it (the scene declared none), and it
+    /// starts its row.
+    natural: bool = false,
+
+    /// Cells the span occupies on the row before its style is known — a
+    /// button's label and a cell of padding either side. A style that draws
+    /// an icon widens it at draw time (`chrome.buttonCols`).
+    fn cells(self: Span) usize {
+        return visualWidth(self.text) + @as(usize, if (self.chrome == .button or self.chrome == .menu_title) 2 else 0);
+    }
+
+    /// Cells under `v`'s chrome style.
+    fn cellsIn(self: Span, v: *const View) usize {
+        if (self.chrome == .button) return chrome_mod.buttonCols(v, self.content());
+        if (self.chrome == .menu_title) return chrome_mod.titleCols(self.content());
+        return visualWidth(self.text);
+    }
+
+    fn content(self: Span) chrome_mod.Content {
+        return .{ .label = self.text, .icon = self.icon, .mnemonic = self.mnemonic };
+    }
 };
 
 pub const Row = struct {
@@ -48,6 +88,11 @@ pub const Row = struct {
     /// Holds the node the view reveals: marked on its own, whatever the
     /// selection is.
     revealed: bool = false,
+    /// Cells of its columns that are indentation — its depth in a tree. A
+    /// producer that places its own columns says so with the row's `indent`
+    /// fact; a row laid out by nesting is indented by its first span's
+    /// column. What a narrow pane may take back (`indentScale`).
+    indent: u16 = 0,
 };
 
 pub const Hit = struct {
@@ -78,7 +123,7 @@ const Builder = struct {
                 .horizontal => {
                     var spans: std.ArrayList(Span) = .empty;
                     for (container.children) |*child| try self.appendNode(child, depth + 1, &spans);
-                    if (spans.items.len != 0) try self.finishRow(&spans);
+                    if (spans.items.len != 0) try self.finishRow(&spans, numberFact(node, "indent"));
                 },
                 .vertical, .overlay => for (container.children) |*child|
                     try self.appendNode(child, depth + 1, null),
@@ -90,14 +135,14 @@ const Builder = struct {
                 } else {
                     var spans: std.ArrayList(Span) = .empty;
                     try spans.append(self.arena, try self.spanFor(node, depth, spans.items));
-                    try self.finishRow(&spans);
+                    try self.finishRow(&spans, numberFact(node, "indent"));
                 }
                 self.span_count += 1;
             },
         }
     }
 
-    fn finishRow(self: *Builder, spans: *std.ArrayList(Span)) Allocator.Error!void {
+    fn finishRow(self: *Builder, spans: *std.ArrayList(Span), indent: ?u16) Allocator.Error!void {
         const owned = try spans.toOwnedSlice(self.arena);
         var focused = false;
         if (self.document.focused) |wanted| for (owned) |span| {
@@ -112,18 +157,18 @@ const Builder = struct {
             if (std.mem.indexOfScalar(semantic.scene.NodeId, self.document.selected, span.node) != null) selected = true;
             if (self.document.revealed == span.node) revealed = true;
         }
-        try self.rows.append(self.arena, .{ .spans = owned, .focused = focused, .selected = selected, .revealed = revealed });
+        // A row laid out by nesting is indented by where nesting put it.
+        const natural = if (owned[0].natural) owned[0].column else 0;
+        try self.rows.append(self.arena, .{ .spans = owned, .focused = focused, .selected = selected, .revealed = revealed, .indent = indent orelse natural });
     }
 
     fn spanFor(self: *Builder, node: *const semantic.scene.Node, depth: usize, preceding: []const Span) Allocator.Error!Span {
         var selection: ?struct { anchor: usize, caret: usize } = null;
         const text = switch (node.content) {
             .label => |label| try displayBytes(self.arena, label),
-            .action => |action| blk: {
-                const label = if (action.label.len != 0) action.label else action.action;
-                const decorated = try std.fmt.allocPrint(self.arena, "[{s}]", .{label});
-                break :blk try displayBytes(self.arena, decorated);
-            },
+            // The label alone: that it is a button is the chrome style's to
+            // show, not brackets in its text.
+            .action => |action| try displayBytes(self.arena, if (action.label.len != 0) action.label else action.action),
             .field => |field| blk: {
                 const provider = self.document.fields.get(field.ref) orelse
                     break :blk try displayBytes(self.arena, field.placeholder);
@@ -131,11 +176,15 @@ const Builder = struct {
                     break :blk try self.arena.dupe(u8, "<field unavailable>");
                 defer snapshot.deinit();
                 const bytes = snapshot.value.bytes;
-                if (self.document.focused != node.id) {
+                // Only the field being EDITED shows its text raw and wears a
+                // caret; a field that is merely on the focused row reads like
+                // every other row (doc/chrome.md §5.2).
+                const edited = if (self.document.editing) |ref| ref.eql(field.ref) else false;
+                if (!edited) {
                     for (node.facts) |fact| if (std.mem.eql(u8, fact.name, "display"))
                         break :blk try displayBytes(self.arena, fact.value);
                 }
-                if (self.document.active and self.document.focused == node.id) {
+                if (self.document.active and edited) {
                     const anchor = try displayBytes(self.arena, bytes[0..@min(bytes.len, snapshot.value.selection.anchor)]);
                     const caret = try displayBytes(self.arena, bytes[0..@min(bytes.len, snapshot.value.selection.caret)]);
                     selection = .{ .anchor = visualWidth(anchor), .caret = visualWidth(caret) };
@@ -151,12 +200,24 @@ const Builder = struct {
             depth * 2
         else blk: {
             const prior = preceding[preceding.len - 1];
-            break :blk @as(usize, prior.column) + visualWidth(prior.text) + 2;
+            break :blk @as(usize, prior.column) + prior.cells() + 2;
+        };
+        const role: ?chrome_mod.Role = switch (node.content) {
+            .action => if (std.mem.eql(u8, leafOf(node.role), menu_mod.role_title)) .menu_title else .button,
+            .label => if (std.mem.eql(u8, leafOf(node.role), "separator")) .separator else null,
+            else => null,
         };
         return .{
+            .chrome = role,
+            .mnemonic = menu_mod.mnemonicOf(node),
+            .lit = if (factValue(node, "lit")) |v| std.mem.eql(u8, v, "on") else false,
+            .icon = factValue(node, "icon"),
+            .reason = factValue(node, "reason") orelse "",
+            .name = factValue(node, "name") orelse "",
             .node = node.id,
             .text = text,
             .column = node.layout.column orelse @intCast(@min(natural_column, std.math.maxInt(u16))),
+            .natural = node.layout.column == null and preceding.len == 0,
             .tone = toneFor(node),
             .focusable = node.focusable,
             .activatable = node.content == .action,
@@ -176,7 +237,11 @@ pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *s
     var hits: std.ArrayList(Hit) = .empty;
     var content = body;
     if (!hud.brand_mark and document.title.len != 0 and body.h >= 2 * v.line_h) {
-        try popup.propLine(v, scratch, runs, firstCells(document.title, @intFromFloat(@max(0, body.w - v.cell_w) / v.cell_w)), body.x + v.cell_w, body.y + v.ascent, v.theme.status);
+        // Every scene's title, fitted by the status line's rules (doc/chrome.md
+        // §4.2): a path keeps its leaf behind `…`, nothing is cut mid-glyph.
+        const title_buf = try scratch.alloc(u8, document.title.len + status_layout.ellipsis.len);
+        const cols: usize = @intFromFloat(@max(0, body.w - v.cell_w) / v.cell_w);
+        try popup.propLine(v, scratch, runs, status_layout.fitTitle(title_buf, document.title, cols), body.x + v.cell_w, body.y + v.ascent, v.theme.status);
         content.y += v.line_h;
         content.h -= v.line_h;
     }
@@ -195,21 +260,27 @@ pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *s
         if (index >= top_row.* + visible) top_row.* = index + 1 - visible;
         break;
     };
-    try drawRows(v, scratch, hit_arena, runs, rects, &hits, document.view, rows[top_row.*..], content, hud, true);
+    // One indentation scale over every row, not only the visible ones, so the
+    // tree does not re-indent as it scrolls.
+    const scale = indentScale(rows, @intFromFloat(@max(0, content.w) / v.cell_w));
+    try drawRows(v, scratch, hit_arena, runs, rects, &hits, document.view, rows[top_row.*..], content, hud, true, scale);
     return hits.toOwnedSlice(hit_arena);
 }
 
 /// What `drawOverlay` drew: its scene hit regions and the box they sit in.
 pub const Drawn = struct { hits: []const Hit, box: ?region.Rect = null };
 
-/// Render the active head-local interaction above its underlying view. The
-/// presentation string is an open hint consumed only by this presenter:
-/// `bottom`, `corner`, and — for a menu — `pointer` and `caret`, which hang
-/// the box below that point (flipped above it when it would not fit),
-/// clamped into `bounds` (the frame: a menu floats over every pane, not only
-/// the one it opened over). The others place within the body. `caret_at` is
-/// the focused pane's caret, bottom-left, when the body shows text.
+/// Render the active head-local interaction above its underlying view. A
+/// MENU (a root whose role is `menu`) is the menu widget's (`menu.zig`),
+/// hung below the node its anchor facts name, else at the presentation's
+/// point — `pointer` or `caret` — and floated in `bounds` (the frame: a menu
+/// floats over every pane, not only the one it opened over). Anything else is
+/// a dialog in the body, placed by the presentation string, an open hint
+/// consumed only by this presenter: `bottom`, `corner`, else centred.
+/// `caret_at` is the focused pane's caret, bottom-left, when the body shows
+/// text.
 pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), overlay: data.Overlay, hud: view.Hud, body: region.Rect, bounds: region.Rect, caret_at: ?[2]f32) !Drawn {
+    if (menu_mod.isMenu(overlay.document.root)) return drawMenu(v, scratch, hit_arena, runs, rects, overlay, hud, body, bounds, caret_at);
     const rows = try rowsFor(scratch, overlay.document);
     if (rows.len == 0) return .{ .hits = &.{} };
     var widest: usize = 1;
@@ -217,44 +288,57 @@ pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *st
         var occupied: usize = 0;
         for (row.spans, 0..) |span, index| {
             const column = @max(occupied, @as(usize, span.column));
-            occupied = column + visualWidth(span.text) + @as(usize, @intFromBool(index + 1 < row.spans.len));
+            occupied = column + span.cellsIn(v) + @as(usize, @intFromBool(index + 1 < row.spans.len));
         }
         widest = @max(widest, occupied);
     }
-    const anchor: ?[2]f32 = if (std.mem.eql(u8, overlay.presentation, "pointer"))
-        overlay.pointer orelse caret_at
-    else if (std.mem.eql(u8, overlay.presentation, "caret"))
-        caret_at orelse overlay.pointer
-    else
-        null;
-    const area = if (anchor != null) bounds else body;
+    const area = body;
     const visible_rows = @min(rows.len, @max(1, @as(usize, @intFromFloat(@max(0, area.h) / v.line_h)) -| 1));
     const pad_x = v.cell_w;
     const pad_y = v.line_h * 0.5;
     const box_w = @min(area.w, @as(f32, @floatFromInt(widest + 2)) * v.cell_w);
     const box_h = @min(area.h, @as(f32, @floatFromInt(visible_rows)) * v.line_h + 2 * pad_y);
-    const raw_x = if (anchor) |at| at[0] else area.x + (area.w - box_w) / 2;
-    const x = std.math.clamp(raw_x, area.x, @max(area.x, area.x + area.w - box_w));
+    const x = std.math.clamp(area.x + (area.w - box_w) / 2, area.x, @max(area.x, area.x + area.w - box_w));
     const bottom = std.mem.eql(u8, overlay.presentation, "bottom") or
         std.mem.eql(u8, overlay.presentation, "which-key-like");
     const corner = std.mem.eql(u8, overlay.presentation, "corner");
-    const raw_y = if (anchor) |at|
-        (if (at[1] + box_h <= area.y + area.h) at[1] else at[1] - box_h - v.line_h)
-    else if (bottom)
+    const raw_y = if (bottom)
         area.y + area.h - box_h
     else if (corner)
         area.y
     else
         area.y + (area.h - box_h) / 2;
     const y = std.math.clamp(raw_y, area.y, @max(area.y, area.y + area.h - box_h));
-    try popup.outlinedBox(scratch, rects, x, y, box_w, box_h, v.theme.background, v.theme.accent);
+    const sink: chrome_mod.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
+    try chrome_mod.paintPanel(sink, .{ .x = x, .y = y, .w = box_w, .h = box_h }, v.theme.background, v.theme.accent, .popup);
     const inner: region.Rect = .{ .x = x + pad_x, .y = y + pad_y, .w = @max(0, box_w - 2 * pad_x), .h = @max(0, box_h - 2 * pad_y) };
     var hits: std.ArrayList(Hit) = .empty;
-    try drawRows(v, scratch, hit_arena, runs, rects, &hits, overlay.document.view, rows[0..visible_rows], inner, hud, true);
+    try drawRows(v, scratch, hit_arena, runs, rects, &hits, overlay.document.view, rows[0..visible_rows], inner, hud, true, 1);
     return .{ .hits = try hits.toOwnedSlice(hit_arena), .box = .{ .x = x, .y = y, .w = box_w, .h = box_h } };
 }
 
-fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), hits: *std.ArrayList(Hit), view_ref: semantic.view.Ref, rows: []const Row, body: region.Rect, hud: view.Hud, clip_width: bool) !void {
+/// A menu overlay through the menu widget: its anchor, the row under the
+/// pointer, and its hit regions in this view.
+fn drawMenu(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), overlay: data.Overlay, hud: view.Hud, body: region.Rect, bounds: region.Rect, caret_at: ?[2]f32) !Drawn {
+    const root = overlay.document.root;
+    const centre: [2]f32 = .{ body.x + body.w / 3, body.y + body.h / 4 };
+    const anchor: menu_mod.Anchor = if (menu_mod.anchorBox(v, root)) |box|
+        .{ .below = box }
+    else if (std.mem.eql(u8, overlay.presentation, "caret"))
+        .{ .point = caret_at orelse overlay.pointer orelse centre }
+    else
+        .{ .point = overlay.pointer orelse caret_at orelse centre };
+    const hovered: ?semantic.scene.NodeId = if (hud.pointer.node) |n| (if (n.view.eql(overlay.document.view)) n.node else null) else null;
+    const drawn = try menu_mod.draw(v, scratch, hit_arena, runs, rects, root, anchor, bounds, hovered, hud.pointer.pressed, hud.pointer.tooltip);
+    const hits = try hit_arena.alloc(Hit, drawn.hits.len);
+    for (drawn.hits, hits) |h, *out| out.* = .{ .view = overlay.document.view, .node = h.node, .rect = h.rect };
+    return .{ .hits = hits, .box = drawn.box };
+}
+
+/// A scene's rows in `body`: each span in its column, a chrome node painted
+/// by its role in the cells it measures, and every focusable or activatable
+/// span's box filed as a hit.
+fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), hits: *std.ArrayList(Hit), view_ref: semantic.view.Ref, rows: []const Row, body: region.Rect, hud: view.Hud, clip_width: bool, scale: f32) !void {
     const count = @min(rows.len, @as(usize, @intFromFloat(@max(0, body.h) / v.line_h)));
     for (rows[0..count], 0..) |row, index| {
         const y = body.y + @as(f32, @floatFromInt(index)) * v.line_h;
@@ -269,17 +353,13 @@ fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
         // The revealed row wears its own mark — an accent bar at the gutter
         // edge — so it reads beside the selection's wash, never as it.
         if (row.revealed) try rects.append(scratch, .{ .x = body.x - v.cell_w, .y = y, .w = @max(1, v.cell_w / 4), .h = v.line_h, .color = v.theme.accent });
-        const editing_metadata = for (row.spans) |span| {
-            if (span.selection != null and span.hide_below != 0) break true;
-        } else false;
+        const editing_metadata = editingMetadata(row);
+        const cells: usize = @intFromFloat(@max(0, body.w) / v.cell_w);
+        const shift = indentShift(row, scale);
         var occupied: usize = 0;
         for (row.spans) |span| {
-            const cells: usize = @intFromFloat(@max(0, body.w) / v.cell_w);
-            // Secondary fields remain reachable even when their metadata is
-            // hidden in a narrow pane; focusing one temporarily reveals it.
-            if (cells < span.hide_below and span.selection == null) continue;
-            const declared_column = if (!editing_metadata and cells < span.compact_below) span.compact_column orelse span.column else span.column;
-            const column = @max(occupied, @as(usize, declared_column));
+            const declared_column = declaredColumn(span, cells, editing_metadata) orelse continue;
+            const column = @max(occupied, declared_column -| shift);
             const x = body.x + @as(f32, @floatFromInt(column)) * v.cell_w;
             if (clip_width and x >= body.x + body.w) continue;
             const available_cells: usize = @intFromFloat(@max(0, body.x + body.w - x) / v.cell_w);
@@ -289,7 +369,40 @@ fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
                 if (end > start) try rects.append(scratch, .{ .x = x + @as(f32, @floatFromInt(start)) * v.cell_w, .y = y, .w = @as(f32, @floatFromInt(end - start)) * v.cell_w, .h = v.line_h, .color = v.theme.selection });
                 if (hud.cursor_on and sel.caret < available_cells) try rects.append(scratch, fieldCaretRect(x + @as(f32, @floatFromInt(sel.caret)) * v.cell_w, y, v.cell_w, v.line_h, hud.cursor_style, v.theme.cursor));
             }
-            const text = if (clip_width) firstCells(span.text, available_cells) else span.text;
+            if (span.chrome) |role| {
+                // A chrome node: its style draws it, in the cells (or, in a
+                // menu, the row) it is given, and that box is what a click
+                // reaches.
+                const sink: chrome_mod.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
+                const hovered = hud.pointer.onNode(view_ref, span.node);
+                const state: chrome_mod.State = .{
+                    .hover = hovered,
+                    .pressed = hovered and hud.pointer.pressed,
+                    .disabled = span.reason.len != 0,
+                    // A menubar title is lit while its menu is open.
+                    .focused = row.focused or span.lit,
+                };
+                var content = span.content();
+                content.fg = colorFor(v, span.tone);
+                const box: region.Rect = .{ .x = x, .y = y, .w = @min(@as(f32, @floatFromInt(span.cellsIn(v))) * v.cell_w, @max(0, body.x + body.w - x)), .h = v.line_h };
+                switch (role) {
+                    .separator => {
+                        if (row.spans.len == 1)
+                            try chrome_mod.paintSeparator(sink, .{ .x = body.x, .y = y, .w = body.w, .h = v.line_h }, .horizontal)
+                        else
+                            try chrome_mod.paintSeparator(sink, .{ .x = x, .y = y + 3, .w = v.cell_w, .h = @max(0, v.line_h - 6) }, .vertical);
+                        occupied = column + visualWidth(span.text) + 1;
+                        continue;
+                    },
+                    else => try chrome_mod.paint(sink, role, state, content, box),
+                }
+                if (hovered) v.build_tip = .{ .label = span.text, .reason = span.reason, .command = span.name };
+                occupied = column + span.cellsIn(v) + 1;
+                if (!span.focusable and !span.activatable) continue;
+                try hits.append(hit_arena, .{ .view = view_ref, .node = span.node, .rect = box });
+                continue;
+            }
+            const text = if (clip_width) try fitLabel(scratch, span, available_cells) else span.text;
             try popup.propLine(v, scratch, runs, text, x, y + v.ascent, colorFor(v, span.tone));
             if (hud.cursor_on and hud.cursor_style == .block) if (span.selection) |sel| {
                 const prefix = firstCells(text, sel.caret);
@@ -302,6 +415,134 @@ fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
             try hits.append(hit_arena, .{ .view = view_ref, .node = span.node, .rect = .{ .x = x, .y = y, .w = width, .h = v.line_h } });
         }
     }
+}
+
+/// The fewest cells a row keeps for its label before its indentation gives
+/// way: a tree nested deeper than a narrow pane is wide still shows each
+/// row's name, not a margin running into the edge.
+pub const min_label_cells = 12;
+
+/// A row whose field is being edited shows its hidden metadata too.
+fn editingMetadata(row: Row) bool {
+    return for (row.spans) |span| {
+        if (span.selection != null and span.hide_below != 0) break true;
+    } else false;
+}
+
+/// Where `span` asks to sit in a pane `cells` wide: its compact column when
+/// the pane is narrower than it wants, else its column. Null when it hides at
+/// this width — though a field being edited stays reachable, and focusing one
+/// reveals its row's metadata.
+fn declaredColumn(span: Span, cells: usize, editing_metadata: bool) ?usize {
+    if (cells < span.hide_below and span.selection == null) return null;
+    return if (!editing_metadata and cells < span.compact_below) span.compact_column orelse span.column else span.column;
+}
+
+/// The column `row`'s label starts at in a pane `cells` wide: its first
+/// focusable span's, else its first shown span's.
+fn labelColumn(row: Row, cells: usize) ?usize {
+    const editing_metadata = editingMetadata(row);
+    var first: ?usize = null;
+    for (row.spans) |span| {
+        const column = declaredColumn(span, cells, editing_metadata) orelse continue;
+        if (span.focusable) return column;
+        if (first == null) first = column;
+    }
+    return first;
+}
+
+/// How much of every row's indentation a pane `cells` wide keeps, in [0, 1]:
+/// all of it when each label has `min_label_cells` to its right, else the
+/// most that lets the most squeezed row have them — down to none, a flat
+/// list, when even that is not enough (its long labels then end in `…`).
+/// One scale for all rows rather than a cap on each, so the indent step
+/// shrinks evenly and a deeper row never reads shallower than its parent.
+pub fn indentScale(rows: []const Row, cells: usize) f32 {
+    var scale: f32 = 1;
+    for (rows) |row| {
+        if (row.indent == 0) continue;
+        const column = labelColumn(row, cells) orelse continue;
+        const over = (column + min_label_cells) -| cells;
+        if (over == 0) continue;
+        const kept = row.indent -| @as(u16, @intCast(@min(over, row.indent)));
+        scale = @min(scale, @as(f32, @floatFromInt(kept)) / @as(f32, @floatFromInt(row.indent)));
+    }
+    return scale;
+}
+
+/// Cells `row` moves left when its indentation is kept at `scale`.
+pub fn indentShift(row: Row, scale: f32) usize {
+    const kept: usize = @intFromFloat(@floor(@as(f32, @floatFromInt(row.indent)) * scale));
+    return row.indent -| kept;
+}
+
+/// `span`'s text in the `cells` left to it: whole when it fits, else cut at
+/// its end with `…`, as the status line cuts prose (a field being edited is
+/// clipped instead, so its caret stays where its text is).
+fn fitLabel(scratch: Allocator, span: Span, cells: usize) Allocator.Error![]const u8 {
+    if (span.selection != null or visualWidth(span.text) <= cells) return firstCells(span.text, cells);
+    const buf = try scratch.alloc(u8, span.text.len + status_layout.ellipsis.len);
+    return status_layout.cut(buf, span.text, cells, .end);
+}
+
+test "a label in a pane's last partial cell draws nothing, never its whole text over the next pane" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const span: Span = .{ .node = @enumFromInt(1), .text = "main.zig", .column = 0, .tone = .normal, .focusable = true };
+    try std.testing.expectEqualStrings("", try fitLabel(arena.allocator(), span, 0));
+    try std.testing.expectEqualStrings("…", try fitLabel(arena.allocator(), span, 1));
+    try std.testing.expectEqualStrings("main.zig", try fitLabel(arena.allocator(), span, 8));
+}
+
+test "a deep tree in a narrow pane gives back indentation evenly, and every label keeps its room" {
+    const Node = semantic.scene.NodeId;
+    // A tree as a producer lays one out: each row indented two cells a
+    // level, its name at the indent plus two.
+    var rows: [10]Row = undefined;
+    var spans: [10][1]Span = undefined;
+    for (0..10) |depth| {
+        const indent: u16 = @intCast(depth * 2);
+        spans[depth][0] = .{ .node = @as(Node, @enumFromInt(depth + 1)), .text = "name", .column = indent + 2, .tone = .normal, .focusable = true };
+        rows[depth] = .{ .spans = &spans[depth], .focused = false, .indent = indent };
+    }
+    // Wide: nothing moves.
+    try std.testing.expectEqual(@as(f32, 1), indentScale(&rows, 80));
+    for (rows) |row| try std.testing.expectEqual(@as(usize, 0), indentShift(row, 1));
+    // Narrow (24 cells; the deepest name wants column 20): every label keeps
+    // its room, and depth still reads as depth — each row at or right of its
+    // parent, the deepest strictly right of the shallowest.
+    const cells = 24;
+    const scale = indentScale(&rows, cells);
+    try std.testing.expect(scale < 1);
+    var previous: usize = 0;
+    for (rows) |row| {
+        const column = labelColumn(row, cells).? - indentShift(row, scale);
+        try std.testing.expect(column + min_label_cells <= cells);
+        try std.testing.expect(column >= previous);
+        previous = column;
+    }
+    try std.testing.expect(previous > labelColumn(rows[0], cells).?);
+    // Narrower than a label: flat, and a long label ends in `…` in its room.
+    try std.testing.expectEqual(@as(f32, 0), indentScale(&rows, 8));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const long: Span = .{ .node = @enumFromInt(99), .text = "a-long-directory-name", .column = 2, .tone = .normal, .focusable = true };
+    try std.testing.expectEqualStrings("a-long-dir…", try fitLabel(arena.allocator(), long, 11));
+    try std.testing.expectEqualStrings("a-long-directory-name", try fitLabel(arena.allocator(), long, 40));
+
+    // A row's indent is what its producer says it is, else where nesting
+    // put it.
+    const cell = [_]semantic.scene.Node{.{ .id = @enumFromInt(3), .layout = .{ .column = 8 }, .content = .{ .label = "deep" } }};
+    const lines = [_]semantic.scene.Node{
+        .{ .id = @enumFromInt(2), .facts = &.{.{ .name = "indent", .value = "6" }}, .content = .{ .container = .{ .axis = .horizontal, .children = &cell } } },
+        .{ .id = @enumFromInt(4), .content = .{ .label = "nested" } },
+    };
+    const root: semantic.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .container = .{ .children = &lines } } };
+    var fields = @import("weft_view_runtime").field.Registry.init(.here);
+    defer fields.deinit(std.testing.allocator);
+    const built = try rowsFor(arena.allocator(), .{ .view = .{ .authority = .here, .slot = 0, .generation = 1 }, .root = &root, .fields = &fields });
+    try std.testing.expectEqual(@as(u16, 6), built[0].indent);
+    try std.testing.expectEqual(built[1].spans[0].column, built[1].indent);
 }
 
 fn fieldCaretRect(x: f32, y: f32, cell_w: f32, line_h: f32, style: view.CursorStyle, color: [4]f32) Rect {
@@ -352,6 +593,16 @@ fn toneFor(node: *const semantic.scene.Node) Tone {
         if (std.mem.eql(u8, fact.value, "symlink")) return .warning;
     };
     return .normal;
+}
+
+fn factValue(node: *const semantic.scene.Node, name: []const u8) ?[]const u8 {
+    for (node.facts) |fact| if (std.mem.eql(u8, fact.name, name)) return fact.value;
+    return null;
+}
+
+/// A role's last dotted segment: `offers.separator` and `separator` alike.
+fn leafOf(role: []const u8) []const u8 {
+    return if (std.mem.lastIndexOfScalar(u8, role, '.')) |dot| role[dot + 1 ..] else role;
 }
 
 fn numberFact(node: *const semantic.scene.Node, name: []const u8) ?u16 {
@@ -467,7 +718,12 @@ test "field presentation preserves kind styling, suffix, and escaped selection p
     };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const doc: data.Document = .{ .view = .{ .authority = .here, .slot = 0, .generation = 1 }, .root = &root, .focused = root.id, .fields = &fields };
+    // Focused as a ROW, the field is not being edited: no caret, and no
+    // selection to draw one from (doc/chrome.md §5.2).
+    const row_focus: data.Document = .{ .view = .{ .authority = .here, .slot = 0, .generation = 1 }, .root = &root, .focused = root.id, .fields = &fields };
+    try std.testing.expect((try rowsFor(arena.allocator(), row_focus))[0].spans[0].selection == null);
+    var doc = row_focus;
+    doc.editing = field;
     const rows = try rowsFor(arena.allocator(), doc);
     const span = rows[0].spans[0];
     try std.testing.expectEqualStrings("a\\né/", span.text);

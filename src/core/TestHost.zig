@@ -80,6 +80,9 @@ pub fn init(gpa: Allocator, self: *TestHost) !void {
     self.caps = capability.Caps.init(gpa, task.nowNs, &self.container);
     self.actions = action.init(gpa, &self.container);
     self.slot_host = slot_mod.SlotHost.init(gpa, &self.container);
+    // The status line's slot, as a System declares it: a plugin that
+    // publishes a status segment binds it at init.
+    try @import("status_segment.zig").declare(&self.container);
     self.ctx = .{
         .gpa = gpa,
         .buffers = &self.buffers,

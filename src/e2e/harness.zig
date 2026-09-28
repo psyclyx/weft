@@ -156,7 +156,7 @@ pub const Editor = struct {
 
     // ── Window layout (multi-pane) ──
     /// The recursive pane tree, driven by the REAL window-layout commands
-    /// (window-split/focus/move) through `window_cmds.applyIntents`, exactly as
+    /// (window.split-below/focus/move) through `window_cmds.applyIntents`, exactly as
     /// main's frame loop drives it.
     /// Alias of `render.fb.win_layout`: input, layout, rendering, and capture
     /// share one pane tree. There is no capture-only layout to drift.
@@ -260,6 +260,7 @@ pub const Editor = struct {
         };
         try app_buffers_cmds.registerCommands(gpa, self.commands, &self.buffer_commands);
         self.session.file_opener = self.buffer_commands.fileOpener();
+        self.session.cmd_ctx.entry_shell = self.buffer_commands.entryShell();
     }
 
     pub fn deinit(self: *Editor) void {
@@ -494,7 +495,7 @@ pub const Editor = struct {
     /// Run a command with one string argument (e.g. `open <path>`).
     pub fn runStr(self: *Editor, cmd: []const u8, arg: []const u8) void {
         var at_shell: [std.fs.max_path_bytes]u8 = undefined;
-        const value = if (std.mem.eql(u8, cmd, "open")) asTyped(arg, &at_shell) else arg;
+        const value = if (std.mem.eql(u8, cmd, "file.open")) asTyped(arg, &at_shell) else arg;
         _ = command.run(self.commands, self.ctx, cmd, &.{.{ .string = value }}) catch {};
         self.application.noteInput();
         _ = self.advanceAt(core.task.nowNs(), false) catch {};
@@ -560,6 +561,17 @@ pub const Editor = struct {
     /// previous one — the second (or third) click of a double (triple) click.
     pub fn clickAgain(self: *Editor, xy: [2]f32) void {
         self.pointer_ms += 50;
+        self.gestures.warp(xy[0], xy[1]);
+        self.pointerButton(1, true, .{});
+        self.pointer_ms += 30;
+        self.pointerButton(1, false, .{});
+    }
+
+    /// Another primary click at `xy` AFTER the multi-click window of the
+    /// previous one but inside the slow-click window — a slow second click
+    /// (`platform.pointer.slow_click_ms`).
+    pub fn clickSlow(self: *Editor, xy: [2]f32) void {
+        self.pointer_ms += weft.platform.pointer.multi_click_ms * 2;
         self.gestures.warp(xy[0], xy[1]);
         self.pointerButton(1, true, .{});
         self.pointer_ms += 30;
@@ -647,7 +659,7 @@ pub const Editor = struct {
 
     /// The current transient echo line (what a plugin last reported to the user).
     pub fn echoText(self: *Editor) []const u8 {
-        return self.session.head.echo.items;
+        return self.session.head.echo.text();
     }
 
     /// Drive complete application wakes until the active buffer's async save
@@ -671,10 +683,17 @@ pub const Editor = struct {
     /// of iterations regardless; the bound only matters as a genuine-hang
     /// backstop.
     pub fn waitSave(self: *Editor) void {
+        self.waitSaveOf(self.buffers.active_id);
+    }
+
+    /// `waitSave` for entry `id`, active or not — a save a menu ran in the
+    /// primary context while the keys are elsewhere.
+    pub fn waitSaveOf(self: *Editor, id: core.Buffers.Id) void {
         const deadline = core.task.nowNs() + 30 * std.time.ns_per_s;
         while (core.task.nowNs() < deadline) {
             _ = self.advanceAt(core.task.nowNs(), false) catch {};
-            if (self.buffers.active().textEditor().?.save_state != .saving) return;
+            const entry = self.buffers.get(id) orelse return;
+            if (entry.textEditor().?.save_state != .saving) return;
             std.Thread.yield() catch {};
         }
     }
@@ -763,7 +782,13 @@ pub const Editor = struct {
     /// survive the typing, which is exactly how the row ferry reads it back.
     pub fn draftHere(self: *Editor, gpa: std.mem.Allocator) ![]u8 {
         if (self.head.scene_selection.path()) |path| {
-            const provider = self.session.system.semantic.fields.get(path.field orelse return gpa.dupe(u8, "")) orelse return error.StaleField;
+            // The field being edited, else — a row focused as a row
+            // (doc/chrome.md §5.2) — the row's primary field: what the row IS.
+            const ref = path.field orelse blk: {
+                const instance = self.session.system.semantic.views.get(path.view) orelse return gpa.dupe(u8, "");
+                break :blk (instance.primaryField(path) orelse return gpa.dupe(u8, "")).ref;
+            };
+            const provider = self.session.system.semantic.fields.get(ref) orelse return error.StaleField;
             var field_snapshot = try provider.snapshot(gpa);
             defer field_snapshot.deinit();
             return gpa.dupe(u8, field_snapshot.value.bytes);
@@ -821,7 +846,9 @@ pub const Editor = struct {
                 var snap = try self.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(self.gpa);
                 defer snap.deinit();
                 if (!std.mem.eql(u8, snap.value.bytes, name)) continue;
-                _ = try self.session.system.semantic.focusView(self.head, self.gpa, view_ref, node.id);
+                // ENTERED, as a provider enters a field: an edit of the name
+                // under any granularity (doc/chrome.md §5.2).
+                _ = try self.session.system.semantic.focusViewAs(self.head, self.gpa, view_ref, node.id, .enter);
                 try self.session.system.semantic.fields.get(node.content.field.ref).?.edit(snap.value.revision, .{ .start = 0, .end = 0, .replacement = "", .selection_after = .{ .anchor = 0, .caret = 0 } });
                 return;
             }
@@ -916,6 +943,14 @@ pub const Editor = struct {
     /// that lifecycle, never a harness-selectable operation.
     pub fn applyWindow(self: *Editor) void {
         _ = self.advanceAt(core.task.nowNs(), false) catch {};
+    }
+
+    /// The pane a declared viewport is docked in, by the name its fragment
+    /// gave it, or null while it is hidden. What an edge cannot say once two
+    /// viewports share one (a panel and a status bar, both at the bottom).
+    pub fn viewportPane(self: *Editor, name: []const u8) ?*window_layout.Node {
+        const decl = self.session.system.viewports.find(name) orelse return null;
+        return self.win_layout.paneById(decl.pane orelse return null);
     }
 
     /// Number of panes currently tiled.
@@ -1059,7 +1094,7 @@ pub const SecondHead = struct {
         _ = command.run(self.ctx.commands, &self.ctx, cmd, &.{}) catch {};
     }
 
-    /// Apply pending window-layout intents (window-split/focus/move) AS
+    /// Apply pending window-layout intents (window.split-below/focus/move) AS
     /// THIS head — mirrors `Editor.applyWindow`, but against `ed`'s shared
     /// `win_ctx`/`win_layout` with `self.head` as the acting head, so a
     /// focus/split/close recorded by a command THIS head ran lands on
@@ -1085,7 +1120,7 @@ pub const SecondHead = struct {
     }
 
     pub fn echoText(self: *SecondHead) []const u8 {
-        return self.head.echo.items;
+        return self.head.echo.text();
     }
 };
 
@@ -1578,6 +1613,41 @@ pub fn focusBuffer(ed: *Editor, name: []const u8) !void {
 /// A writable path inside the test's tmpdir (which lives under
 /// `.zig-cache/tmp/<sub_path>/`, the codebase's convention — see
 /// core/tests.zig). Caller frees.
+/// Commands a `:` line reads by short name and by label (doc/chrome.md
+/// §1.1): `zzt.frob-widget` ("Polish The Gadget"), and two `twin`s. Counts
+/// what ran, per command.
+pub const ShortNames = struct {
+    pub var ran: [3]usize = @splat(0);
+
+    fn frob(_: *core.command.Context, _: struct {}) anyerror!core.command.Value {
+        ran[0] += 1;
+        return .nil;
+    }
+    fn twinA(_: *core.command.Context, _: struct {}) anyerror!core.command.Value {
+        ran[1] += 1;
+        return .nil;
+    }
+    pub fn twinB(_: *core.command.Context, _: struct {}) anyerror!core.command.Value {
+        ran[2] += 1;
+        return .nil;
+    }
+
+    pub fn bind(ed: *Editor) !void {
+        ran = @splat(0);
+        const cmds = ed.ctx.commands;
+        _ = try cmds.bind(ed.gpa, "zzt.frob-widget", core.command.define("zzt.frob-widget", "Polish.", frob).present(.{ .label = "Polish The Gadget" }));
+        _ = try cmds.bind(ed.gpa, "zzt.twin", core.command.define("zzt.twin", "One twin.", twinA).present(.{ .label = "Twin" }));
+        _ = try cmds.bind(ed.gpa, "zzq.twin", core.command.define("zzq.twin", "The other twin.", twinB).present(.{ .label = "Twin" }));
+    }
+
+    /// Type `line` on the `:` line (opened with `colon`), then `finish`.
+    pub fn ex(ed: *Editor, line: []const u8, finish: []const u8) void {
+        ed.press("colon", "");
+        ed.typeText(line);
+        ed.press(finish, "");
+    }
+};
+
 pub fn tmpPath(gpa: Allocator, sub_path: []const u8, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/{s}", .{ sub_path, name });
 }
@@ -1686,7 +1756,7 @@ pub fn toolAvailable(gpa: Allocator, tool: []const u8) bool {
 /// return its absolute path (caller frees). Unlike `std.testing.tmpDir` — which
 /// nests under `<cwd>/.zig-cache/tmp`, INSIDE this repo — this is a real
 /// standalone dir with no git-repo ancestor, so a project here reads as "not a
-/// repository" until it runs git-init, exactly like a person's fresh directory.
+/// repository" until it runs git.init, exactly like a person's fresh directory.
 pub fn makeSystemTmpDir(gpa: Allocator) ![]u8 {
     const base = if (std.c.getenv("TMPDIR")) |p| std.mem.span(p) else "/tmp";
     const suffix = "/weft-e2e-XXXXXX";
@@ -2172,7 +2242,7 @@ pub const Project = struct {
 /// Every reference plugin, keyed by the name a config's `weft.plugin(name)`
 /// uses → its embedded wasm (the test module embeds them all). The
 /// analogue of the lib/weft/plugins dir the shipped binary resolves against.
-const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
+pub const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "edit", @embedFile("guest_edit_wasm") },
     .{ "complete", @embedFile("guest_complete_wasm") },
     .{ "project", @embedFile("guest_project_wasm") },
@@ -2201,7 +2271,6 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "notes", @embedFile("guest_notes_wasm") },
     .{ "fmt", @embedFile("guest_fmt_wasm") },
     .{ "buffers", @embedFile("guest_buffers_wasm") },
-    .{ "windows", @embedFile("guest_windows_wasm") },
     .{ "modes", @embedFile("guest_modes_wasm") },
     .{ "snippets", @embedFile("guest_snippets_wasm") },
     .{ "direnv", @embedFile("guest_direnv_wasm") },
@@ -2221,6 +2290,7 @@ const bundled_plugins = std.StaticStringMap([]const u8).initComptime(.{
     .{ "snipe", @embedFile("guest_snipe_wasm") },
     .{ "find", @embedFile("guest_find_wasm") },
     .{ "offers", @embedFile("guest_offers_wasm") },
+    .{ "menu", @embedFile("guest_menu_wasm") },
     .{ "symbols", @embedFile("guest_symbols_wasm") },
     .{ "panel", @embedFile("guest_panel_wasm") },
     .{ "problems", @embedFile("guest_problems_wasm") },
@@ -2259,7 +2329,7 @@ pub const ConfigLoader = struct {
         self.requested.append(gpa, gpa.dupe(u8, name) catch return) catch {};
         // The harness registers these same grammars before boot, and the
         // language parity test checks that list against this shipped plugin.
-        // Re-running its grammar-add calls here would register duplicates.
+        // Re-running its syntax.add-grammar calls here would register duplicates.
         if (std.mem.eql(u8, name, "languages.js")) {
             _ = weft.languages_js;
             return;
@@ -2306,12 +2376,14 @@ pub fn bootConfig(ed: *Editor, config_dir: []const u8, loader_state: *ConfigLoad
 /// Like `bootConfig`, but the config FILE within `config_dir` is named
 /// explicitly — config.js, helix.js and ide.js share one directory, so each
 /// resolves `weft.use("defaults")` identically.
+/// The shipped binary's own door (`app.config_load.ConfigSession`), not a
+/// second one beside it, so a test boots a config exactly as `main` does.
 pub fn bootConfigNamed(ed: *Editor, config_dir: []const u8, filename: []const u8, loader_state: *ConfigLoader) !void {
     const cfg_path = try std.fmt.allocPrint(ed.gpa, "{s}/{s}", .{ config_dir, filename });
     defer ed.gpa.free(cfg_path);
-    const src = try core.file.readAlloc(ed.gpa, cfg_path);
-    defer ed.gpa.free(src);
-    try core.quickjs.evalConfig(&ed.engine, ed.ctx, loader_state.loader(), &ed.config_kv, config_dir, src);
+    var cs = try app.config_load.ConfigSession.init(ed.gpa, ed.ctx, cfg_path, loader_state.loader(), &ed.config_kv);
+    defer cs.deinit();
+    try cs.reload();
 }
 
 /// A stable, sorted text snapshot of the RESOLVED keymap: every (mode, key)
@@ -2424,11 +2496,11 @@ pub fn whichKeyShows(ed: *Editor, needle: []const u8) bool {
 /// motion — `open` then `i…Esc` then `save`. Assumes a normal-editing resting
 /// mode (call before entering any tool buffer, so no tool mode swallows typing).
 pub fn authorFile(ed: *Editor, name: []const u8, body: []const u8) void {
-    ed.runStr("open", name);
+    ed.runStr("file.open", name);
     ed.press("i", "");
     ed.typeText(body);
     ed.press("Escape", "");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
 }
 
@@ -2448,7 +2520,7 @@ pub fn toolText(ed: *Editor, name: []const u8) ?[]u8 {
 /// Drive the async loop until the ACTIVE buffer's own text contains `needle`,
 /// bounded by wall clock — the buffer-content counterpart to
 /// `drainToolContains`/`drainSurfaceText`/`drainEcho`, for a plugin-authored
-/// edit that lands directly in the EDITED buffer (e.g. format-buffer's
+/// edit that lands directly in the EDITED buffer (e.g. fmt.format-buffer's
 /// `procFilter`, task #28) rather than a tool buffer/surface/echo. A fixed
 /// `settle(N)` round count is scheduling opportunities, not elapsed time —
 /// see `drainEcho`'s doc comment for why that's the wrong bound for an async
@@ -2466,7 +2538,7 @@ pub fn drainBufferContains(ed: *Editor, needle: []const u8) bool {
 
 /// Drive the async loop until the named tool buffer contains `needle`, bounded
 /// by wall clock (the proc drain runs on a pool thread and delivers on real
-/// time). Returns whether it appeared. Mirrors the git-status async test's
+/// time). Returns whether it appeared. Mirrors the git.status async test's
 /// drain, generalized over an arbitrary buffer + needle.
 /// Re-fire an async `cmd` until the echo line contains `needle` (or a budget
 /// elapses). Re-fires because an LSP request before the server's handshake is
@@ -2653,7 +2725,7 @@ pub fn drainToolContains(ed: *Editor, name: []const u8, needle: []const u8) bool
 /// finished, so `tasks.items.len == 0` is a direct observation of subprocess
 /// exit — not an inference from elapsed ticks.
 ///
-/// This is the fix for the git-rebase-interactive flake (task #22): a caller
+/// This is the fix for the git.rebase-interactive flake (task #22): a caller
 /// about to fire a SECOND git subprocess in the same worktree (e.g. abort,
 /// right after continue) must first prove the first one's `git` process has
 /// actually exited, or the two can collide on `.git/index.lock`. The old

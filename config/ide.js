@@ -21,7 +21,7 @@
 // extend a selection, Home smart, Tab indent and C-c/C-x/C-v transfer. It
 // composes `motions` and `indent`/`comment` by name, like vim does. The
 // dashboard stays out: its keys fall back to vim's `normal`.
-weft.plugin("edit");        // line operators: duplicate-line, upcase-line, …
+weft.plugin("edit");        // line operators: edit.duplicate-line, edit.upcase-line, …
 weft.plugin("complete");    // buffer-word completion provider
 weft.plugin("project");     // recent files, project history
 weft.plugin("structural");  // tree-sitter node ops
@@ -30,7 +30,7 @@ weft.plugin("shell");       // insert shell-command output
 weft.plugin("palette");     // command/buffer palette, status line
 weft.plugin("motions");     // word/line/doc motions — each returns a range
 weft.plugin("textobjects"); // iw/i"/i(/ip … — each returns a range
-weft.plugin("operators");   // op.delete/upcase/lowercase — await a range
+weft.plugin("operators");   // operators.delete/upcase/lowercase — await a range
 weft.plugin("ide");         // conventional non-modal editing
 weft.plugin("ts");          // tree-sitter navigation
 weft.set("languages", "query-root", "assets");
@@ -40,17 +40,16 @@ weft.plugin("indent");      // indent/dedent operators (Tab / S-Tab)
 weft.plugin("whitespace");  // trim trailing whitespace
 weft.plugin("numbers");     // increment/decrement the number under the cursor
 weft.plugin("autopair");    // auto-close ( { [ " while typing
-weft.plugin("consult");     // fuzzy-jump navigation (consult-line, imenu)
+weft.plugin("consult");     // fuzzy-jump navigation (consult.line, consult.imenu)
 weft.plugin("find");        // the incremental find/replace bar (C-f, C-h, F3)
 weft.plugin("git");         // git status/log/diff into tool buffers (proc)
 weft.plugin("grep");        // ripgrep the project into a tool buffer (proc)
 weft.plugin("run");         // run a shell command / the current line (proc)
 weft.plugin("make");        // zig build / test into tool buffers (proc)
 weft.plugin("notes");       // capture/open notes, and resolve their embeds (fs)
-weft.plugin("fmt");         // format-buffer (by extension) + filter (proc)
-weft.plugin("buffers");     // buf-pick (fuzzy buffer switch), buf-scratch
-weft.plugin("windows");     // win-split/vsplit/focus/close/center
-weft.plugin("modes");       // language activation (on focus) + lang-run
+weft.plugin("fmt");         // fmt.format-buffer (by extension) + fmt.filter (proc)
+weft.plugin("buffers");     // buffer.pick (fuzzy buffer switch), buffer.scratch
+weft.plugin("modes");       // language activation (on focus) + modes.run
 weft.plugin("snippets");    // expand named templates from a file (fs read)
 weft.plugin("direnv");      // direnv status/allow/reload into a tool buffer
 weft.plugin("llm");         // ask an llm CLI (minimal agent, proc + fs)
@@ -95,6 +94,21 @@ weft.use("sidebar");
 // plus the pinned entries below. It takes no focus, so clicking it acts on
 // the editor and leaves the keys there.
 weft.use("toolbar");
+// The menubar: File, Edit, Selection, View, Go, Run, Terminal, Help — every
+// command that says where it lives, with the key that runs it here beside
+// it (doc/chrome.md §2). Used AFTER the toolbar, so it docks above it: a
+// later top dock wraps the ones before it. Alt with a title's letter opens
+// its menu; F10 below lights the bar when no debugger claims the key. Where
+// core's own commands sit (File ▸ Save, Edit ▸ Undo, …) is config data,
+// menus.js.
+weft.use("menus");
+weft.use("menubar");
+// The View ▸ Appearance toggles for the chrome this file composes — the
+// menubar's own, and the toolbar's.
+weft.set("menu", "items", [
+  "View/Appearance\tMenu Bar\tviewport.toggle menubar\tviewport.menubar.shown\tviewports\t1",
+  "View/Appearance\tToolbar\tviewport.toggle toolbar\tviewport.toolbar.shown\tviewports\t2",
+]);
 
 // ── Values ───────────────────────────────────────────────────────────
 weft.set("lsp", "zig", "zls");
@@ -103,6 +117,9 @@ weft.set("editor", "flash-ms", "150");
 weft.set("editor", "flash-undo", "on"); // undo/redo flash what they put back
 weft.set("linenumbers", "style", "absolute"); // the conventional gutter
 weft.set("palette", "arguments", "ask");
+// Chrome as widgets: rounded buttons, real tabs whose close glyph shows on
+// hover, icons, shadowed menus (doc/chrome.md §3.2).
+weft.set("theme", "chrome", "widget");
 // Which declared viewport C-b toggles — the fragment above calls it this.
 weft.set("ide", "sidebar", "sidebar");
 // Always on the toolbar, first: an intention shows its live availability
@@ -111,12 +128,12 @@ weft.set("offers", "pinned", [
   "std.persistence.save\tSave",
   "std.history.undo\tUndo",
   "std.history.redo\tRedo",
-  "pick-commands\tPalette",
+  "palette.open\tPalette",
 ]);
 
 // ── Actions: one key, a provider per context ─────────────────────────
-// Spelled as intentions (`plugin.ide.*`), not flat names like config.js's
-// `eval`: an intention is an OFFER, so the same word a key binds is what the
+// Spelled as intentions (`plugin.code.*`, as every config spells them), not
+// flat names: an intention is an OFFER, so the same word a key binds is what the
 // toolbar and the context menu list, labelled and grouped by the options
 // object of whichever provider wins here. A flat action name is a command
 // alias and no chrome ever sees it.
@@ -129,25 +146,34 @@ function provideInSource(action, when, cmd, opts) {
     weft.provide(action, Object.assign({ posture: "text", locality: locality }, when), cmd, opts);
 }
 
+// Building, running, testing and debugging start a process WHERE the source
+// is, and processes start only here (a peer's or a shell's place has no
+// directory of ours to run in). So those are offered in local source only:
+// open a peer's file and the toolbar drops "Build" because the file is
+// remote — its locality — and for no other reason.
+function provideLocal(action, when, cmd, opts) {
+  weft.provide(action, Object.assign({ posture: "text", locality: "local" }, when), cmd, opts);
+}
+
 // Build/run by language: the language's provider says more than the
 // fallback (one fact more), so it wins where it applies.
-weft.action("plugin.ide.build");
-provideInSource("plugin.ide.build", {}, "run-line", { label: "Run line", group: "run", order: 1 });
-provideInSource("plugin.ide.build", { lang: "zig" }, "make-build", { label: "Build", group: "build", order: 1 });
+weft.action("plugin.code.run");
+provideLocal("plugin.code.run", {}, "run.line", { label: "Run line", group: "run", order: 1 });
+provideLocal("plugin.code.run", { lang: "zig" }, "make.build", { label: "Build", group: "build", order: 1 });
 // Send to REPL: offered only where a REPL is live. The repl plugin publishes
 // `repl.session` on the place its interpreter runs in, so this is a fact of
 // the context like the language is — the toolbar grows the button while a
 // REPL runs and drops it when the REPL quits, and neither the toolbar nor
 // this file knows how a REPL is tracked.
-weft.action("plugin.ide.send-to-repl");
-provideInSource("plugin.ide.send-to-repl", { context: { "repl.session": "*" } }, "repl-send-line", { label: "Send to REPL", group: "run", order: 2 });
-provideInSource("plugin.ide.build", { lang: "py" }, "lang-run", { label: "Run", group: "run", order: 1 });
-weft.action("plugin.ide.test");
-provideInSource("plugin.ide.test", { lang: "zig" }, "make-test", { label: "Test", group: "build", order: 2 });
-weft.action("plugin.ide.debug");
-provideInSource("plugin.ide.debug", { lang: "zig" }, "debug-start", { label: "Debug", group: "build", order: 3 });
-weft.action("plugin.ide.format");
-provideInSource("plugin.ide.format", {}, "format-buffer", { label: "Format", group: "edit", order: 10 });
+weft.action("plugin.code.send-to-repl");
+provideInSource("plugin.code.send-to-repl", { context: { "repl.session": "*" } }, "repl.send-line", { label: "Send to REPL", group: "run", order: 2 });
+provideLocal("plugin.code.run", { lang: "py" }, "modes.run", { label: "Run", group: "run", order: 1 });
+weft.action("plugin.code.test");
+provideLocal("plugin.code.test", { lang: "zig" }, "make.test", { label: "Test", group: "build", order: 2 });
+weft.action("plugin.code.debug");
+provideLocal("plugin.code.debug", { lang: "zig" }, "dap.start", { label: "Debug", group: "build", order: 3 });
+weft.action("plugin.code.format");
+provideInSource("plugin.code.format", {}, "fmt.format-buffer", { label: "Format", group: "edit", order: 10 });
 
 // F2 renames what the focus is ON: the symbol under the cursor in source (the
 // language server), the row's name in a listing. The listing provider keys on
@@ -156,9 +182,18 @@ provideInSource("plugin.ide.format", {}, "format-buffer", { label: "Format", gro
 // standing in for the fact, and it also claimed git's rows, whose names are
 // not fields. A git status buffer is neither source nor the files tool, so
 // it is offered no rename at all.
-weft.action("plugin.ide.rename");
-provideInSource("plugin.ide.rename", {}, "rename", { label: "Rename", group: "edit", order: 11 });
-weft.provide("plugin.ide.rename", { tool: "files" }, "field-edit", { label: "Rename", group: "edit", order: 11 });
+weft.action("plugin.code.rename");
+provideInSource("plugin.code.rename", {}, "rename", { label: "Rename", group: "edit", order: 11 });
+weft.provide("plugin.code.rename", { tool: "files" }, "field.edit", { label: "Rename", group: "edit", order: 11 });
+
+// Where these actions sit in the menubar: each runs whichever provider
+// answers it in the editor, so Run ▸ Run builds a Zig file and runs a line
+// elsewhere, and its key is the one bound below.
+weft.command("plugin.code.run", { label: "Run", menu: "Run", group: "run", order: 1, icon: "play" });
+weft.command("plugin.code.test", { label: "Test", menu: "Run", group: "run", order: 2, icon: "test" });
+weft.command("plugin.code.debug", { label: "Start Debugging", menu: "Run", group: "debug", order: 1, icon: "bug" });
+weft.command("plugin.code.format", { label: "Format Document", menu: "Edit", group: "format", order: 1, icon: "format" });
+weft.command("plugin.code.rename", { label: "Rename Symbol", menu: "Edit", group: "refactor", order: 1, icon: "rename", prompts: true });
 
 // ── Keys ─────────────────────────────────────────────────────────────
 // The GRAMMAR binds the editing keys (arrows, shift-selection, Home/End, Tab,
@@ -177,81 +212,96 @@ function bindWorkspace(key, arms) {
 
 // Files and buffers. Save asks the focused entry first: in a commit draft
 // C-s commits, in a file it writes.
-bindWorkspace("C-s", ["std.persistence.save", "save"]);
-bindWorkspace("C-S-s", "save-as");
-bindWorkspace("C-o", "open-path");      // open a typed path (new files too)
-bindWorkspace("C-p", "quick-open");     // fuzzy-open a project file
-bindWorkspace("C-S-p", "pick-commands"); // the palette: commands AND live offers
-bindWorkspace("C-w", "close");
-bindWorkspace("C-Tab", "buffer-next");
-bindWorkspace("C-b", "ide-toggle-sidebar");
+bindWorkspace("C-s", ["std.persistence.save", "file.save"]);
+bindWorkspace("C-S-s", "file.save-as");
+bindWorkspace("C-o", "ide.open-path");      // open a typed path (new files too)
+bindWorkspace("C-p", "files.find");     // fuzzy-open a project file
+bindWorkspace("C-S-p", "palette.open"); // the palette: commands AND live offers
+bindWorkspace("C-w", "buffer.close");
+bindWorkspace("C-Tab", "buffer.next");
+bindWorkspace("C-b", "ide.toggle-sidebar");
 
 // The pointer. mouse-3 presents what the context under it offers
 // (`weft://here/offers/at-pointer`) as a menu there — a row of the sidebar,
 // the text, a git row — and S-F10 / Menu the focused context's at the caret.
 // (The grammar binds what double, triple and C-clicks mean.)
-bindWorkspace("mouse-3", "offers-menu");
-bindWorkspace("S-F10", "offers-menu-at-caret");
-bindWorkspace("Menu", "offers-menu-at-caret");
+bindWorkspace("mouse-3", "offers.menu");
+bindWorkspace("S-F10", "offers.menu-at-caret");
+bindWorkspace("Menu", "offers.menu-at-caret");
 
 // Back and forward along the jumplist: M-Left / M-Right, and VS Code's
 // C-M-minus / C-S-minus. A view with its own history (a listing) answers
 // back first.
-bindWorkspace("M-Left", ["std.navigation.back", "jump-back"]);
-bindWorkspace("M-Right", "jump-forward");
-bindWorkspace("C-M-minus", ["std.navigation.back", "jump-back"]);
-bindWorkspace("C-S-minus", "jump-forward");
-bindWorkspace("C-underscore", "jump-forward");
+bindWorkspace("M-Left", ["std.navigation.back", "jump.back"]);
+bindWorkspace("M-Right", "jump.forward");
+bindWorkspace("C-M-minus", ["std.navigation.back", "jump.back"]);
+bindWorkspace("C-S-minus", "jump.forward");
+bindWorkspace("C-underscore", "jump.forward");
 
 // Search and jump. C-f opens the find bar and C-h the same bar with a
 // replacement field (doc/configs.md §3.4); F3 / S-F3 step through the last
 // search's matches whether the bar is open or not. The bar's own keys
 // (Enter, M-r/M-c/M-w, M-Return, C-M-Return, Escape) are the `find` mode's.
-weft.bind("ide", "C-f", "find");
-weft.bind("ide", "C-h", "find-replace");
-weft.bind("ide", "F3", "find-next");
-weft.bind("ide", "S-F3", "find-prev");
-weft.bind("ide", "C-g", "goto-line");
+weft.bind("ide", "C-f", "find.open");
+weft.bind("ide", "C-h", "find.replace");
+weft.bind("ide", "F3", "find.next");
+weft.bind("ide", "S-F3", "find.prev");
+weft.bind("ide", "C-g", "jump.line");
 
 // The language server, in source.
-weft.bind("ide", "F2", "plugin.ide.rename");
-weft.bind("ide", "F12", "ide-goto-definition");
-weft.bind("ide", "S-F12", "references");
-weft.bind("ide", "C-period", "code-actions");
-weft.bind("ide", "C-space", "complete");
-weft.bind("ide", "C-S-b", "plugin.ide.build");   // build / run, by language
-weft.bind("ide", "M-S-f", "plugin.ide.format");  // format the buffer
+weft.bind("ide", "F2", "plugin.code.rename");
+weft.bind("ide", "F12", "lsp.goto-definition");
+weft.bind("ide", "S-F12", "lsp.references");
+weft.bind("ide", "C-period", "lsp.code-actions");
+weft.bind("ide", "C-space", "complete.show");
+weft.bind("ide", "C-S-b", "plugin.code.run");   // build / run, by language
+weft.bind("ide", "M-S-f", "plugin.code.format");  // format the buffer
 
-// The debugger: the IDE-standard F-keys.
-bindWorkspace("F5", "debug-continue");
-weft.bind("ide", "F9", "debug-toggle-breakpoint");
-bindWorkspace("F10", "debug-step-over");
-bindWorkspace("F11", "debug-step-into");
+// The debugger: the IDE-standard F-keys. F10 steps over while a debug
+// session is live — dap.js publishes `dap.session` — and otherwise lights the
+// menubar, the other thing F10 conventionally does: an intention is offered
+// only where its provider's facts hold, so the key falls through to the
+// menubar the moment no session is there to step.
+bindWorkspace("F5", "dap.continue");
+weft.bind("ide", "F9", "debug.toggle-breakpoint");
+weft.action("plugin.debug.step-over");
+weft.provide("plugin.debug.step-over", { context: { "dap.session": "*" } }, "dap.step-over", { label: "Step Over", group: "debug", order: 2 });
+bindWorkspace("F10", ["plugin.debug.step-over", "menu.focus-bar"]);
+bindWorkspace("F11", "dap.step-into");
 
-weft.bind("global", "F1", "which-key-now");
+weft.bind("global", "F1", "which-key.show");
 
 // Auto-close pairs while typing — `ide` commits text, so these fire as you
 // type, the way vim's insert-mode binds do.
-weft.bind("ide", "parenleft", "pair-paren");
-weft.bind("ide", "braceleft", "pair-brace");
-weft.bind("ide", "bracketleft", "pair-bracket");
-weft.bind("ide", "quotedbl", "pair-quote");
-weft.bind("ide", "parenright", "pair-close-paren");
-weft.bind("ide", "braceright", "pair-close-brace");
-weft.bind("ide", "bracketright", "pair-close-bracket");
+weft.bind("ide", "parenleft", "autopair.open-paren");
+weft.bind("ide", "braceleft", "autopair.open-brace");
+weft.bind("ide", "bracketleft", "autopair.open-bracket");
+weft.bind("ide", "quotedbl", "autopair.quote-double");
+weft.bind("ide", "parenright", "autopair.close-paren");
+weft.bind("ide", "braceright", "autopair.close-brace");
+weft.bind("ide", "bracketright", "autopair.close-bracket");
 
 // ── Panels ───────────────────────────────────────────────────────────
 // The bottom panel (config/panel.js) shows one of two plugins' entries at a
 // time: the problems list or the terminal. Each brings its own entry in with
-// core's `viewport-take`; C-j shows and hides whichever it holds. The
+// core's `viewport.take`; C-j shows and hides whichever it holds. The
 // breadcrumbs are status-line segments, so they need no viewport at all.
 weft.use("panel");
-weft.plugin("panel");        // panel-toggle: show or hide the panel
+weft.plugin("panel");        // panel.toggle: show or hide the panel
 weft.plugin("problems");     // every diagnostic, grouped by file; Return jumps
 weft.plugin("terminal");     // a LINE-MODE shell (no terminal emulation)
 weft.plugin("breadcrumbs");  // path › symbol › symbol for the caret
-bindWorkspace("C-j", "panel-toggle");
-bindWorkspace("C-grave", "terminal");
-bindWorkspace("C-S-m", "problems");
+bindWorkspace("C-j", "panel.toggle");
+bindWorkspace("C-grave", "terminal.open");
+bindWorkspace("C-S-m", "problems.open");
+
+// ── The status bar ───────────────────────────────────────────────────
+// One bar along the bottom of the window (config/statusbar.js), presenting
+// the editor's status: the place, git's branch, the problems counts and a
+// running build on the left; Ln/Col, the language and the plugins' chips on
+// the right. The panes — the editor, its splits, the sidebar — carry no
+// status line of their own. Last among the docked fragments, so it spans
+// the whole window, under the sidebar and the panel too.
+weft.use("statusbar");
 
 weft.echo("weft: ide.js loaded");

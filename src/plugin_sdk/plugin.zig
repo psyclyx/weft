@@ -61,6 +61,36 @@ pub const Entry = struct {
     /// at, and every plugin that had one ran some of them on the primary
     /// alone.
     arity: Arity,
+
+    // ── How it is presented to people (doc/chrome.md §1.2) ─────────────
+    // Declared through `declareCommandMeta`; see `Presentation` for each.
+    /// Title Case, never ending in `…` (`prompts` adds it).
+    label: []const u8 = "",
+    /// `/`-separated menubar path under the conventional top level (File,
+    /// Edit, Selection, View, Go, Run, Terminal, Help).
+    menu: []const u8 = "",
+    group: []const u8 = "",
+    order: ?i32 = null,
+    icon: []const u8 = "",
+    prompts: bool = false,
+    /// A context key whose truthy value shows a check mark, or `key=value`
+    /// for one choice among several.
+    toggle: []const u8 = "",
+    /// Keymap machinery: never listed in the palette, a menu or which-key.
+    internal: bool = false,
+
+    pub fn presentation(self: Entry) weft.Presentation {
+        return .{
+            .label = self.label,
+            .menu = self.menu,
+            .group = self.group,
+            .order = self.order,
+            .icon = self.icon,
+            .prompts = self.prompts,
+            .toggle = self.toggle,
+            .internal = self.internal,
+        };
+    }
 };
 
 /// How a command maps over a selection of several extents (doc/model.md
@@ -153,6 +183,19 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
         var seen: []const []const u8 = &.{};
         for (cmds) |c| {
             if (c.name.len == 0) @compileError("a command with no name");
+            // The id grammar is checked HERE, at the plugin's build, so an id
+            // the host's gate would refuse cannot ship (doc/chrome.md §1.1).
+            if (weft.command_id.check(c.name)) |why|
+                @compileError("command id '" ++ c.name ++ "' " ++ why.describe());
+            // And what a person reads about it (doc/chrome.md §1.2): a
+            // one-sentence summary on every command, a label on every one a
+            // person runs, never a label spelling its own prompt mark.
+            if (!summaryStyled(c.summary))
+                @compileError("command '" ++ c.name ++ "': summary must be one sentence, capitalised, ending in a full stop");
+            if (!c.internal and c.label.len == 0)
+                @compileError("command '" ++ c.name ++ "': a command a person runs needs a label (or `.internal = true`)");
+            if (std.mem.endsWith(u8, c.label, "…") or std.mem.endsWith(u8, c.label, "..."))
+                @compileError("command '" ++ c.name ++ "': label spells its own prompt mark; set `.prompts = true`");
             for (seen) |prior| {
                 if (std.mem.eql(u8, prior, c.name))
                     @compileError("duplicate command name: " ++ c.name);
@@ -173,6 +216,7 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
                 else
                     weft.declareCommand(c.name);
                 weft.declareArity(c.name, c.arity);
+                if (!c.presentation().isEmpty()) weft.declareCommandMeta(c.name, c.presentation());
             }
             inline for (hooks.capabilities) |cap| weft.declareCapability(cap);
             inline for (hooks.perms) |perm| weft.requestPerm(perm);
@@ -258,6 +302,15 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
             return ids[index];
         }
     };
+}
+
+/// One sentence: a capital (or a digit) first, a full stop last, no line
+/// breaks or tabs. The shape the e2e identity gate holds every command to.
+fn summaryStyled(comptime s: []const u8) bool {
+    if (s.len < 2) return false;
+    if (!(std.ascii.isUpper(s[0]) or std.ascii.isDigit(s[0]))) return false;
+    if (s[s.len - 1] != '.') return false;
+    return std.mem.indexOfAny(u8, s, "\t\n") == null;
 }
 
 /// Erase a typed handler into the `fn () void` a table entry holds, reading its

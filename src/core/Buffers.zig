@@ -30,8 +30,13 @@ const Keymap = @import("Keymap.zig");
 const Head = @import("Head.zig");
 const jumplist = @import("jumplist.zig");
 const Document = @import("Document.zig");
+pub const DocStore = @import("DocStore.zig");
+const kv_file = @import("kv_file.zig");
 const task = @import("task.zig");
 pub const Place = @import("place.zig").Place;
+
+/// Why a PRODUCED entry refuses interactive edits (`Buffer.read_only`).
+pub const produced = "read-only buffer";
 
 const Buffers = @This();
 
@@ -42,10 +47,16 @@ slots: std.ArrayList(?*Buffer) = .empty,
 /// default/zeroed `Ref` can never accidentally resolve.
 next_generation: u64 = 1,
 active_id: Id = 0,
-/// The buffer active before the current one — where `buffer-back` returns (so
+/// The buffer active before the current one — where `buffer.back` returns (so
 /// leaving a tool lands you where you came from, not a fresh scratch). Updated
 /// on every `switchTo`, so it toggles between the two most recent buffers.
 prev_id: Id = 0,
+/// What ends an edit a head carries out of its entry: the structural-view
+/// commit (`scene_edit.commit`, wired by `System`). Focus leaving the edited
+/// field commits it, by whichever door the head left — a pane switch, a
+/// buffer switch, an open — so a begun edit is never saved into the entry's
+/// selection to resume, half-typed, on the way back (`switchTo`).
+leave_edit: ?LeaveEdit = null,
 /// The mode a FRESH buffer (no saved mode) starts in — the config's base
 /// editing mode ("normal"/"helix-normal"), captured once after config load.
 /// A fresh buffer NEVER inherits the current keymap mode: that let a tool
@@ -60,22 +71,32 @@ default_mode: []u8 = &.{},
 /// asking what tool it is looking at. Empty = undeclared, which falls back
 /// through `restingModeFor`.
 posture_modes: std.EnumArray(Posture, []u8) = .initFill(&.{}),
-/// The status chip plugins publish (`weft.status`) and background refusals
-/// are announced on — this system's, beside its entries, so a second system
-/// in the process never shows this one's chip.
+/// The status chip plugins publish (`weft.status`) — this system's, beside
+/// its entries, so a second system in the process never shows this one's
+/// chip. Nothing else writes it.
 status: @import("status_feed.zig").Feed = .{},
+/// What no head asked to hear — background echoes and refusals — said to
+/// this system, and shown briefly (`status_feed.Notices`).
+notices: @import("status_feed.zig").Notices = .{},
 /// Documents whose entries closed, newest last (doc/model.md §2.2). An entry
 /// is a local OPENING of a designation, so closing the entry is not deleting
 /// what it opened: a scratch document — which has no file to be reopened
 /// from — is parked here, whole, so `weft://here/doc/<id>` (a jumplist entry,
 /// an embed, a viewport's subject) can open it again. Bounded: past
-/// `parked_cap` the oldest is released for good, and a designation naming
-/// it is refused as gone rather than answered with something else.
+/// `parked_cap` the oldest moves on to `documents`, serialized.
 parked: std.ArrayList(*Buffer) = .empty,
+/// Where a scratch document goes past the parked bound, and what outlives
+/// the process (`DocStore`). Always present; memory-only unless a
+/// `DocumentFile` binds it to disk. `revive` answers from here when the
+/// document is not parked, so a closed scratch comes back by the same route
+/// whichever tier holds it. Past `DocStore.doc_cap` the oldest record is
+/// released for good, and a designation naming it is refused as gone rather
+/// than answered with something else.
+documents: DocStore = .{},
 /// The plugin whose code is running right now, or empty for the user and
 /// core: what a new entry's `creator` is stamped with. A bracket the plugin
 /// host sets around every call into a guest (`actAs`), so an entry a guest
-/// makes — by `buffer-create`, `open`, a door that spawns — is that guest's,
+/// makes — by `buffer.create`, `open`, a door that spawns — is that guest's,
 /// however it came to be made. Borrowed for the bracket's duration.
 acting: []const u8 = "",
 /// Generations of entries closed since the last `drainClosed` — what the
@@ -135,7 +156,12 @@ pub const Buffer = struct {
     /// render`), not user-editable. Not a permission on an owner — a distinction
     /// between operations. An editable projection (mini.files files) is simply
     /// NOT read-only and takes `edit`.
-    read_only: bool = false,
+    ///
+    /// Held as the REASON, not a flag: what a refused keystroke says is the
+    /// value that refused it (`produced` for a projection; a peer's file
+    /// without a write grant says so), so the state and its explanation
+    /// cannot disagree. Null: editable. Static strings only.
+    read_only: ?[]const u8 = null,
     /// The semantic VIEW this entry.s producer publishes for it, when the
     /// entry is a text projection rather than a scene.
     ///
@@ -258,7 +284,7 @@ pub const Buffer = struct {
     /// listings, and similar), so their editor dirtiness is producer output,
     /// not user work that needs a save/close refusal.
     pub fn hasUnsavedFile(self: *Buffer, gpa: Allocator) Allocator.Error!bool {
-        if (self.read_only or self.tool.len > 0) return false;
+        if (self.read_only != null or self.tool.len > 0) return false;
         const ed = self.textEditor() orelse return false;
         return ed.isDirty(gpa);
     }
@@ -270,8 +296,19 @@ pub const Buffer = struct {
     /// declared otherwise. `field_focused` is the head's question (an
     /// editable field owns the commits while it holds focus), so the entry
     /// answers it per head rather than remembering a foreign cursor.
+    /// WHERE this entry's bytes live, in `Facts`' vocabulary — read off its
+    /// place's locus and nothing else, so a peer's file, a shell's file and
+    /// every entry in their places read `remote` because that is where they
+    /// are, not because some other fact happens to differ. A tool entry is
+    /// `tool` first: its content is a projection its owner produced, so where
+    /// the FILES are is not a question about it.
+    pub fn locality(self: *const Buffer) @import("weft_facts").Locality {
+        if (self.tool.len > 0) return .tool;
+        return if (self.place.isHere()) .local else .remote;
+    }
+
     pub fn posture(self: *const Buffer, field_focused: bool) Posture {
-        const derived: Posture = if (self.editor != null and !self.read_only) .text else .structural;
+        const derived: Posture = if (self.editor != null and self.read_only == null) .text else .structural;
         const declared = self.declared_posture orelse derived;
         return if (declared == .structural and field_focused) .field else declared;
     }
@@ -345,7 +382,17 @@ pub const Buffer = struct {
     /// its document's minted id, and its document outlives it (`park`).
     pub fn isBareDocument(self: *Buffer) bool {
         const ed = self.textEditor() orelse return false;
-        return ed.backing == .none and self.tool.len == 0 and self.designation.len == 0 and !self.read_only;
+        return ed.backing == .none and self.tool.len == 0 and self.designation.len == 0 and self.read_only == null;
+    }
+
+    /// Whether this entry's document is KEPT when nothing holds it open — a
+    /// bare document with text in it. The one answer both keepers read:
+    /// closing parks what this admits (`close`), and shutdown keeps what
+    /// this admits (`keepDocuments`). Text, not commits: a document restored
+    /// from the store starts with an empty commit log and is no less worth
+    /// keeping, and one whose text was all deleted has nothing to keep.
+    pub fn keepsDocument(self: *Buffer) bool {
+        return self.isBareDocument() and self.textEditor().?.text().byteLen() > 0;
     }
 };
 
@@ -373,6 +420,7 @@ pub fn deinit(self: *Buffers, gpa: Allocator) void {
     self.slots.deinit(gpa);
     for (self.parked.items) |b| self.destroyBuffer(gpa, b);
     self.parked.deinit(gpa);
+    self.documents.deinit(gpa);
     self.closed.deinit(gpa);
     gpa.free(self.user_agent);
     gpa.free(self.default_mode);
@@ -576,16 +624,34 @@ fn mintGeneration(self: *Buffers) u64 {
 /// slot is free and every `Ref` to it is dead — but the `Buffer` holding the
 /// document is kept whole, so its anchors (a jumplist's remembered spots)
 /// still resolve when it is reopened.
-fn park(self: *Buffers, gpa: Allocator, b: *Buffer) Error!void {
+///
+/// Past `parked_cap` the oldest parked document moves on to `documents`,
+/// serialized — unless it was ever bound to a peer, which the store refuses
+/// (`DocStore.put`), and which is then released; `head`'s jumps into it
+/// settle into offsets first, since the anchors they hold die with this
+/// instance of it.
+fn park(self: *Buffers, gpa: Allocator, b: *Buffer, head: *Head) Error!void {
     try self.parked.ensureUnusedCapacity(gpa, 1);
-    if (self.parked.items.len >= parked_cap) self.destroyBuffer(gpa, self.parked.orderedRemove(0));
+    if (self.parked.items.len >= parked_cap) {
+        const oldest = self.parked.items[0];
+        const ed = oldest.textEditor().?;
+        _ = try self.documents.put(gpa, oldest.name, &ed.doc);
+        _ = self.parked.orderedRemove(0);
+        jumplist.settle(&head.jumps, &ed.doc);
+        self.destroyBuffer(gpa, oldest);
+    }
     self.parked.appendAssumeCapacity(b);
 }
 
-/// Open the parked document `doc` again as a live entry, under a fresh
+/// Open the closed document `doc` again as a live entry, under a fresh
 /// identity (a new slot and generation: nothing that held the closed entry
-/// resolves to this one). Does not focus it. Null when no parked document is
-/// that one — never released, or released past the bound.
+/// resolves to this one). Does not focus it. Parked first — that is the
+/// document itself, anchors and all — else restored from `documents`
+/// (`DocStore.restore`; its record is forgotten only once the entry stands,
+/// so the document lives in exactly one place at a time and in at least one
+/// at every moment — a failure partway loses nothing), as the user's entry,
+/// whoever is acting.
+/// Null when neither holds it — never kept, or released past both bounds.
 pub fn revive(self: *Buffers, gpa: Allocator, doc: Document.Id) Error!?Id {
     for (self.parked.items, 0..) |b, i| {
         const ed = b.textEditor() orelse continue;
@@ -597,8 +663,70 @@ pub fn revive(self: *Buffers, gpa: Allocator, doc: Document.Id) Error!?Id {
         self.slots.items[id] = b;
         return id;
     }
-    return null;
+    var restored = (try self.documents.restore(gpa, self.user_agent, doc)) orelse return null;
+    defer gpa.free(restored.name);
+    errdefer restored.doc.deinit(gpa);
+    var editor = try Editor.around(gpa, self.pool, &restored.doc);
+    errdefer editor.deinit(gpa);
+    // A document someone kept is the user's, not whichever plugin's code
+    // happens to be running the `open` that brings it back.
+    const was = self.actAs("");
+    defer _ = self.actAs(was);
+    const id = try self.insert(gpa, restored.name, editor, "");
+    // Only now does an entry hold it: until here, a failure left the record
+    // as the one place the document still lives.
+    self.documents.forget(gpa, doc);
+    return id;
 }
+
+/// Keep every document worth keeping (`Buffer.keepsDocument`) in
+/// `documents`: the parked ones oldest first, then every open one, so the
+/// open ones are the newest records and the bound evicts what was closed
+/// longest ago first. Records already there that nothing reopened this run
+/// stay, older than all of these. A document ever bound to a peer is not
+/// kept, whatever entry holds it: the store refuses it (`DocStore.put`). The
+/// shutdown half of `DocumentFile`; the entries themselves are left as they
+/// are.
+pub fn keepDocuments(self: *Buffers, gpa: Allocator) Error!void {
+    for (self.parked.items) |b| _ = try self.documents.put(gpa, b.name, &b.textEditor().?.doc);
+    var it = self.iterator();
+    while (it.next()) |b| {
+        if (b.keepsDocument()) _ = try self.documents.put(gpa, b.name, &b.textEditor().?.doc);
+    }
+}
+
+/// The document store bound to its file for a run — `kv_file.Binding` over
+/// `documents_file`, with the one step only Buffers can take put in front of
+/// the save. `open` LOADS the records (only: nothing is reopened; weft has no
+/// session restore, so a kept document comes back when its designation is
+/// opened). `close` KEEPS every open and parked document (`keepDocuments`)
+/// and then SAVES — one handle, so an embedder cannot write the store without
+/// first putting this run's documents in it. Must close while `buffers` is
+/// still alive.
+pub const DocumentFile = struct {
+    gpa: Allocator,
+    buffers: *Buffers,
+    file: kv_file.Binding,
+
+    pub fn open(gpa: Allocator, buffers: *Buffers) DocumentFile {
+        return openIn(gpa, buffers, kv_file.stateDir(gpa));
+    }
+
+    /// `open` with the directory handed in (owned; null = persistence off),
+    /// as `kv_file.Binding.openIn`.
+    pub fn openIn(gpa: Allocator, buffers: *Buffers, dir: ?[]u8) DocumentFile {
+        const file = kv_file.Binding.openIn(gpa, &buffers.documents.records, dir, kv_file.documents_file);
+        buffers.documents.settle(gpa);
+        return .{ .gpa = gpa, .buffers = buffers, .file = file };
+    }
+
+    pub fn close(self: *DocumentFile) void {
+        self.buffers.keepDocuments(self.gpa) catch |e|
+            std.log.warn("documents: could not keep this run's documents ({t}) — saving what is held", .{e});
+        self.file.close();
+        self.* = undefined;
+    }
+};
 
 /// Document `doc` wherever it is held — a live entry or the parked store —
 /// or null once it has been released. What an anchor into a document needs:
@@ -622,12 +750,13 @@ pub fn findByDocument(self: *const Buffers, doc: Document.Id) ?Id {
     return null;
 }
 
-/// The buffer already backed by `path`, if any (dedupe on open).
+/// The buffer already backed by the LOCAL file `path`, if any (dedupe on
+/// open). A remote file at the same path is another file.
 pub fn findByPath(self: *const Buffers, path: []const u8) ?Id {
     var it = self.iterator();
     while (it.next()) |b| {
         const ed = b.textEditor() orelse continue;
-        if (ed.backingPath()) |p| {
+        if (ed.localPath()) |p| {
             if (std.mem.eql(u8, p, path)) return b.id;
         }
     }
@@ -660,6 +789,12 @@ pub fn resolveSink(self: *Buffers, gpa: Allocator, held: *?Ref, name: []const u8
     return b;
 }
 
+/// `leave_edit`'s shape: commit the edit `head` holds.
+pub const LeaveEdit = struct {
+    ctx: *anyopaque,
+    commit: *const fn (ctx: *anyopaque, head: *Head, gpa: Allocator) void,
+};
+
 /// Focus `id`: the outgoing buffer saves `head`'s current keymap mode; the
 /// incoming buffer's mode is restored INTO `head` (its saved mode, or — when
 /// it's fresh — the base `default_mode`). A fresh buffer does NOT inherit the
@@ -671,6 +806,13 @@ pub fn resolveSink(self: *Buffers, gpa: Allocator, held: *?Ref, name: []const u8
 pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const Keymap) Error!void {
     const target = self.get(id) orelse return;
     if (id == self.active_id) return;
+    // A begun edit ends here, committed, while the head still holds it —
+    // over even when the commit fails (`scene_edit.commit`) — so what is
+    // saved below is a row focus at most. An edit under `text` is the
+    // entry's own and is saved with it.
+    if (head.scene_selection.edit != null) {
+        if (self.leave_edit) |leave| leave.commit(leave.ctx, head, gpa);
+    }
     const old = self.active();
     // Moving between entries is a jump, and only here does core see every
     // one: remember where this head was (`jumplist.zig`). Travel along the
@@ -685,7 +827,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     // Remember the buffer's RESTING mode — the base of the current mode's
     // fallback chain, not the transient mode itself. So leaving mid-`visual`
     // (or `insert`, or `op-pending`) remembers `normal`, and a switch made from
-    // inside a menu (`SPC g g` runs git-status while `leader-git` is active) is
+    // inside a menu (`SPC g g` runs git.status while `leader-git` is active) is
     // skipped rather than stamping the buffer with a menu mode. No per-mode
     // bookkeeping — it reuses the fallback declarations config already makes.
     const base = keymap.baseMode(head.currentMode());
@@ -699,7 +841,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
         const resting = if (!keymap.anyModeHasTag("resting") or keymap.modeHasTag(base, "resting"))
             base
         else
-            self.restingModeFor(old.posture(old.scene_selection.field != null));
+            self.restingModeFor(old.posture(old.scene_selection.edit != null));
         const held = try gpa.dupe(u8, resting);
         gpa.free(old.mode);
         old.mode = held;
@@ -716,7 +858,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     // ever reach again — the exact silent leak the pairing exists to kill).
     head.dropAllTransients(gpa);
     self.prev_id = self.active_id;
-    // mechanism-not-policy (task #19 item 3): this is the buffer-switch
+    // mechanism-not-policy (task #19 item 3): this is the buffer.switch
     // resting-mode RESTORE, `switchTo`'s own nuanced semantics (see this
     // function's module doc) — no `*command.Context` to capture a `Ctx`
     // from at this layer, and the door doesn't model "restore mode X
@@ -732,7 +874,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
         // declared what that posture means, so a structural entry can never
         // be stamped with the text editing base. This is the mode-leak
         // class's remaining half — the founding bug's mirror image.
-        const resting = self.restingModeFor(target.posture(head.scene_selection.field != null));
+        const resting = self.restingModeFor(target.posture(head.scene_selection.edit != null));
         if (resting.len > 0) {
             try head.setModeRaw(gpa, resting);
             target.mode = try gpa.dupe(u8, resting);
@@ -744,7 +886,7 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
 /// Borrow entry `id` for one call that is NOT navigation — a toolbar verb
 /// acting on the editor it describes, a tab's close glyph: bring it to
 /// `head`, run `f(args)`, and put the head back. Neither switch records a
-/// jump, and the entry `buffer-back` returns to is left as it was, so the
+/// jump, and the entry `buffer.back` returns to is left as it was, so the
 /// round trip leaves no trace in the head's history. The head goes back
 /// unless `f` moved it on from the borrowed entry to another live one (an
 /// open the verb performed stands, and records its own jump); when `f`
@@ -848,7 +990,7 @@ pub fn back(self: *Buffers, gpa: Allocator, head: *Head, keymap: *const Keymap) 
     try self.switchTo(gpa, id, head, keymap);
 }
 
-/// Next live buffer after the active one (cyclic) — `buffer-next`.
+/// Next live buffer after the active one (cyclic) — `buffer.next`.
 pub fn nextId(self: *const Buffers) Id {
     const n = self.slots.items.len;
     var i = (self.active_id + 1) % n;
@@ -889,8 +1031,11 @@ pub fn close(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const
     // Best effort: a generation missed here is never read again anyway
     // (generations are not reused); it only lingers until the store goes.
     self.closed.append(gpa, b.generation) catch {};
-    if (b.isBareDocument() and b.textEditor().?.doc.commitCount() > 0) {
-        self.park(gpa, b) catch self.destroyBuffer(gpa, b);
+    if (b.keepsDocument()) {
+        self.park(gpa, b, head) catch {
+            jumplist.settle(&head.jumps, &b.textEditor().?.doc);
+            self.destroyBuffer(gpa, b);
+        };
         return;
     }
     if (b.textEditor()) |ed| jumplist.settle(&head.jumps, &ed.doc);
@@ -927,7 +1072,7 @@ test "buffers: switchTo remembers the base mode + skips menus; back returns" {
     try bufs.switchTo(gpa, code, &head, &km);
     try t.expectEqualStrings("git", bufs.get(git).?.mode);
 
-    // A switch made from inside a MENU (git-status while `leader-git` is up)
+    // A switch made from inside a MENU (git.status while `leader-git` is up)
     // must NOT stamp the buffer being left with the menu mode.
     try head.setModeRaw(gpa, "leader-git");
     try bufs.switchTo(gpa, git, &head, &km); // restores git's own mode
@@ -1023,7 +1168,7 @@ test "buffers: generated read-only output is discardable even when editor-dirty"
     const b = bufs.get(output).?;
     try b.textEditor().?.doc.insert(gpa, 0, "generated output");
     try t.expect(try b.textEditor().?.isDirty(gpa));
-    b.read_only = true;
+    b.read_only = produced;
     try t.expect(!(try b.hasUnsavedFile(gpa)));
 }
 
@@ -1096,4 +1241,209 @@ test "buffers: setPlace re-targets a reused tool entry, and ignores a dead id" {
     // A producer landing after the entry is gone must not resurrect anything.
     const dead: Id = @intCast(bufs.slots.items.len + 5);
     bufs.setPlace(dead, a); // no panic, no effect
+}
+
+test "buffers: a scratch document parked past the bound moves to the document store and revives from there" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    var head: Head = .empty;
+    defer head.deinit(gpa);
+
+    var docs: [parked_cap + 1]Document.Id = undefined;
+    for (&docs, 0..) |*doc, i| {
+        const id = try bufs.create(gpa, "*note*");
+        const ed = bufs.get(id).?.textEditor().?;
+        var line: [16]u8 = undefined;
+        try ed.insertText(gpa, try std.fmt.bufPrint(&line, "note {d}\n", .{i}));
+        doc.* = ed.doc.id;
+        // A jump into it, so the move to the store has anchors to settle.
+        try bufs.switchTo(gpa, id, &head, &km);
+        try bufs.switchTo(gpa, 0, &head, &km);
+        try bufs.close(gpa, id, &head, &km);
+    }
+    // The first one closed is no longer parked: it is serialized, not gone.
+    try t.expectEqual(@as(usize, parked_cap), bufs.parked.items.len);
+    try t.expect(bufs.documentById(docs[0]) == null);
+    try t.expect(bufs.documents.contains(docs[0]));
+
+    // Reviving it restores it as a fresh, live, user-made entry, and takes it
+    // out of the store — it lives in one place at a time.
+    const was = bufs.actAs("some-plugin");
+    const id = (try bufs.revive(gpa, docs[0])).?;
+    _ = bufs.actAs(was);
+    const b = bufs.get(id).?;
+    try t.expect(!bufs.documents.contains(docs[0]));
+    try t.expect(b.textEditor().?.doc.id.eql(docs[0]));
+    try t.expectEqualStrings("*note*", b.name);
+    try t.expectEqualStrings("", b.creator);
+    try t.expectEqual(@as(usize, 7), b.textEditor().?.text().byteLen()); // "note 0\n"
+    try t.expect(b.isBareDocument());
+
+    // Restored with no edits since, it is still kept when closed again.
+    try bufs.close(gpa, id, &head, &km);
+    try t.expect(bufs.documentById(docs[0]) != null);
+
+    // An id nothing ever kept is refused, not answered with something else.
+    try t.expect((try bufs.revive(gpa, Document.mintId())) == null);
+}
+
+test "buffers: keeping this run's documents takes every parked and open scratch with text, and nothing else" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    var head: Head = .empty;
+    defer head.deinit(gpa);
+
+    const open_doc = bufs.get(0).?.textEditor().?;
+    try open_doc.insertText(gpa, "open scratch\n");
+    const closed = try bufs.create(gpa, "*closed*");
+    try bufs.get(closed).?.textEditor().?.insertText(gpa, "closed scratch\n");
+    const closed_doc = bufs.get(closed).?.textEditor().?.doc.id;
+    try bufs.close(gpa, closed, &head, &km);
+    const empty = bufs.get(try bufs.create(gpa, "*empty*")).?.textEditor().?.doc.id;
+    const tool = try bufs.create(gpa, "*run*");
+    try bufs.get(tool).?.textEditor().?.insertText(gpa, "output\n");
+    bufs.get(tool).?.read_only = produced;
+    const tool_doc = bufs.get(tool).?.textEditor().?.doc.id;
+
+    try bufs.keepDocuments(gpa);
+    try t.expect(bufs.documents.contains(open_doc.doc.id));
+    try t.expect(bufs.documents.contains(closed_doc));
+    try t.expect(!bufs.documents.contains(empty));
+    try t.expect(!bufs.documents.contains(tool_doc));
+}
+
+test "buffers: a reopen from the store that fails partway loses nothing — the record stays until the entry stands" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    var head: Head = .empty;
+    defer head.deinit(gpa);
+    const kept = try bufs.create(gpa, "*kept*");
+    const ed = bufs.get(kept).?.textEditor().?;
+    try ed.insertText(gpa, "kept\n");
+    const doc = ed.doc.id;
+    _ = try bufs.documents.put(gpa, "*kept*", &ed.doc);
+    // Emptied and closed, the entry is gone for good: the store is the only
+    // place the document lives.
+    try ed.doc.delete(gpa, .{ .start = 0, .end = ed.text().byteLen() });
+    try bufs.close(gpa, kept, &head, &km);
+    try t.expect(bufs.documentById(doc) == null);
+
+    // Fail every allocation the reopen makes, one at a time: whichever one
+    // fails, the document is still kept.
+    var fail_at: usize = 0;
+    while (true) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_at });
+        const got = bufs.revive(failing.allocator(), doc) catch |e| {
+            try t.expectEqual(error.OutOfMemory, e);
+            try t.expect(bufs.documents.contains(doc));
+            continue;
+        };
+        const id = got orelse return error.NotRevived;
+        // It stands: now, and only now, the record is gone.
+        try t.expect(!bufs.documents.contains(doc));
+        try t.expect(bufs.get(id).?.textEditor().?.doc.id.eql(doc));
+        break;
+    }
+    try t.expect(fail_at > 0);
+}
+
+test "buffers: a document bound to a peer is never written to the local store, whatever buffer holds it" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    var head: Head = .empty;
+    defer head.deinit(gpa);
+
+    // Buffer 0 as `--connect` leaves it: a bare entry whose document is a
+    // replica bound to a peer's share. Its text is not ours to keep.
+    const ed = bufs.get(0).?.textEditor().?;
+    try ed.insertText(gpa, "the peer's words\n");
+    var collab = try @import("session/Collab.zig").init(gpa, undefined, &ed.doc, "me");
+    defer collab.deinit();
+    try t.expect(bufs.get(0).?.isBareDocument());
+    try bufs.keepDocuments(gpa);
+    try t.expect(!bufs.documents.contains(ed.doc.id));
+
+    // Nor does it reach the store by being closed past the parked bound.
+    const shared = try bufs.create(gpa, "*shared*");
+    const shared_ed = bufs.get(shared).?.textEditor().?;
+    try shared_ed.insertText(gpa, "also the peer's\n");
+    const shared_doc = shared_ed.doc.id;
+    var shared_collab = try @import("session/Collab.zig").init(gpa, undefined, &shared_ed.doc, "me");
+    shared_collab.deinit();
+    try bufs.close(gpa, shared, &head, &km);
+    for (0..parked_cap) |_| {
+        const id = try bufs.create(gpa, "*note*");
+        try bufs.get(id).?.textEditor().?.insertText(gpa, "mine\n");
+        try bufs.close(gpa, id, &head, &km);
+    }
+    try t.expect(!bufs.documents.contains(shared_doc));
+    try bufs.keepDocuments(gpa);
+    try t.expect(!bufs.documents.contains(shared_doc));
+    try t.expect(!bufs.documents.contains(ed.doc.id));
+}
+
+test "buffers: the document store outlives the process — kept at close, loaded at open, reopened on demand" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    const dir = try kv_file.testDir(gpa, "documents");
+    defer gpa.free(dir);
+    defer kv_file.removeTestDir(gpa, dir); // LIFO: after the file below is gone
+    const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, kv_file.documents_file });
+    defer gpa.free(path);
+    const file_mod = @import("file.zig");
+    file_mod.deleteFile(gpa, path);
+    defer file_mod.deleteFile(gpa, path);
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+
+    // First run: a scratch with text, open at shutdown.
+    const doc = blk: {
+        var bufs = try init(gpa, pool, "user");
+        defer bufs.deinit(gpa);
+        var binding = DocumentFile.openIn(gpa, &bufs, try gpa.dupe(u8, dir));
+        const ed = bufs.get(0).?.textEditor().?;
+        try ed.insertText(gpa, "survives the restart\n");
+        binding.close();
+        break :blk ed.doc.id;
+    };
+    try t.expectEqual(file_mod.Kind.file, file_mod.statKind(gpa, path));
+
+    // Second run: the record is loaded, nothing is opened for it…
+    var bufs = try init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+    var binding = DocumentFile.openIn(gpa, &bufs, try gpa.dupe(u8, dir));
+    defer binding.close();
+    try t.expectEqual(@as(usize, 1), bufs.count());
+    try t.expect(bufs.documents.contains(doc));
+    // …until it is asked for.
+    const id = (try bufs.revive(gpa, doc)).?;
+    const ed = bufs.get(id).?.textEditor().?;
+    try t.expect(ed.doc.id.eql(doc));
+    try t.expectEqual(@as(usize, 21), ed.text().byteLen());
+    try ed.insertText(gpa, "edited ");
+    try t.expect(try ed.undo(gpa, .user_driven));
 }

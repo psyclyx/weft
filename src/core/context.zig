@@ -22,6 +22,19 @@
 //!     dispatch; listeners — wasm plugins (`on_context_changed`) and Zig
 //!     consumers (`Listener`) alike — hear the same list.
 //!
+//! SUBJECTS. A projection presents ANOTHER entry's content — the outline is
+//! the symbols of a document — so it must hear that content change: an edit,
+//! and a parse that lands frames later without any edit at all. That is state
+//! (a revision), not an occurrence, so it lives here beside the keys: a
+//! producer WATCHES a subject by its designation (`watch`), `observeSubjects`
+//! compares each watched subject's revision (`revisionOf`: the opening, its
+//! text, and what is derived from the text) at the same frame boundary, and
+//! the owner hears `on_subject_changed` once per moved subject, bound to the
+//! subject's entry — so the doors it reads there are the subject's, and it
+//! never brings the subject to the front to read it. Coalesced like the
+//! keys: any number of edits and parses in one wake are one delivery, and a
+//! change the listener makes is the next frame's.
+//!
 //! THE COMPANION PROPERTY, KEPT BY CONSTRUCTION. The focus feed's load-bearing
 //! detail was that a follower never observed its own focus: `Companion`
 //! filtered out events from non-`focus_source` viewports before the follower
@@ -41,6 +54,7 @@ const Buffers = @import("Buffers.zig");
 const place_mod = @import("place.zig");
 const file = @import("file.zig");
 const durable = @import("weft_semantic").durable;
+const designation = @import("designation.zig");
 const Router = @import("weft_fs_runtime").Router;
 
 pub const Store = facts.context.Store;
@@ -68,6 +82,36 @@ const Seen = struct {
     fingerprint: u64,
 };
 
+/// What an entry's content derives besides its text — a grammar's tree — as
+/// a number that moves whenever a derived reading lands (`Syntax.generation`).
+/// Installed by whoever attaches such readings (the app's providers); core
+/// cannot see them. Absent, a subject's revision is its opening and its text.
+pub const Derived = *const fn (entry: *Buffers.Buffer) u64;
+
+/// One producer watching one subject (`Context.watch`).
+pub const Watch = struct {
+    /// Who hears it: the plugin's name. Owned; compared, never interpreted.
+    owner: []u8,
+    /// The designation watched, as the owner spelled it. Owned.
+    subject: []u8,
+    /// The revision last delivered (or current when the watch began); null
+    /// while no entry opens the subject.
+    revision: ?u64,
+};
+
+/// A watched subject whose revision moved, as the last `observeSubjects`
+/// found it: who hears it, and the entry its delivery is bound to.
+pub const MovedSubject = struct {
+    /// Owned copy: an owner unloading mid-delivery cannot free it.
+    owner: []u8,
+    entry: Buffers.Ref,
+};
+
+/// How many subjects one plugin may watch at once. A producer watches one
+/// per tree it presents, so this is far past any real use; it bounds the
+/// per-frame cost a misbehaving plugin can add.
+pub const max_watches = 64;
+
 /// Owned by the `System`, reached through `command.Context.context`.
 pub const Context = struct {
     gpa: Allocator,
@@ -87,6 +131,13 @@ pub const Context = struct {
     /// `weft://here/dir/<path>` — taken once, when the context is made.
     /// Owned; empty when the directory cannot be named.
     process_place: []u8 = &.{},
+    /// Who derives state from an entry's text (`Derived`), set by the app.
+    derived: ?Derived = null,
+    /// The subjects producers watch (`watch`), in the order they began.
+    watches: std.ArrayList(Watch) = .empty,
+    /// What the last `observeSubjects` found moved, for the app to deliver.
+    /// Owned; replaced by the next observation.
+    subjects_moved: std.ArrayList(MovedSubject) = .empty,
 
     pub fn init(gpa: Allocator) Context {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -165,6 +216,10 @@ pub const Context = struct {
 
     pub fn deinit(self: *Context) void {
         self.gpa.free(self.process_place);
+        for (self.watches.items) |w| self.freeWatch(w);
+        self.watches.deinit(self.gpa);
+        self.clearSubjectsMoved();
+        self.subjects_moved.deinit(self.gpa);
         for (self.seen.items) |s| self.gpa.free(s.key);
         self.seen.deinit(self.gpa);
         self.clearMoved();
@@ -241,6 +296,96 @@ pub const Context = struct {
         self.seen.deinit(self.gpa);
         self.seen = next;
         return true;
+    }
+
+    /// What a projection of `entry` reads, as one number: which opening it
+    /// is (a reopened subject is new content), its text's revision, and what
+    /// is derived from the text (`derived` — a parse lands frames after the
+    /// edit it reads, with no edit of its own). Equal numbers mean a reader
+    /// sees the same thing. The chrome answer cache keys on it too, so a
+    /// status answer asked before a parse landed is asked again after.
+    pub fn revisionOf(self: *const Context, entry: *Buffers.Buffer) u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(std.mem.asBytes(&entry.generation));
+        const text: u64 = if (entry.textEditor()) |ed| @intFromEnum(ed.doc.revision()) else 0;
+        h.update(std.mem.asBytes(&text));
+        const derived: u64 = if (self.derived) |d| d(entry) else 0;
+        h.update(std.mem.asBytes(&derived));
+        return h.final();
+    }
+
+    pub const WatchError = Allocator.Error || error{ NotADesignation, TooMany };
+
+    /// `owner` hears `on_subject_changed` whenever the entry opening
+    /// `subject` (a designation) reads differently (`revisionOf`), from the
+    /// next frame boundary on. Watching what one already watches is a no-op.
+    /// The revision now is the baseline, so a producer that watches right
+    /// after reading its subject is not told about what it just read.
+    pub fn watch(self: *Context, owner: []const u8, subject: []const u8, buffers: *const Buffers) WatchError!void {
+        if (durable.parse(subject) == null) return error.NotADesignation;
+        var mine: usize = 0;
+        for (self.watches.items) |w| {
+            if (!std.mem.eql(u8, w.owner, owner)) continue;
+            if (std.mem.eql(u8, w.subject, subject)) return;
+            mine += 1;
+        }
+        if (mine >= max_watches) return error.TooMany;
+        const owned_owner = try self.gpa.dupe(u8, owner);
+        errdefer self.gpa.free(owned_owner);
+        const owned_subject = try self.gpa.dupe(u8, subject);
+        errdefer self.gpa.free(owned_subject);
+        const now = if (designation.findText(buffers, subject)) |entry| self.revisionOf(entry) else null;
+        try self.watches.append(self.gpa, .{ .owner = owned_owner, .subject = owned_subject, .revision = now });
+    }
+
+    /// Stop `owner` hearing about `subject`. Not watched is not an error.
+    pub fn unwatch(self: *Context, owner: []const u8, subject: []const u8) void {
+        for (self.watches.items, 0..) |w, i| {
+            if (!std.mem.eql(u8, w.owner, owner) or !std.mem.eql(u8, w.subject, subject)) continue;
+            self.freeWatch(self.watches.orderedRemove(i));
+            return;
+        }
+    }
+
+    /// Every watch `owner` holds ends (the plugin unloaded).
+    pub fn unwatchOwner(self: *Context, owner: []const u8) void {
+        var i = self.watches.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (std.mem.eql(u8, self.watches.items[i].owner, owner)) self.freeWatch(self.watches.orderedRemove(i));
+        }
+    }
+
+    fn freeWatch(self: *Context, w: Watch) void {
+        self.gpa.free(w.owner);
+        self.gpa.free(w.subject);
+    }
+
+    fn clearSubjectsMoved(self: *Context) void {
+        for (self.subjects_moved.items) |m| self.gpa.free(m.owner);
+        self.subjects_moved.clearRetainingCapacity();
+    }
+
+    /// Compare every watched subject's revision with the one last delivered
+    /// and record which moved (`subjects_moved`). A subject no entry opens
+    /// has nothing to read and is not delivered; it moves again when an
+    /// entry opens it. Returns whether any moved. The caller (the app's frame
+    /// boundary) decides WHEN, and delivers.
+    pub fn observeSubjects(self: *Context, buffers: *const Buffers) Allocator.Error!bool {
+        self.clearSubjectsMoved();
+        for (self.watches.items) |*w| {
+            const entry = designation.findText(buffers, w.subject) orelse {
+                w.revision = null;
+                continue;
+            };
+            const now = self.revisionOf(entry);
+            if (w.revision != null and w.revision.? == now) continue;
+            try self.subjects_moved.ensureUnusedCapacity(self.gpa, 1);
+            const owner = try self.gpa.dupe(u8, w.owner);
+            self.subjects_moved.appendAssumeCapacity(.{ .owner = owner, .entry = entry.ref() });
+            w.revision = now;
+        }
+        return self.subjects_moved.items.len > 0;
     }
 
     /// Tell every Zig listener which keys the last `observe` moved. Returns
@@ -336,4 +481,59 @@ test "context: closing an entry retracts what was published at it" {
     _ = try env.context.observe(&env.ctx);
     try t.expectEqual(@as(usize, 1), env.context.store.values.items.len);
     try t.expectEqualStrings("stays", env.context.store.get(.{}, "x.g").?);
+}
+
+/// A stand-in for the app's parse generation: what a test moves by hand.
+var test_derived: u64 = 0;
+fn testDerived(_: *Buffers.Buffer) u64 {
+    return test_derived;
+}
+
+test "context: a watched subject moves on an edit and on a derived reading, once per observation" {
+    const gpa = t.allocator;
+    var env: @import("TestHost.zig") = undefined;
+    try @import("TestHost.zig").init(gpa, &env);
+    defer env.deinit(gpa);
+    env.context.derived = testDerived;
+    test_derived = 0;
+    const entry = env.buffers.active();
+    var buf: [designation.max_len]u8 = undefined;
+    const subject = designation.of(entry, &buf).?;
+
+    try env.context.watch("symbols", subject, &env.buffers);
+    try env.context.watch("symbols", subject, &env.buffers); // idempotent
+    try t.expectEqual(@as(usize, 1), env.context.watches.items.len);
+    try t.expectError(error.NotADesignation, env.context.watch("symbols", "not one", &env.buffers));
+    // The baseline is what the watcher just read: nothing has moved.
+    try t.expect(!try env.context.observeSubjects(&env.buffers));
+
+    // Many edits in one wake are one delivery, bound to the subject's entry.
+    try entry.textEditor().?.doc.insert(gpa, 0, "a");
+    try entry.textEditor().?.doc.insert(gpa, 1, "b");
+    try t.expect(try env.context.observeSubjects(&env.buffers));
+    try t.expectEqual(@as(usize, 1), env.context.subjects_moved.items.len);
+    try t.expectEqualStrings("symbols", env.context.subjects_moved.items[0].owner);
+    try t.expect(std.meta.eql(entry.ref(), env.context.subjects_moved.items[0].entry));
+    try t.expect(!try env.context.observeSubjects(&env.buffers));
+
+    // A parse that lands with no edit is a move too.
+    test_derived += 1;
+    try t.expect(try env.context.observeSubjects(&env.buffers));
+
+    // Unloading ends every watch the owner held.
+    env.context.unwatchOwner("symbols");
+    try t.expectEqual(@as(usize, 0), env.context.watches.items.len);
+    try entry.textEditor().?.doc.insert(gpa, 0, "c");
+    try t.expect(!try env.context.observeSubjects(&env.buffers));
+}
+
+test "context: one plugin's watches are bounded, and another's are its own" {
+    const gpa = t.allocator;
+    var env: @import("TestHost.zig") = undefined;
+    try @import("TestHost.zig").init(gpa, &env);
+    defer env.deinit(gpa);
+    var name: [64]u8 = undefined;
+    for (0..max_watches) |i| try env.context.watch("p", try std.fmt.bufPrint(&name, "weft://here/p.k/{d}", .{i}), &env.buffers);
+    try t.expectError(error.TooMany, env.context.watch("p", "weft://here/p.k/over", &env.buffers));
+    try env.context.watch("q", "weft://here/q.k/0", &env.buffers);
 }

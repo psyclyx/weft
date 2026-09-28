@@ -12,6 +12,7 @@ const region = @import("weft_gfx").region;
 const window_layout = @import("weft_gfx").window_layout;
 const view_mod = @import("weft_gfx").view;
 const frame = @import("frame.zig");
+const frame_builder = @import("frame_builder.zig");
 const providers = @import("providers.zig");
 const window_cmds = @import("window_cmds.zig");
 const session_mod = @import("session.zig");
@@ -26,13 +27,21 @@ pub const Application = struct {
     js_plugins: *std.ArrayList(*core.quickjs.JsPlugin),
 
     view_dirty: bool = true,
+    /// What the pointer rests on — frame input the pointer keeps and the
+    /// frame reads (`pointer.Hover`).
+    hover: pointer_mod.Hover = .{},
     last_frame_rect: region.Rect = .{},
-    flash_gen: u64 = 0,
-    flash_start_ns: u64 = 0,
-    flash_was_active: bool = false,
-    /// How long a flash shows; the frame re-reads `editor/flash-ms` into it
-    /// whenever a new flash starts.
-    flash_duration_ns: u64 = 150 * std.time.ns_per_ms,
+    /// Whether the vim-goggles flash shows — noted at each wake's boundary
+    /// (`observe`), read by the frame.
+    flash_timing: frame.FlashTiming = .{},
+    /// When the head's message was said, for how long the frame shows it —
+    /// noted at each wake's boundary (`observe`), read by the frame.
+    echo_timing: frame.EchoTiming = .{},
+    /// The same for the system's last notice (`Buffers.notices`).
+    notice_timing: frame.EchoTiming = .{},
+    /// This wake's clock (`tickAsync`'s `frame_start`), for what `observe`
+    /// notes just before the frame.
+    wake_ns: u64 = 0,
 
     next_backing_poll_ns: u64 = 0,
     last_activate_path: [std.fs.max_path_bytes]u8 = undefined,
@@ -92,7 +101,7 @@ pub const Application = struct {
             .lifecycle = .{ .blink_period_ns = args.blink_period_ns },
             .before_async = args.before_async,
             .services = args.services,
-            .flash_duration_ns = args.flash_duration_ns,
+            .flash_timing = .{ .duration_ns = args.flash_duration_ns },
         };
         self.driver = .{
             .ctx = .{
@@ -115,11 +124,11 @@ pub const Application = struct {
                 .known_peers = args.known_peers,
                 .noted_host_fp = args.noted_host_fp,
                 .view_dirty = &self.view_dirty,
+                .hover = &self.hover,
                 .last_frame_rect = &self.last_frame_rect,
-                .flash_gen = &self.flash_gen,
-                .flash_start_ns = &self.flash_start_ns,
-                .flash_was_active = &self.flash_was_active,
-                .flash_duration_ns = &self.flash_duration_ns,
+                .flash_timing = &self.flash_timing,
+                .echo_timing = &self.echo_timing,
+                .notice_timing = &self.notice_timing,
                 .config = args.config orelse &args.session.system.config_kv,
                 .cmd_ctx = &args.session.cmd_ctx,
             },
@@ -195,6 +204,7 @@ pub const Application = struct {
     }
 
     pub fn tickAsync(self: *Application, active: frame.Driver.Prepared, frame_start: u64) !bool {
+        self.wake_ns = frame_start;
         var damaged = try frame.tickAsync(
             &self.driver.ctx,
             active.buffer,
@@ -211,6 +221,14 @@ pub const Application = struct {
         for (self.js_plugins.items) |plugin| if (plugin.tick()) {
             damaged = true;
         };
+        // The pointer has rested long enough: the frame that shows the
+        // tooltip is due (the loop's `tooltip_delay` timer woke us for it).
+        // Its key hint is found now, off the frame path: the frame is handed
+        // it (doc/model.md §2.7).
+        if (self.hover.ripen(frame_start)) {
+            self.hover.settle(&self.session.cmd_ctx, self.driver.view.hoveredCommand());
+            damaged = true;
+        }
         if (try self.services.call(self, active)) damaged = true;
         return damaged;
     }
@@ -218,6 +236,7 @@ pub const Application = struct {
     pub fn applyWindowIntents(self: *Application) bool {
         var damaged = self.driver.applyWindowIntents(&self.session.cmd_ctx);
         if (self.notifyContextChanged()) damaged = true;
+        if (self.notifySubjectsChanged()) damaged = true;
         // Named signals plugins raised this wake (`wl_signal_emit`), heard at
         // the same boundary and for the same reason: never inside the
         // dispatch or poll that raised them.
@@ -257,7 +276,12 @@ pub const Application = struct {
         const context = ctx.context orelse return false;
         const plugins = self.driver.ctx.plugins.items;
         const viewports = self.driver.ctx.viewports;
-        const hears = context.listeners.items.len > 0 or viewports.followsAny() or for (plugins) |pl| {
+        // A JS plugin says when it installs a handler (`weft.onContextChanged`,
+        // `JsPlugin.hears_context`); one that never does is never asked.
+        const js_hears = for (self.js_plugins.items) |jp| {
+            if (jp.hears_context) break true;
+        } else false;
+        const hears = context.listeners.items.len > 0 or viewports.followsAny() or js_hears or for (plugins) |pl| {
             if (core.wasm_host.hearsContext(pl)) break true;
         } else false;
         if (!hears) return false;
@@ -270,8 +294,45 @@ pub const Application = struct {
         for (plugins) |pl| {
             if (core.wasm_host.notifyContextChanged(pl)) ran = true;
         }
+        for (self.js_plugins.items) |jp| {
+            if (jp.notifyContextChanged()) ran = true;
+        }
         if (viewports.follow(context.movedKeys())) {
             if (self.driver.applyWindowIntents(ctx)) ran = true;
+        }
+        return ran;
+    }
+
+    /// The subject event (doc/model.md §2.5, `context.Context.watch`): tell
+    /// each producer watching a subject that the subject reads differently —
+    /// an edit, or a parse that landed with no edit — so a projection of it
+    /// (the outline of a document) reads it again, once, bound to the
+    /// subject's entry. The same boundary and the same guarantees as the
+    /// context event: coalesced over the wake, never inside a dispatch, and
+    /// a change the listener makes is the next frame's.
+    fn notifySubjectsChanged(self: *Application) bool {
+        const ctx = &self.session.cmd_ctx;
+        const context = ctx.context orelse return false;
+        if (context.watches.items.len == 0) return false;
+        const moved = context.observeSubjects(ctx.buffers) catch |err| {
+            std.log.warn("context: observing watched subjects failed: {t}", .{err});
+            return false;
+        };
+        if (!moved) return false;
+        var ran = false;
+        // By index: a listener may watch or unwatch, but `subjects_moved` is
+        // replaced only by the next observation.
+        var i: usize = 0;
+        while (i < context.subjects_moved.items.len) : (i += 1) {
+            const m = context.subjects_moved.items[i];
+            for (self.driver.ctx.plugins.items) |pl| {
+                if (!std.mem.eql(u8, pl.name, m.owner)) continue;
+                if (core.wasm_host.notifySubjectChanged(pl, m.entry)) ran = true;
+            }
+            for (self.js_plugins.items) |jp| {
+                if (!std.mem.eql(u8, jp.name, m.owner)) continue;
+                if (jp.notifySubjectChanged(m.entry)) ran = true;
+            }
         }
         return ran;
     }
@@ -288,6 +349,21 @@ pub const Application = struct {
                 damaged = true;
             }
         }
+        // The head's message, timed where it was said: the last thing noted
+        // before the frame, so whatever this wake said is in it, and the
+        // frame only reads whether it shows.
+        // A notice — what no head asked to hear — is timed by the same rule.
+        const echo = &self.session.head.echo;
+        const notices = &self.driver.ctx.buffers.notices;
+        const ms = echoMs(self.driver.ctx.config);
+        if (self.echo_timing.note(echo.sayings(), echo.text().len > 0, self.wake_ns, ms)) damaged = true;
+        if (self.notice_timing.note(notices.said, notices.len > 0, self.wake_ns, ms)) damaged = true;
+        // The vim-goggles flash, by the same rule: its start and its lapse are
+        // this wake's to note, so the frame draws it without timing it.
+        const config = self.driver.ctx.config;
+        const flash = &self.driver.ctx.caps.flash;
+        const gen = flash.genOf(flash.showing(frame_builder.configOn(config, "editor", "flash-undo")));
+        if (self.flash_timing.note(gen, self.wake_ns, configMs(config, "editor", "flash-ms"))) damaged = true;
         return damaged;
     }
 
@@ -308,3 +384,15 @@ pub const Application = struct {
         });
     }
 };
+
+/// `editor/echo-ms`: how long a message shows, when a config says.
+fn echoMs(config: ?*const core.kv.Store) ?u64 {
+    return configMs(config, "editor", "echo-ms");
+}
+
+/// A `weft.set(ns, key, "<ms>")` value in milliseconds, or null when unset
+/// or not a number.
+fn configMs(config: ?*const core.kv.Store, ns: []const u8, key: []const u8) ?u64 {
+    const raw = (config orelse return null).get(ns, key) orelse return null;
+    return std.fmt.parseInt(u64, core.framed.first(raw) orelse return null, 10) catch null;
+}

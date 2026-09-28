@@ -40,7 +40,7 @@ fn activeName(ed: *Editor) []const u8 {
 
 /// The entry the bottom panel shows, or null when it is not docked.
 fn panelEntry(ed: *Editor) ?*core.Buffers.Buffer {
-    const node = ed.win_layout.dockedPanel(.bottom) orelse return null;
+    const node = ed.viewportPane("panel") orelse return null;
     return ed.buffers.get(node.pane().buffer_id);
 }
 
@@ -96,12 +96,12 @@ test "e2e/panels: the problems list shows every diagnostic by file, follows the 
     try core.file.writeBytes(gpa, "p.zig", "const a = 1;\nconst bee = 2;\nconst c = 3;\n");
     try ide.openFile(ed, "q.txt", "one\ntwo\n");
     try h.loadDiagfeed(ed);
-    try ed.setConfig("problems", "source", "diagfeed-list");
-    ed.runStr("diagfeed-set", "p.zig\t2\t7\terror\tbee is unused\n");
+    try ed.setConfig("problems", "source", "diagfeed.list");
+    ed.runStr("diagfeed.set", "p.zig\t2\t7\terror\tbee is unused\n");
 
     // The panel starts hidden; C-S-m opens the list in it and focuses it.
     ed.applyWindow();
-    try t.expect(ed.win_layout.dockedPanel(.bottom) == null);
+    try t.expect(ed.viewportPane("panel") == null);
     ed.press("C-S-m", "");
     ed.applyWindow();
     const shown = panelEntry(ed) orelse return error.PanelNotShown;
@@ -127,7 +127,7 @@ test "e2e/panels: the problems list shows every diagnostic by file, follows the 
     // The source changes and says so; the open list follows at the next
     // frame boundary, with nothing re-run by hand. A row from outside the
     // place is not this place's.
-    ed.runStr("diagfeed-set", "p.zig\t1\t7\twarning\ta is shadowed\np.zig\t2\t7\terror\tbee is unused\n/elsewhere/x.zig\t1\t1\terror\tforeign\n");
+    ed.runStr("diagfeed.set", "p.zig\t1\t7\twarning\ta is shadowed\np.zig\t2\t7\terror\tbee is unused\n/elsewhere/x.zig\t1\t1\terror\tforeign\n");
     ed.applyWindow();
     {
         const text = try ed.semanticText(view);
@@ -156,10 +156,10 @@ test "e2e/panels: two viewports on two places' diagnostics each keep their own l
 
     try ide.openFile(ed, "q.txt", "one\ntwo\n");
     try h.loadDiagfeed(ed);
-    try ed.setConfig("problems", "source", "diagfeed-list");
+    try ed.setConfig("problems", "source", "diagfeed.list");
     const rows = try std.fmt.allocPrint(gpa, "{s}/p.zig\t1\t1\terror\tin the project\n{s}/other/x.zig\t1\t1\terror\tin other\n", .{ app.proj.root, app.proj.root });
     defer gpa.free(rows);
-    ed.runStr("diagfeed-set", rows);
+    ed.runStr("diagfeed.set", rows);
 
     var a_buf: [4096]u8 = undefined;
     var b_buf: [4096]u8 = undefined;
@@ -170,7 +170,7 @@ test "e2e/panels: two viewports on two places' diagnostics each keep their own l
     try viewports.declare(gpa, "diag-b", .{ .dock = .right, .persistent = true, .cycles = false, .focus_source = false }, .{ .rows = 30 });
     try viewports.present(gpa, "diag-a", .{ .subject = .{ .text = a } });
     try viewports.present(gpa, "diag-b", .{ .subject = .{ .text = b } });
-    ed.runStr("open", "q.txt");
+    ed.runStr("file.open", "q.txt");
     ed.applyWindow();
     ed.applyWindow();
 
@@ -196,7 +196,7 @@ test "e2e/panels: two viewports on two places' diagnostics each keep their own l
 
     // The signal refreshes both, and another frame presents neither again.
     const ids = .{ entry_a.id, entry_b.id };
-    ed.runStr("diagfeed-set", rows);
+    ed.runStr("diagfeed.set", rows);
     ed.applyWindow();
     ed.applyWindow();
     try t.expectEqual(ids[0], pane_a.pane().buffer_id);
@@ -249,7 +249,7 @@ test "e2e/panels: C-` runs a line-mode shell in the panel, with its controls str
     // C-j hides the panel, and shows the same shell again.
     ed.press("C-j", "");
     ed.applyWindow();
-    try t.expect(ed.win_layout.dockedPanel(.bottom) == null);
+    try t.expect(ed.viewportPane("panel") == null);
     ed.press("C-j", "");
     ed.applyWindow();
     try t.expectEqualStrings("*terminal*", (panelEntry(ed) orelse return error.PanelNotShown).name);
@@ -438,7 +438,7 @@ test "e2e/panels: the breadcrumbs name the symbols around the caret, and a click
 
     // The grammar parses off the frame thread; frames until the crumbs show.
     var want_buf: [64]u8 = undefined;
-    const want = try std.fmt.bufPrint(&want_buf, "breadcrumbs-jump {d}", .{fn_at});
+    const want = try std.fmt.bufPrint(&want_buf, "breadcrumbs.jump {d}", .{fn_at});
     const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
     const at = while (core.task.nowNs() < deadline) {
         try frame(ed);
@@ -446,7 +446,7 @@ test "e2e/panels: the breadcrumbs name the symbols around the caret, and a click
         std.Thread.yield() catch {};
     } else return error.NoCrumbs;
     // The outer crumb is there too, and names the struct.
-    try t.expect(ed.pointAtStatusCommand("breadcrumbs-jump 0") != null);
+    try t.expect(ed.pointAtStatusCommand("breadcrumbs.jump 0") != null);
 
     // Clicking the inner crumb runs its command: the caret goes to `fn`.
     ed.click(at);
@@ -462,9 +462,9 @@ test "e2e/panels: a panel whose entry closed does not capture the next entry to 
     const ed = &app.ed;
 
     try ide.openFile(ed, "x.txt", "x\n");
-    ed.runStr("buffer-create", "held");
+    ed.runStr("buffer.create", "held");
     const held = ed.buffers.active_id;
-    ed.runStr("viewport-take", "panel");
+    ed.runStr("viewport.take", "panel");
     ed.applyWindow();
     try t.expectEqualStrings("held", (panelEntry(ed) orelse return error.PanelNotShown).name);
 
@@ -472,17 +472,36 @@ test "e2e/panels: a panel whose entry closed does not capture the next entry to 
     // unrelated one is created into the freed slot.
     ed.press("C-j", "");
     ed.applyWindow();
-    try t.expect(ed.win_layout.dockedPanel(.bottom) == null);
-    _ = try core.command.run(ed.commands, ed.ctx, "buffer-switch", &.{.{ .integer = held }});
-    ed.run("buffer-close");
+    try t.expect(ed.viewportPane("panel") == null);
+    _ = try core.command.run(ed.commands, ed.ctx, "buffer.switch", &.{.{ .integer = held }});
+    ed.run("buffer.close-unmodified");
     try t.expect(ed.buffers.get(held) == null);
-    ed.runStr("buffer-create", "intruder");
+    ed.runStr("buffer.create", "intruder");
     try t.expectEqual(held, ed.buffers.active_id);
-    ed.runStr("open", "x.txt");
+    ed.runStr("file.open", "x.txt");
 
     // Shown again, the panel must not claim the intruder as what it held.
     ed.press("C-j", "");
     ed.applyWindow();
     const shown = panelEntry(ed) orelse return error.PanelNotShown;
     try t.expect(!std.mem.eql(u8, shown.name, "intruder"));
+}
+
+test "e2e/panels: a panel declared `rows: 12` shows 12 body rows where panes carry no status line of their own" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try ide.openFile(ed, "x.txt", "x\n");
+    ed.press("C-j", "");
+    ed.applyWindow();
+    try frame(ed);
+    // ide.js uses the one status bar (config/statusbar.js): no pane — the
+    // panel neither — draws a line of its own, so none may be reserved.
+    const node = ed.viewportPane("panel") orelse return error.PanelNotShown;
+    const v = try ed.ensureView();
+    const rect = ed.win_layout.focusedRect(node, ed.application.last_frame_rect);
+    try t.expectEqual(@as(usize, 12), v.rowsIn(rect.h));
 }

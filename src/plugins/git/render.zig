@@ -194,7 +194,7 @@ pub fn repaint() void {
         _ = b.add(.{
             .key = "s:none",
             .role = role_header,
-            .text = "Not a git repository.\n\nRun git-init (SPC g i) to start one.",
+            .text = "Not a git repository.\n\nRun git.init (SPC g i) to start one.",
         });
         _ = b.commit();
         return;
@@ -230,13 +230,19 @@ pub fn repaint() void {
 
 fn addFile(b: weft.ProjectionBuilder, parent: u32, fi: usize) void {
     const f = &cur().files.items[fi];
+    const key = keyOf(.{ .kind = .file, .section = f.section, .path = f.path, .plen = f.plen });
     const file_node = b.addFmt(.{
-        .key = keyOf(.{ .kind = .file, .section = f.section, .path = f.path, .plen = f.plen }),
+        .key = key,
         .role = roleFile(f.section),
         .parent = parent,
         .foldable = f.n_hunks > 0,
         .focusable = true,
     }, "  {s}{s}", .{ statusLabel(f), f.path_() }) orelse return;
+    // The path is the row's subject — the same key and role, so a verb on it
+    // is a verb on the file — which is what a person calls the row: point
+    // rests on it, and type-ahead matches it.
+    const at = 2 + statusLabel(f).len;
+    b.part(file_node, at, at + f.path_().len, roleFile(f.section), key);
 
     var h = f.first_hunk;
     while (h < f.first_hunk + f.n_hunks) : (h += 1) {

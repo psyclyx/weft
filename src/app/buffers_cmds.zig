@@ -1,10 +1,11 @@
-//! Buffer open/close/browse commands — the graphical shell's versions that
-//! know about providers, remote shells and peers (they shadow the core
-//! versions; registry last-wins). `open` takes a designation (doc/model.md
-//! §2.1) — or an absolute path standing in for one, or `host:path` over a
-//! persistent ssh shell — and routes it by kind and authority; `browse-remote`
-//! lists a remote directory over that shell; `buffer-close` unbinds shares and
-//! detaches providers before the document dies.
+//! The graphical shell's half of opening and closing entries — what knows
+//! about providers, remote shells and peers — as core's `EntryShell` door
+//! (`entryShell`), so `file.open` and `buffer.close-*` stay core's one
+//! registration each. An open takes a designation (doc/model.md §2.1) — or an
+//! absolute path standing in for one, or `host:path` over a persistent ssh
+//! shell — and routes it by kind and authority; a close unbinds shares and
+//! detaches providers before the document dies. `file.browse-remote`, which
+//! lists a remote directory over that shell, is the shell's own command.
 
 const std = @import("std");
 const core = @import("weft_core");
@@ -46,6 +47,11 @@ pub const Context = struct {
     pub fn fileOpener(self: *Context) FileOpener {
         return .{ .context = self };
     }
+
+    /// Core's door for opening and retiring entries, answered here.
+    pub fn entryShell(self: *Context) core.command.EntryShell {
+        return .{ .context = self, .open = openThroughShell, .retire = retireThroughShell };
+    }
 };
 const attachProviders = providers.attachProviders;
 const detachProviders = providers.detachProviders;
@@ -58,7 +64,7 @@ const detachProviders = providers.detachProviders;
 /// - `weft://shell:<host>/file/<path>` (or `host:path`): over that shell;
 /// - `weft://<peer>/…`: to the peer (its shared tree, a document it shares);
 /// - a document, a process, a projection: as core answers them
-///   (`designation.openHeld`) — a live entry, a parked document, a producer
+///   (`designation.openHeld`) — a live entry, a kept document, a producer
 ///   re-run.
 ///
 /// A relative path is resolved once, here, against the place the command runs
@@ -102,7 +108,7 @@ pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
 fn openDesignation(ctx: *core.command.Context, command_context: *Context, d: durable.Designation, text: []const u8) anyerror!core.command.Value {
     const opened: core.command.Value = if (try core.designation.openHeld(ctx, d, text)) |outcome| switch (outcome) {
         .opened => |id| blk: {
-            // A document reopened from the parked store comes back without
+            // A kept document reopened (parked, or from the store) comes without
             // the providers its close detached.
             if (ctx.buffers.get(id)) |b| try attachProviders(command_context.attachments, b);
             break :blk .{ .integer = @intCast(id) };
@@ -122,7 +128,8 @@ fn openDesignation(ctx: *core.command.Context, command_context: *Context, d: dur
         },
         .shell => |host| switch (d.kind) {
             .file => try openShell(ctx, command_context, host, d.ref),
-            else => return .{ .string = "open: a shell locus holds only files" },
+            .directory => try openShellDirectory(ctx, command_context, host, d.ref, text),
+            else => return .{ .string = "open: a shell locus holds files and directories" },
         },
         .peer => blk: {
             const peers = command_context.peers orelse return .{ .string = core.designation.refuse_unreachable };
@@ -190,11 +197,12 @@ fn openLocalWith(ctx: *core.command.Context, command_context: *Context, raw: []c
     return .{ .integer = @intCast(id) };
 }
 
-/// scp-style `host:path` — no `/` before the first `:`.
+/// scp-style `host:path` — the text before the first `:` a host ssh would
+/// read as one (`durable.validShellHost`, the grammar's own test).
 fn scpSpec(spec: []const u8) ?struct { host: []const u8, path: []const u8 } {
     const colon = std.mem.indexOfScalar(u8, spec, ':') orelse return null;
-    if (std.mem.indexOfScalar(u8, spec[0..colon], '/') != null) return null;
-    if (colon == 0 or colon + 1 >= spec.len) return null;
+    if (!durable.validShellHost(spec[0..colon])) return null;
+    if (colon + 1 >= spec.len) return null;
     return .{ .host = spec[0..colon], .path = spec[colon + 1 ..] };
 }
 
@@ -204,11 +212,11 @@ fn scpSpec(spec: []const u8) ?struct { host: []const u8, path: []const u8 } {
 /// document.
 fn openShell(ctx: *core.command.Context, command_context: *Context, host: []const u8, path: []const u8) anyerror!core.command.Value {
     const deps = command_context.attachments;
-    const fs0 = deps.shells.get(host);
+    const fs0: ?*core.ShellFs = if (deps.shells.get(host)) |sh| &sh.channel else null;
     var rit = ctx.buffers.iterator();
     while (rit.next()) |b| {
         switch ((b.textEditor() orelse continue).backing) {
-            .shell => |s| if (s.fs == fs0 and std.mem.eql(u8, s.path, path)) {
+            .remote => |r| if (core.backing.ShellRemote.of(r.remote)) |s| if (s.fs == fs0 and std.mem.eql(u8, s.path, path)) {
                 try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
                 return .{ .integer = @intCast(b.id) };
             },
@@ -224,23 +232,48 @@ fn openShell(ctx: *core.command.Context, command_context: *Context, host: []cons
         var named: [core.designation.max_len]u8 = undefined;
         const d: durable.Designation = .{ .authority = .{ .shell = host }, .kind = .file, .ref = path };
         if (d.render(&named)) |text| try buf.setDesignation(ctx.gpa, text) else |_| {}
+        // Its place is the directory it is in, on the shell's locus — so it
+        // reads `remote`, a sidebar following the place lists that
+        // directory, and the file's row is revealed there.
+        const parent = try deps.shellDirectory(ctx, host, std.fs.path.dirnamePosix(path) orelse "/");
+        if (try core.designation.placeOf(ctx, parent)) |p| ctx.buffers.setPlace(id, p);
     }
     try attachProviders(deps, buf);
     try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
     return .{ .integer = @intCast(id) };
 }
 
+/// A directory over `host`'s shell, presented as a listing like every other
+/// directory (`session.presentDirectory`) — through the shell's filesystem
+/// provider, so it lists, descends, reveals and opens its files the way a
+/// local or a peer's directory does — and in its own place, on the shell's
+/// locus. A listing already showing it is focused instead.
+fn openShellDirectory(ctx: *core.command.Context, command_context: *Context, host: []const u8, path: []const u8, text: []const u8) anyerror!core.command.Value {
+    if (core.designation.findText(ctx.buffers, text)) |live| {
+        try ctx.buffers.switchTo(ctx.gpa, live.id, ctx.head, ctx.keymap);
+        return .{ .integer = @intCast(live.id) };
+    }
+    const at = command_context.attachments.shellDirectory(ctx, host, path) catch |err| return switch (err) {
+        error.NotFound, error.NotDirectory => .{ .string = "open: the shell has no such directory" },
+        error.Io => .{ .string = "open: the shell is not answering" },
+        else => |e| e,
+    };
+    try @import("session.zig").presentDirectory(ctx, at);
+    if (try core.designation.placeOf(ctx, at)) |p| ctx.buffers.setPlace(ctx.buffers.active_id, p);
+    return .nil;
+}
+
 // ── Remote directory browsing (fs_source over the host's shell) ─────
 
 /// One remote-browse pick's navigation state: the host and the current
 /// directory. Accepting descends (dir), ascends (`../`), or opens a
-/// file — each re-runs `browse-remote` or `open` by name.
+/// file — each re-runs `file.browse-remote` or `open` by name.
 const RemoteBrowse = struct {
     host: []u8,
     path: []u8,
 };
 
-/// `browse-remote <host> <path>` — list a remote directory over the
+/// `file.browse-remote <host> <path>` — list a remote directory over the
 /// persistent ssh shell and pick over it (streamed by fs_source).
 pub fn browseRemoteHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const command_context: *Context = @ptrCast(@alignCast(data.?));
@@ -276,7 +309,7 @@ fn browseRemoteAccept(ctx: *core.command.Context, data: ?*anyopaque, outcome: co
     const gpa = ctx.gpa;
     if (std.mem.eql(u8, choice, "../")) {
         const up = parentPath(rb.path);
-        _ = try core.command.run(ctx.commands, ctx, "browse-remote", &.{
+        _ = try core.command.run(ctx.commands, ctx, "file.browse-remote", &.{
             .{ .string = rb.host }, .{ .string = up },
         });
         return;
@@ -284,7 +317,7 @@ fn browseRemoteAccept(ctx: *core.command.Context, data: ?*anyopaque, outcome: co
     if (std.mem.endsWith(u8, choice, "/")) {
         const child = try joinPath(gpa, rb.path, choice[0 .. choice.len - 1]);
         defer gpa.free(child);
-        _ = try core.command.run(ctx.commands, ctx, "browse-remote", &.{
+        _ = try core.command.run(ctx.commands, ctx, "file.browse-remote", &.{
             .{ .string = rb.host }, .{ .string = child },
         });
         return;
@@ -293,7 +326,7 @@ fn browseRemoteAccept(ctx: *core.command.Context, data: ?*anyopaque, outcome: co
     defer gpa.free(child);
     const spec = try std.fmt.allocPrint(gpa, "{s}:{s}", .{ rb.host, child });
     defer gpa.free(spec);
-    _ = try core.command.run(ctx.commands, ctx, "open", &.{.{ .string = spec }});
+    _ = try core.command.run(ctx.commands, ctx, "file.open", &.{.{ .string = spec }});
 }
 
 fn browseRemoteCleanup(data: ?*anyopaque, gpa: std.mem.Allocator) void {
@@ -321,92 +354,56 @@ fn joinPath(gpa: std.mem.Allocator, base: []const u8, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(gpa, "{s}/{s}", .{ b, name });
 }
 
-pub fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    if (args.len != 0) return error.ArityMismatch;
-    if (holdsUnsavedWork(ctx, ctx.buffers.active())) return .{ .string = "dirty" };
-    return closeActive(ctx, data);
+/// `EntryShell.open`: `file.open`, where the shell is.
+fn openThroughShell(raw: *anyopaque, ctx: *core.command.Context, spec: []const u8) anyerror!core.command.Value {
+    return openBufferHandler(ctx, raw, &.{.{ .string = spec }});
 }
 
-/// Whether closing `b` would lose work: edits its file never received, or a
-/// draft one of its views holds that its provider has not applied (a renamed
-/// row in a listing). A listing keeps a view per directory it visited, so
-/// every one of them is asked, not only the one it shows.
-pub fn holdsUnsavedWork(ctx: *core.command.Context, b: *core.Buffers.Buffer) bool {
-    if (b.hasUnsavedFile(ctx.gpa) catch true) return true;
-    const services = ctx.semantic orelse return false;
-    const focus = if (b.id == ctx.buffers.active_id) &ctx.head.scene_selection else &b.scene_selection;
-    if (focus.view) |v| if (services.holdsDraft(v)) return true;
-    if (b.tool_view) |v| if (services.holdsDraft(v)) return true;
-    for (b.view_cursors.items) |saved| if (services.holdsDraft(saved.view)) return true;
-    return false;
-}
-
-/// `buffer-close-force`: the same close, minus the dirty check. It has to be
-/// shadowed here like `buffer-close`: core's version knows nothing of
-/// providers, so closing through it leaked the buffer's syntax instance (tree,
-/// parser, mirror rope) and its feed layers.
-pub fn closeBufferForceHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    if (args.len != 0) return error.ArityMismatch;
-    return closeActive(ctx, data);
-}
-
-fn closeActive(ctx: *core.command.Context, data: ?*anyopaque) anyerror!core.command.Value {
-    const command_context: *Context = @ptrCast(@alignCast(data.?));
+/// `EntryShell.retire`: `entry` is closing. Core's close alone leaked its
+/// syntax instance (tree, parser, mirror rope) and its feed layers, and left
+/// peers bound to a document about to die. Order matters: shares reference
+/// the doc and its layers.
+fn retireThroughShell(raw: *anyopaque, ctx: *core.command.Context, entry: *core.Buffers.Buffer) void {
+    _ = ctx;
+    const command_context: *Context = @ptrCast(@alignCast(raw));
     const deps = command_context.attachments;
-    // The ACTIVE entry, like core's: closing is focus-scoped, and a background
-    // delivery's bound entry is where it writes, not what it may retire.
-    const b = ctx.buffers.active();
-    // Order matters: shares reference the doc and its layers.
     if (deps.share) |sc| {
-        if (sc.conn.*) |*c| c.unbindTag(b.id);
-        if (sc.hub.*) |*h| for (h.clients.items) |peer| peer.conn.unbindTag(b.id);
+        if (sc.conn.*) |*c| c.unbindTag(entry.id);
+        if (sc.hub.*) |*h| for (h.clients.items) |peer| peer.conn.unbindTag(entry.id);
         var i: usize = 0;
         while (i < sc.shared.items.len) {
-            if (sc.shared.items[i].tag == b.id) {
+            if (sc.shared.items[i].tag == entry.id) {
                 sc.gpa.free(sc.shared.items[i].name);
                 _ = sc.shared.swapRemove(i);
             } else i += 1;
         }
     }
-    detachProviders(deps, b);
-    try ctx.buffers.close(ctx.gpa, b.id, ctx.head, ctx.keymap);
-    return .nil;
+    detachProviders(deps, entry);
 }
 
-/// Bind the graphical shell's open/close/browse commands onto `commands`,
-/// all pointing at the caller-owned `attach_deps`. These shadow the core
-/// versions (registry last-wins): they know about providers and remote
-/// shells, so they must register AFTER `core.builtins.install`.
+/// Bind the shell's own command, `file.browse-remote`, onto `commands`,
+/// pointing at the caller-owned `context`. Opening and closing are core's
+/// commands; the shell answers them through `Context.entryShell`.
 pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands, context: *Context) !void {
-    _ = try commands.bind(gpa, "open", .{
-        .name = "open",
-        .summary = "Open a designation (weft://…), an absolute path, or host:path over a shell.",
-        .args = &.{.{ .name = "path", .type = .string }},
-        .handler = openBufferHandler,
-        .data = context,
-    });
-    _ = try commands.bind(gpa, "buffer-close", .{
-        .name = "buffer-close",
-        .summary = "Close the active buffer (refuses when dirty), detaching providers.",
-        .args = &.{},
-        .handler = closeBufferHandler,
-        .data = context,
-    });
-    _ = try commands.bind(gpa, "buffer-close-force", .{
-        .name = "buffer-close-force",
-        .summary = "Close the active buffer, discarding unsaved edits, detaching providers.",
-        .args = &.{},
-        .handler = closeBufferForceHandler,
-        .data = context,
-    });
-    _ = try commands.bind(gpa, "browse-remote", .{
-        .name = "browse-remote",
-        .summary = "Browse a remote directory (host, path) over the host's shell.",
+    _ = try commands.bind(gpa, "file.browse-remote", .{
+        .name = "file.browse-remote",
+        .summary = "Browse a directory on a remote host over its shell.",
         .args = &.{
             .{ .name = "host", .type = .string },
             .{ .name = "path", .type = .string },
         },
         .handler = browseRemoteHandler,
         .data = context,
+        .meta = .{ .label = "Browse Remote Files", .icon = "globe", .prompts = true },
     });
+}
+
+test "buffers: scp form names a host only when ssh would read it as one" {
+    const t = std.testing;
+    try t.expectEqualStrings("box", scpSpec("box:/etc/hosts").?.host);
+    try t.expectEqualStrings("me@box", scpSpec("me@box:notes.txt").?.host);
+    try t.expect(scpSpec("-oProxyCommand=x:/y") == null);
+    try t.expect(scpSpec("me@-oProxyCommand=x:/y") == null);
+    try t.expect(scpSpec("box;touch:/y") == null);
+    try t.expect(scpSpec(":/y") == null);
 }

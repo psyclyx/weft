@@ -18,6 +18,7 @@ const semantic_model = @import("weft_semantic");
 const placement = @import("placement.zig");
 const action_here = @import("action_here.zig");
 const designation = @import("designation.zig");
+const scene_edit = @import("scene_edit.zig");
 
 const ok: Value = .nil;
 
@@ -98,13 +99,13 @@ pub fn registerSemanticAction(
     name: []const u8,
 ) !void {
     // Keep an existing command's richer compatibility behavior (for example
-    // field-edit's generic-field fallback). Open names only need a trampoline
+    // field.edit's generic-field fallback). Open names only need a trampoline
     // when no plugin/core command already owns the slot.
     if (commands.resolve(name) != null) return;
     const target = try services.declareSemanticCommand(gpa, name);
     _ = try commands.bind(gpa, name, .{
         .name = name,
-        .summary = "semantic action",
+        .summary = "Run the focused view's action of this name.",
         .args = &.{},
         .handler = semanticActionTrampoline,
         .data = target,
@@ -234,7 +235,49 @@ fn cFieldEdit(ctx: *Context, args: struct {}) anyerror!Value {
         .declined => {},
         else => return ok,
     };
-    _ = try services.requestFocusedFieldEdit(ctx.head, ctx.gpa);
+    // `std.editing.begin` (doc/chrome.md §5.2): edit the focused row's
+    // primary field — begun under `row` granularity, where the focus was
+    // the row; where it already edits (`text`), nothing changes.
+    _ = scene_edit.begin(services, ctx.head, ctx.gpa) catch |err| switch (err) {
+        error.ActionRefused => {
+            echoLine(ctx, "this row cannot be edited now");
+            return ok;
+        },
+        error.ReadOnly => {
+            echoLine(ctx, "this field is read-only");
+            return ok;
+        },
+        else => return err,
+    };
+    return ok;
+}
+
+/// Commit the begun edit (activating what is being edited): keep the text,
+/// apply the view's draft when it changed.
+fn cFieldEditCommit(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    const services = ctx.semantic orelse return ok;
+    _ = try scene_edit.commit(services, ctx.head, ctx.gpa);
+    return ok;
+}
+
+/// Cancel the begun edit, putting back the text it began from.
+fn cFieldEditCancel(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    const services = ctx.semantic orelse return ok;
+    _ = try scene_edit.cancel(services, ctx.head, ctx.gpa);
+    return ok;
+}
+
+/// `mode.set-structural-focus <mode> text|row` — a grammar's DECLARATION of
+/// how a head in `mode`, and every mode falling back to it, focuses a row
+/// that holds a field (doc/chrome.md §5.2, `input.Granularity`). Per mode,
+/// like a mode's display name, so a second grammar loaded beside the first
+/// declares for its own modes and changes nothing of the first's; core
+/// reads it where a focus lands and knows no grammar's name.
+fn cStructuralFocus(ctx: *Context, args: struct { mode: []const u8, granularity: []const u8 }) anyerror!Value {
+    const granularity = @import("weft_input").Granularity.parse(args.granularity) orelse return error.InvalidArgument;
+    try ctx.keymap.setGranularity(ctx.gpa, args.mode, granularity);
     return ok;
 }
 
@@ -370,6 +413,7 @@ fn cCursorRight(ctx: *Context, args: struct {}) anyerror!Value {
 fn cCursorUp(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticMove(ctx, .previous)) return ok;
+    if (ctx.panes) |panes| if (panes.vertical) |vertical| if (vertical(panes.context, ctx, -1)) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
     ed.moveUp();
     return ok;
@@ -378,6 +422,7 @@ fn cCursorUp(ctx: *Context, args: struct {}) anyerror!Value {
 fn cCursorDown(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticMove(ctx, .next)) return ok;
+    if (ctx.panes) |panes| if (panes.vertical) |vertical| if (vertical(panes.context, ctx, 1)) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
     ed.moveDown();
     return ok;
@@ -387,10 +432,10 @@ fn cCursorDown(ctx: *Context, args: struct {}) anyerror!Value {
 /// is ACTIONABLE — the start of its editable span when it has one, its own
 /// start otherwise.
 ///
-/// A listing is text, so plain `cursor-down` works on it; what plain cursor
+/// A listing is text, so plain `cursor.down` works on it; what plain cursor
 /// motion cannot do is land you on the NAME. Column 0 of `  ▸ src` is an
 /// indent, and a grammar asking "may I insert here" gets `structural` there and
-/// `field` two characters along — so navigating a listing with `cursor-down`
+/// `field` two characters along — so navigating a listing with `cursor.down`
 /// leaves you somewhere you cannot type. Rows are the unit of a projection;
 /// this moves in that unit.
 fn moveRow(ctx: *Context, delta: enum { next, prev }) anyerror!Value {
@@ -450,6 +495,17 @@ fn cSetMark(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+/// `selection.start-inclusive`: vim's `v` — a selection whose caret sits on
+/// a character and covers it (`Editor.Selection`'s inclusive). A field has
+/// one kind of mark; it gets that.
+fn cSetInclusiveMark(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (try semanticFieldInput(ctx, .set_mark)) return ok;
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    try ed.setInclusiveMark(ctx.gpa);
+    return ok;
+}
+
 /// The scene selection the dispatching head holds, when the entry this call
 /// is about is a scene (no text of its own).
 fn sceneRows(ctx: *Context) ?*@import("Head.zig").SceneSelection {
@@ -459,9 +515,9 @@ fn sceneRows(ctx: *Context) ?*@import("Head.zig").SceneSelection {
     return if (scene.head() != null) scene else null;
 }
 
-/// `mark-rows`: anchor a range of ROWS at the focused one, whatever part of
+/// `selection.start-rows`: anchor a range of ROWS at the focused one, whatever part of
 /// the row is focused — a listing focuses a row's name field, where
-/// `set-mark` selects text in the field (vim's `v`); a linewise mark over
+/// `selection.start` selects text in the field (vim's `v`); a linewise mark over
 /// rows (vim's `V`) is this. The next move grows the range.
 fn cMarkRows(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
@@ -593,7 +649,7 @@ fn cBufferCreate(ctx: *Context, args: struct { name: []const u8 }) anyerror!Valu
 /// Mark the active buffer read-only (tool buffers): text input is
 /// swallowed; commands still run.
 fn cBufferReadOnly(ctx: *Context, args: struct { on: bool }) anyerror!Value {
-    ctx.buffer().read_only = args.on;
+    ctx.buffer().read_only = if (args.on) @import("Buffers.zig").produced else null;
     return ok;
 }
 
@@ -604,31 +660,51 @@ fn cBufferReadOnly(ctx: *Context, args: struct { on: bool }) anyerror!Value {
 /// where that delivery WRITES, never what it may close.
 fn cBufferClose(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    if (holdsUnsavedWork(ctx, ctx.buffers.active())) return .{ .string = "dirty" };
+    return retireActive(ctx);
+}
+
+/// Whether closing `b` would lose work: edits its file never received, or a
+/// draft one of its views holds that its provider has not applied (a renamed
+/// row in a listing). A listing keeps a view per directory it visited, so
+/// every one of them is asked, not only the one it shows.
+pub fn holdsUnsavedWork(ctx: *Context, b: *@import("Buffers.zig").Buffer) bool {
+    if (b.hasUnsavedFile(ctx.gpa) catch true) return true;
+    const services = ctx.semantic orelse return false;
+    const focus = if (b.id == ctx.buffers.active_id) &ctx.head.scene_selection else &b.scene_selection;
+    if (focus.view) |v| if (services.holdsDraft(v)) return true;
+    if (b.tool_view) |v| if (services.holdsDraft(v)) return true;
+    for (b.view_cursors.items) |saved| if (services.holdsDraft(saved.view)) return true;
+    return false;
+}
+
+/// Close the ACTIVE entry: closing is focus-scoped, and a background
+/// delivery's bound entry is where it writes, not what it may retire. The
+/// shell lets go of what it attached first (`EntryShell.retire`).
+fn retireActive(ctx: *Context) anyerror!Value {
     const b = ctx.buffers.active();
-    if (b.hasUnsavedFile(ctx.gpa) catch true) return .{ .string = "dirty" };
+    if (ctx.entry_shell) |shell| shell.retire(shell.context, ctx, b);
     try ctx.buffers.close(ctx.gpa, b.id, ctx.head, ctx.keymap);
     return ok;
 }
 
 /// Explicitly discard edits in the active buffer. Kept separate from
-/// `buffer-close` so neither a generic close intention nor a tool's `q` can
+/// `buffer.close-unmodified` so neither a generic close intention nor a tool's `q` can
 /// silently throw away a draft.
 fn cBufferCloseForce(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.buffers.close(ctx.gpa, ctx.buffers.active().id, ctx.head, ctx.keymap);
-    return ok;
+    return retireActive(ctx);
 }
 
-/// Open a local file in a buffer (existing buffer wins — dedupe by
-/// path). The graphical shell rebinds this with a provider-aware,
-/// remote-capable version; this core one keeps headless hosts honest.
-/// `open <designation>` — the kernel's own: a local file (a designation, or
-/// an absolute path standing in for one), and whatever core alone can answer
-/// (`designation.openHeld`: documents, processes, projections). A shell
-/// shadows this with one that also reaches directories, shells and peers,
-/// and routes the same way. A relative path resolves against the place the
-/// command runs in (`designation.resolveRelative`).
+/// `file.open <designation>` — a local file (a designation, or an absolute
+/// path standing in for one; an existing entry wins, deduped by path), and
+/// whatever core alone can answer (`designation.openHeld`: documents,
+/// processes, projections). A shell with an `EntryShell` answers instead,
+/// reaching directories, shells and peers and attaching its providers. A
+/// relative path resolves against the place the command runs in
+/// (`designation.resolveRelative`).
 fn cOpen(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
+    if (ctx.entry_shell) |shell| return shell.open(shell.context, ctx, args.path);
     switch (designation.durable.Spec.of(args.path)) {
         .relative => {
             const abs = try designation.resolveRelative(ctx, ctx.gpa, args.path) orelse
@@ -737,7 +813,7 @@ fn cSaveAs(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
                 f.sync.token = null; // guard on non-existence at the new path
             }
         },
-        .shell => return .{ .string = "unsupported backing for save-as" },
+        .remote => return .{ .string = "file.save-as: a remote file saves where it is" },
     }
     try ed.requestSave(ctx.gpa);
     return ok;
@@ -745,9 +821,12 @@ fn cSaveAs(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
 
 /// Show a transient message on the status line — the generic surface
 /// plugins and commands report through (cleared by the next echo).
+fn echoLine(ctx: *Context, text: []const u8) void {
+    ctx.head.echo.say(ctx.gpa, text) catch {};
+}
+
 fn cEcho(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
-    ctx.head.echo.clearRetainingCapacity();
-    try ctx.head.echo.appendSlice(ctx.gpa, args.text);
+    try ctx.head.echo.say(ctx.gpa, args.text);
     return ok;
 }
 
@@ -757,6 +836,7 @@ fn cEcho(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
 fn cViewportToggle(ctx: *Context, args: struct { name: []const u8 }) anyerror!Value {
     const registry = ctx.viewports orelse return .{ .string = "no workspace to hold a viewport" };
     _ = registry.toggle(args.name) catch return .{ .string = "no viewport by that name" };
+    if (ctx.context) |context| registry.publishShown(context);
     return ok;
 }
 
@@ -775,6 +855,7 @@ fn cViewportTake(ctx: *Context, args: struct { name: []const u8 }) anyerror!Valu
         error.UnknownViewport => .{ .string = "no viewport by that name" },
         else => err,
     };
+    if (ctx.context) |context| registry.publishShown(context);
     return ok;
 }
 
@@ -788,13 +869,13 @@ fn providerLabel(p: container_mod.ProviderRef) []const u8 {
     };
 }
 
-/// `explain-binding <slot>` — the Container's `explain`
+/// `action.explain <slot>` — the Container's `explain`
 /// (doc/configuration.md §7) wired to a REAL consumer, not a debug printf:
 /// echoes which bindings on an ACTION slot are eligible for the active
 /// buffer's facts and why the winner won. The facts mirror
 /// `Context.actionCtx` (same mode/lang/tool) plus the buffer's path/name, so
-/// `explain-binding eval` answers exactly the question
-/// `Actions.resolve("eval", ...)` would have asked.
+/// `action.explain plugin.code.run` answers exactly the question
+/// `Actions.resolve("plugin.code.run", ...)` would have asked.
 fn cExplainBinding(ctx: *Context, args: struct { slot: []const u8 }) anyerror!Value {
     // The one fact builder resolution itself uses (`intent.factsFor`), so the
     // explanation cannot disagree with what a key or a toolbar would run — a
@@ -803,9 +884,8 @@ fn cExplainBinding(ctx: *Context, args: struct { slot: []const u8 }) anyerror!Va
     var ex = try ctx.actions.container.explain(ctx.gpa, args.slot, f);
     defer ex.deinit();
 
-    ctx.head.echo.clearRetainingCapacity();
     if (ex.eligible.len == 0) {
-        try ctx.head.echo.appendSlice(ctx.gpa, "explain-binding: no eligible binding");
+        try ctx.head.echo.say(ctx.gpa, "action.explain: no eligible binding");
         return ok;
     }
     const w = ex.eligible[ex.winner.?];
@@ -819,83 +899,87 @@ fn cExplainBinding(ctx: *Context, args: struct { slot: []const u8 }) anyerror!Va
         w.priority,
         w.specificity,
         if (ex.collision) " COLLISION" else "",
-    }) catch "explain-binding: (result too long to display)";
-    try ctx.head.echo.appendSlice(ctx.gpa, msg);
+    }) catch "action.explain: (result too long to display)";
+    try ctx.head.echo.say(ctx.gpa, msg);
     return ok;
 }
 
 const table = [_]command.Command{
-    command.define("explain-binding", "Explain which Container binding wins an action slot for the active buffer's facts.", cExplainBinding),
-    command.define("insert-text", "Insert text at the cursor (replaces the selection).", cInsertText),
-    command.define("buffer-next", "Focus the next buffer (cyclic).", cBufferNext),
-    command.define("buffer-previous", "Focus the previous buffer (cyclic).", cBufferPrevious),
-    command.define("buffer-back", "Return to the previously active buffer (tool `q`).", cBufferBack),
-    command.define("buffer-switch", "Focus the buffer with the given id.", cBufferSwitch),
-    command.define("buffer-create", "Create (and focus) a named scratch buffer.", cBufferCreate),
-    command.define("buffer-close", "Close the active buffer (refuses when dirty).", cBufferClose),
-    command.define("buffer-close-force", "Close the active buffer, discarding unsaved edits.", cBufferCloseForce),
-    command.define("buffer-read-only", "Set/clear the active buffer's read-only flag.", cBufferReadOnly),
-    command.define("open", "Open a file in a buffer (dedupes by path).", cOpen),
-    command.define("open-target", "Open and focus a published semantic target.", cOpenTarget),
-    command.define("open-relative", "Open a raw name below the semantic working target.", cOpenRelative),
+    command.define("action.explain", "Explain which binding wins an action slot for the active buffer, and why.", cExplainBinding).present(.{ .label = "Explain Binding", .prompts = true }),
+    command.define("edit.insert-text", "Insert text at the cursor, replacing the selection.", cInsertText).present(.{ .internal = true }),
+    command.define("buffer.next", "Switch to the next buffer, wrapping around at the end.", cBufferNext).present(.{ .label = "Next Buffer", .icon = "chevron-right" }),
+    command.define("buffer.prev", "Switch to the previous buffer, wrapping around at the start.", cBufferPrevious).present(.{ .label = "Previous Buffer", .icon = "chevron-left" }),
+    command.define("buffer.back", "Return to the buffer that was active before this one.", cBufferBack).present(.{ .label = "Last Buffer" }),
+    command.define("buffer.switch", "Switch to the buffer with the given id.", cBufferSwitch).present(.{ .internal = true }),
+    command.define("buffer.create", "Create a named scratch buffer and switch to it.", cBufferCreate).present(.{ .label = "New Named Buffer", .prompts = true }),
+    command.define("buffer.close-unmodified", "Close the active buffer, refusing when it has unsaved edits.", cBufferClose).present(.{ .internal = true }),
+    command.define("buffer.close-force", "Close the active buffer, discarding its unsaved edits.", cBufferCloseForce).present(.{ .label = "Close Without Saving" }),
+    command.define("buffer.set-read-only", "Make the active buffer read-only, or writable again.", cBufferReadOnly).present(.{ .internal = true }),
+    command.define("file.open", "Open a file in a buffer, reusing the buffer that already shows it.", cOpen).present(.{ .label = "Open", .icon = "folder-open", .prompts = true }),
+    command.define("target.open-published", "Open and focus a published semantic target.", cOpenTarget).present(.{ .internal = true }),
+    command.define("target.open-relative", "Open a name relative to the current working target.", cOpenRelative).present(.{ .internal = true }),
     // A transfer is ONE value: copy and cut send every selected row as one
     // request and get one transfer (a set) back — per extent, each run would
     // overwrite the last. Paste reads the whole selection the same way (a
     // provider refuses a paste beside several rows as ambiguous).
-    command.define("selection-copy", "Invoke the focused semantic selection.copy action.", cSelectionCopy).maps(.whole),
-    command.define("selection-cut", "Invoke the focused semantic selection.cut action.", cSelectionCut).maps(.whole),
-    command.define("selection-delete", "Invoke the focused semantic selection.delete action.", cSelectionDelete).maps(.each_extent),
-    command.define("selection-paste-before", "Invoke the focused semantic selection.paste-before action.", cSelectionPasteBefore).maps(.whole),
-    command.define("selection-paste-after", "Invoke the focused semantic selection.paste-after action.", cSelectionPasteAfter).maps(.whole),
-    command.define("target-open-focused", "Invoke the focused semantic target.open action.", cTargetOpenFocused).maps(.each_extent),
-    command.define("hierarchy-toggle-expanded", "Invoke the focused semantic hierarchy.toggle-expanded action.", cHierarchyToggleExpanded).maps(.each_extent),
+    command.define("selection.copy", "Copy the selection.", cSelectionCopy).maps(.whole).present(.{ .label = "Copy", .icon = "copy" }),
+    command.define("selection.cut", "Cut the selection.", cSelectionCut).maps(.whole).present(.{ .label = "Cut", .icon = "scissors" }),
+    command.define("selection.delete", "Delete the selection.", cSelectionDelete).maps(.each_extent).present(.{ .label = "Delete" }),
+    command.define("selection.paste-before", "Paste before the selection.", cSelectionPasteBefore).maps(.whole).present(.{ .label = "Paste Before" }),
+    command.define("selection.paste-after", "Paste after the selection.", cSelectionPasteAfter).maps(.whole).present(.{ .label = "Paste", .icon = "clipboard-paste" }),
+    command.define("target.open", "Open what the focused row or selection points at.", cTargetOpenFocused).maps(.each_extent).present(.{ .label = "Open" }),
+    command.define("hierarchy.toggle-expanded", "Expand the focused row, or collapse it when it is open.", cHierarchyToggleExpanded).maps(.each_extent).present(.{ .label = "Expand/Collapse" }),
     // One row's verbs: a name edited, a row inserted beside it, its container
     // stepped out to. On several marked rows none has a meaning (which name?
     // beside which row?), so they are refused there rather than acting on the
     // focused row alone.
-    command.define("hierarchy-step-out", "Invoke the focused semantic target.open-container action.", cHierarchyStepOut).maps(null),
-    command.define("item-insert-before", "Insert an item before focus.", cItemInsertBefore).maps(null),
-    command.define("item-insert-after", "Insert an item after focus.", cItemInsertAfter).maps(null),
-    command.define("field-edit", "Invoke the focused semantic field.edit action.", cFieldEdit).maps(null),
-    command.define("view-refresh", "Invoke the focused semantic view.refresh action.", cViewRefresh),
-    command.define("view-revert", "Invoke the focused semantic view.revert action.", cViewRevert),
-    command.define("view-apply", "Invoke the focused semantic view.apply action.", cViewApply),
-    command.define("echo", "Show a message on the status line.", cEcho),
-    command.define("viewport-toggle", "Show or hide a declared viewport.", cViewportToggle),
-    command.define("viewport-take", "Show the active entry in a declared viewport, and focus it there.", cViewportTake),
-    command.define("save-as", "Save to a new path (refuses to clobber an existing file).", cSaveAs),
-    command.define("delete-backward", "Delete the selection or the character before the cursor.", cDeleteBackward),
-    command.define("delete-forward", "Delete the selection or the character after the cursor.", cDeleteForward),
-    command.define("undo", "Undo the newest own edit unit.", cUndo),
-    command.define("redo", "Redo the newest undone unit.", cRedo),
-    command.define("save-file", "Write the buffer to its file backing (the default `save` provider).", cSaveFile),
-    command.define("field-word-previous", "Move the focused field to the word-previous boundary.", fieldMotion(.word_previous)),
-    command.define("field-word-next", "Move the focused field to the word-next boundary.", fieldMotion(.word_next)),
-    command.define("field-word-end", "Move the focused field to the word-end boundary.", fieldMotion(.word_end)),
-    command.define("field-big-word-previous", "Move the focused field to the WORD-previous boundary.", fieldMotion(.WORD_previous)),
-    command.define("field-big-word-next", "Move the focused field to the WORD-next boundary.", fieldMotion(.WORD_next)),
-    command.define("field-big-word-end", "Move the focused field to the WORD-end boundary.", fieldMotion(.WORD_end)),
-    command.define("field-line-start", "Move the focused field to the line-start boundary.", fieldMotion(.line_start)),
-    command.define("field-line-end", "Move the focused field to the line-end boundary.", fieldMotion(.line_end)),
-    command.define("field-first-non-blank", "Move the focused field to the first-non-blank boundary.", fieldMotion(.first_non_blank)),
-    command.define("cursor-left", "Move the cursor one character left.", cCursorLeft).maps(.each_extent),
-    command.define("cursor-right", "Move the cursor one character right.", cCursorRight).maps(.each_extent),
-    command.define("cursor-up", "Move the cursor up one line.", cCursorUp).maps(.each_extent),
-    command.define("cursor-down", "Move the cursor down one line.", cCursorDown).maps(.each_extent),
-    command.define("row-down", "Move to the next projection row, on its actionable part.", cRowDown),
-    command.define("row-up", "Move to the previous projection row, on its actionable part.", cRowUp),
-    command.define("set-mark", "Start a selection at the cursor.", cSetMark).maps(.each_extent),
-    command.define("mark-rows", "Start a range of rows at the focused row of a scene.", cMarkRows).maps(.each_extent),
-    command.define("clear-selection", "Drop the selection.", cClearSelection).maps(.each_extent),
-    command.define("undo-barrier", "Seal the undo unit; the next edit starts a new one.", cUndoBarrier),
-    command.define("set-mode", "Switch the keymap mode.", cSetMode),
-    command.define("posture-break-out", "Leave a capture posture for the one it displaced.", cPostureBreakOut),
-    command.define("quit", "Exit the editor.", cQuit),
-    command.define("insert-newline", "Insert a line break at the cursor.", cInsertNewline),
-    command.define("insert-tab", "Insert a tab at the cursor.", cInsertTab),
+    command.define("target.open-container", "Open the container that holds the focused row.", cHierarchyStepOut).maps(null).present(.{ .label = "Up to Parent" }),
+    command.define("item.insert-before", "Insert a new item before the focused one.", cItemInsertBefore).maps(null).present(.{ .label = "Insert Before" }),
+    command.define("item.insert-after", "Insert a new item after the focused one.", cItemInsertAfter).maps(null).present(.{ .label = "Insert After" }),
+    command.define("field.edit", "Start editing the focused row's main field.", cFieldEdit).maps(null).present(.{ .label = "Edit" }),
+    command.define("field.commit-edit", "Finish the field edit, applying the change when there is one.", cFieldEditCommit).present(.{ .internal = true }),
+    command.define("field.cancel-edit", "Cancel the field edit, restoring the original text.", cFieldEditCancel).present(.{ .internal = true }),
+    command.define("mode.set-structural-focus", "Declare whether a head in a mode focuses a structural row as a row or edits its field as text.", cStructuralFocus).present(.{ .internal = true }),
+    command.define("view.refresh", "Refresh the focused view.", cViewRefresh).present(.{ .label = "Refresh" }),
+    command.define("view.revert", "Discard the focused view's draft and show it as it is.", cViewRevert).present(.{ .label = "Revert" }),
+    command.define("view.apply", "Apply the focused view's draft.", cViewApply).present(.{ .label = "Apply" }),
+    command.define("app.echo", "Show a message on the status line.", cEcho).present(.{ .internal = true }),
+    command.define("viewport.toggle", "Show or hide a named viewport.", cViewportToggle).present(.{ .label = "Toggle Viewport", .prompts = true }),
+    command.define("viewport.take", "Show the active entry in a named viewport and focus it there.", cViewportTake).present(.{ .label = "Move to Viewport", .prompts = true }),
+    command.define("file.save-as", "Save the buffer to a new path, refusing to overwrite an existing file.", cSaveAs).present(.{ .label = "Save As", .prompts = true }),
+    command.define("edit.delete-before", "Delete the selection, or the character before the cursor.", cDeleteBackward).present(.{ .label = "Delete Backward" }),
+    command.define("edit.delete-after", "Delete the selection, or the character after the cursor.", cDeleteForward).present(.{ .label = "Delete Forward" }),
+    command.define("edit.undo", "Undo your most recent edit.", cUndo).present(.{ .label = "Undo", .icon = "undo" }),
+    command.define("edit.redo", "Redo the edit you most recently undid.", cRedo).present(.{ .label = "Redo", .icon = "redo" }),
+    command.define("file.write", "Write the buffer to its file.", cSaveFile).present(.{ .internal = true }),
+    command.define("field.word-prev", "Move the field cursor to the start of the previous word.", fieldMotion(.word_previous)).present(.{ .internal = true }),
+    command.define("field.word-next", "Move the field cursor to the start of the next word.", fieldMotion(.word_next)).present(.{ .internal = true }),
+    command.define("field.word-end", "Move the field cursor to the end of the word.", fieldMotion(.word_end)).present(.{ .internal = true }),
+    command.define("field.big-word-prev", "Move the field cursor to the start of the previous WORD.", fieldMotion(.WORD_previous)).present(.{ .internal = true }),
+    command.define("field.big-word-next", "Move the field cursor to the start of the next WORD.", fieldMotion(.WORD_next)).present(.{ .internal = true }),
+    command.define("field.big-word-end", "Move the field cursor to the end of the WORD.", fieldMotion(.WORD_end)).present(.{ .internal = true }),
+    command.define("field.line-start", "Move the field cursor to the start of the line.", fieldMotion(.line_start)).present(.{ .internal = true }),
+    command.define("field.line-end", "Move the field cursor to the end of the line.", fieldMotion(.line_end)).present(.{ .internal = true }),
+    command.define("field.first-non-blank", "Move the field cursor to the first non-blank character.", fieldMotion(.first_non_blank)).present(.{ .internal = true }),
+    command.define("cursor.left", "Move the cursor one character left.", cCursorLeft).maps(.each_extent).present(.{ .label = "Cursor Left" }),
+    command.define("cursor.right", "Move the cursor one character right.", cCursorRight).maps(.each_extent).present(.{ .label = "Cursor Right" }),
+    command.define("cursor.up", "Move the cursor up one line.", cCursorUp).maps(.each_extent).present(.{ .label = "Cursor Up" }),
+    command.define("cursor.down", "Move the cursor down one line.", cCursorDown).maps(.each_extent).present(.{ .label = "Cursor Down" }),
+    command.define("cursor.row-down", "Move to the next row, onto its actionable part.", cRowDown).present(.{ .internal = true }),
+    command.define("cursor.row-up", "Move to the previous row, onto its actionable part.", cRowUp).present(.{ .internal = true }),
+    command.define("selection.start", "Start a selection at the cursor.", cSetMark).maps(.each_extent).present(.{ .label = "Start Selection" }),
+    command.define("selection.start-inclusive", "Start a selection that covers the character the cursor is on, and every one it moves onto.", cSetInclusiveMark).maps(.each_extent).present(.{ .label = "Start Inclusive Selection" }),
+    command.define("selection.start-rows", "Start selecting a range of rows at the focused row.", cMarkRows).maps(.each_extent).present(.{ .label = "Select Rows" }),
+    command.define("selection.clear", "Drop the selection.", cClearSelection).maps(.each_extent).present(.{ .label = "Clear Selection" }),
+    command.define("edit.seal-undo", "Close the current undo step so the next edit starts a new one.", cUndoBarrier).present(.{ .internal = true }),
+    command.define("mode.set", "Switch the keymap mode.", cSetMode).present(.{ .internal = true }),
+    command.define("mode.break-out", "Leave a capturing mode for the mode it replaced.", cPostureBreakOut).present(.{ .internal = true }),
+    command.define("app.quit", "Quit the editor.", cQuit).present(.{ .label = "Quit", .icon = "log-out" }),
+    command.define("edit.insert-newline", "Insert a line break at the cursor.", cInsertNewline).present(.{ .label = "Insert Newline" }),
+    command.define("edit.insert-tab", "Insert a tab at the cursor.", cInsertTab).present(.{ .label = "Insert Tab" }),
 };
 
-/// `save-file`'s eligibility: any entry whose bytes are not a tool projection.
+/// `file.write`'s eligibility: any entry whose bytes are not a tool projection.
 const not_a_projection: facts.Predicate = .{ .locus = .tool };
 
 /// Register every built-in and the default keymap. The default mode is
@@ -920,23 +1004,21 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     // Priority -1 keeps it the FLOOR it was when it was unconstrained: the
     // `not` makes it one conjunct specific, which would otherwise tie (and
     // collide at bind) with every projection's own one-conjunct `tool` save.
-    try command.registerAction(gpa, commands, actions, "save", .pick);
-    try actions.provide(.{ .action = "save", .predicate = .{ .not = &not_a_projection }, .command = "save-file", .priority = -1, .owner = "core" });
+    try command.registerAction(gpa, commands, actions, "file.save", .pick, "Save the focused entry: write a file, apply a listing's draft, send a commit message.", .{
+        .label = "Save",
+        .icon = "save",
+    });
+    try actions.provide(.{ .action = "file.save", .predicate = .{ .not = &not_a_projection }, .command = "file.write", .priority = -1, .owner = "core" });
 
     // Retiring an entry is an ACTION too, for the same reason `save` is: what a
     // tool's entry is worth is the tool's question. The default provider drops
     // it (refusing an unsaved file); a projection whose text is unrecoverable —
     // a commit draft — provides its own and asks first.
-    try command.registerAction(gpa, commands, actions, "close", .pick);
-    try actions.provide(.{ .action = "close", .command = "buffer-close", .owner = "core" });
-
-    // Input models express leaving a transient/tool locus as an intent. Vim's
-    // `q` is one such mapping; another editor can choose another key, and a
-    // more specific provider can override this buffer-history implementation.
-    // It is deliberately NOT the jumplist's back: leaving a tool must leave
-    // it, while the last jump is often inside the same entry (`jumplist.zig`).
-    try command.registerAction(gpa, commands, actions, "navigate-back", .pick);
-    try actions.provide(.{ .action = "navigate-back", .command = "buffer-back", .owner = "core" });
+    try command.registerAction(gpa, commands, actions, "buffer.close", .pick, "Close the focused entry, letting its provider refuse when it holds unsaved work.", .{
+        .label = "Close Editor",
+        .icon = "close",
+    });
+    try actions.provide(.{ .action = "buffer.close", .command = "buffer.close-unmodified", .owner = "core" });
 
     // NO BLANKET std VOCABULARY FOR A TOOL LOCUS.
     //
@@ -966,33 +1048,33 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     // mechanism entry (`Head.setModeRaw`) is the only door reachable here.
     try head.setModeRaw(gpa, "default");
     const binds = [_][2][]const u8{
-        .{ "BackSpace", "delete-backward" },
-        .{ "Delete", "delete-forward" },
-        .{ "Tab", "insert-tab" },
-        .{ "Left", "cursor-left" },
-        .{ "Right", "cursor-right" },
-        .{ "Up", "cursor-up" },
-        .{ "Down", "cursor-down" },
-        .{ "C-s", "save" },
-        .{ "C-z", "undo" },
-        .{ "C-y", "redo" },
-        .{ "C-space", "set-mark" },
-        .{ "C-g", "clear-selection" },
-        .{ "C-q", "quit" },
-        .{ "C-b", "buffers" },
-        .{ "C-Tab", "buffer-next" },
+        .{ "BackSpace", "edit.delete-before" },
+        .{ "Delete", "edit.delete-after" },
+        .{ "Tab", "edit.insert-tab" },
+        .{ "Left", "cursor.left" },
+        .{ "Right", "cursor.right" },
+        .{ "Up", "cursor.up" },
+        .{ "Down", "cursor.down" },
+        .{ "C-s", "file.save" },
+        .{ "C-z", "edit.undo" },
+        .{ "C-y", "edit.redo" },
+        .{ "C-space", "selection.start" },
+        .{ "C-g", "selection.clear" },
+        .{ "C-q", "app.quit" },
+        .{ "C-b", "buffer.pick" },
+        .{ "C-Tab", "buffer.next" },
     };
     const Keymap = @import("Keymap.zig");
     for (binds) |b| try keymap.bind(gpa, "default", b[0], b[1], Keymap.prio_core, "core");
     // Return is the fallback-list case (architecture §10.2): activate the
     // focused target if anything offers that here, else break the line. In a
     // text entry only the second arm has an offer, so this is the modeless
-    // floor's `insert-newline`, reached through the catalog instead of by
+    // floor's `edit.insert-newline`, reached through the catalog instead of by
     // name.
     const enter = [_][]const u8{ "std.target.activate", "std.editing.insert-line-break" };
     for ([_][]const u8{ "Return", "KP_Enter" }) |key|
         try keymap.bindArms(gpa, "default", key, &enter, Keymap.prio_core, "core");
-    try keymap.setCommitCommand(gpa, "default", "insert-text");
+    try keymap.setCommitCommand(gpa, "default", "edit.insert-text");
 
     try @import("pick.zig").install(gpa, commands, keymap);
 }
@@ -1023,9 +1105,9 @@ test "builtins: explain-binding is a real consumer of Container.explain" {
     defer commands.deinit(gpa);
     try install(gpa, &commands, &keymap, &head, &actions);
 
-    // A second, higher-priority projection provider, so `explain-binding` has
+    // A second, higher-priority projection provider, so `action.explain` has
     // more than one eligible binding to report on.
-    try actions.provide(.{ .action = "save", .command = "projection-save", .priority = 10, .owner = "projection" });
+    try actions.provide(.{ .action = "file.save", .command = "projection-save", .priority = 10, .owner = "projection" });
 
     var ctx: Context = .{
         .gpa = gpa,
@@ -1038,13 +1120,13 @@ test "builtins: explain-binding is a real consumer of Container.explain" {
         .head = &head,
     };
 
-    _ = try command.run(&commands, &ctx, "explain-binding", &.{.{ .string = "save" }});
-    try t.expect(std.mem.indexOf(u8, head.echo.items, "projection-save") != null);
-    try t.expect(std.mem.indexOf(u8, head.echo.items, "2 eligible") != null);
+    _ = try command.run(&commands, &ctx, "action.explain", &.{.{ .string = "file.save" }});
+    try t.expect(std.mem.indexOf(u8, head.echo.text(), "projection-save") != null);
+    try t.expect(std.mem.indexOf(u8, head.echo.text(), "2 eligible") != null);
 
     // An unknown slot: no eligible bindings, no crash, an honest echo.
-    _ = try command.run(&commands, &ctx, "explain-binding", &.{.{ .string = "nonexistent-slot" }});
-    try t.expect(std.mem.indexOf(u8, head.echo.items, "no eligible binding") != null);
+    _ = try command.run(&commands, &ctx, "action.explain", &.{.{ .string = "nonexistent-slot" }});
+    try t.expect(std.mem.indexOf(u8, head.echo.text(), "no eligible binding") != null);
 }
 
 test {

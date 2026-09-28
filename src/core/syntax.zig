@@ -206,7 +206,7 @@ fn freeOwned(gpa: Allocator, list: [][]const u8) void {
     gpa.free(list);
 }
 
-/// The grammar registry: empty until config fills it through `grammar-add`.
+/// The grammar registry: empty until config fills it through `syntax.add-grammar`.
 /// There is no seeded set — every grammar arrives the same way, so there is
 /// no privileged one to be more capable than the rest. Also the owner of
 /// every `Compiled` grammar (see `compiledFor`): the registry of languages is
@@ -484,8 +484,8 @@ pub const Runtime = struct {
         };
 
         // Registering a name again REPLACES it. `forPath` is last-wins, so a
-        // duplicate was already invisible — but `config-reload` re-runs every
-        // `grammar-add`, and appending would grow the list by the whole
+        // duplicate was already invisible — but `app.reload-config` re-runs every
+        // `syntax.add-grammar`, and appending would grow the list by the whole
         // language set on every reload, forever. Replacing also keeps the
         // shadowing intent: a config grammar supersedes an earlier one of the
         // same name rather than piling up behind it.

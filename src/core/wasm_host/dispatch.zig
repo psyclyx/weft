@@ -1,4 +1,5 @@
-//! Per-dispatch data marshalling across the membrane: echo to the status line,
+//! Per-dispatch data marshalling across the membrane: echo to the status line
+//! (the asking head's, or a notice to the system from a background entry),
 //! the command args a guest reads during on_command (arg_count/int/str) and the
 //! result it sets back (set_result_int/str). Integers cross as i32 — the
 //! membrane word; string results borrow the plugin's result_buf.
@@ -7,17 +8,22 @@ const wasm = @import("../wasm.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
-const requireDispatch = shared.requireDispatch;
 
 pub fn hEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    // HEAD-GATED (task #19 item 4): writes the dispatching head's echo line.
-    if (!requireDispatch(p, caller, "wl_echo")) return;
     const msg = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(msg);
-    p.activeCtx().head.echo.clearRetainingCapacity();
-    p.activeCtx().head.echo.appendSlice(p.gpa, msg) catch {};
+    // A dispatching entry answers the head that asked. A BACKGROUND entry
+    // (`on_activate`, `on_complete`, `on_fill_token`, …) has no head that
+    // asked, so what it says is a notice to the whole system
+    // (`Buffers.notices`), shown briefly where core's own background refusals
+    // already go. It used to trap — the message was lost and the rest of the guest's
+    // callback aborted with it, so every plugin had to remember a nested
+    // `wl_run` to say anything off a keystroke, and three did not. Head state
+    // is still never written from the background.
+    if (!shared.canDispatch(p)) return shared.noteBackground(p.activeCtx(), p.name, msg);
+    p.activeCtx().head.echo.say(p.gpa, msg) catch {};
 }
 
 // Command args in + result out. Integers cross as i32 — the membrane word.
@@ -67,4 +73,16 @@ pub fn hSetResultStr(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     p.result_buf.clearRetainingCapacity();
     p.result_buf.appendSlice(p.gpa, bytes) catch return;
     p.result = .{ .string = p.result_buf.items };
+}
+
+/// `keySerial() -> n`: how many keys the dispatching head has dispatched, the
+/// one being dispatched included (`Head.key_serial`). A read, nothing more —
+/// "was the key before this one mine?" is the guest's comparison to make, so
+/// a repeat-on-the-same-key (Emacs's transient map) needs no keymap in core
+/// that knows it is one.
+pub fn hKeySerial(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @bitCast(p.activeCtx().head.key_serial);
 }

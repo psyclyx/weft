@@ -99,9 +99,9 @@ Recorded because each was the premise of a move.
 
 **"vim is already decomplected; it needs only cursor/lineAt/slice/byteLen/edit."**
 False. `plugins/vim` calls **39 distinct SDK symbols** and binds or runs ~40
-commands it does not own: `save`, `quit`, `open`, `buffer-close`, `find-file`,
-`window-split`, `focus-other`, six `scroll-*`, `goto-definition`, `complete`,
-`undo`, registers, `set-mark`, and the file picker. `plugin_lib/ex`, which vim
+commands it does not own: `save`, `quit`, `open`, `buffer.close-unmodified`, `files.find`,
+`window.split-below`, `window.focus-next`, six `scroll-*`, `lsp.goto-definition`, `complete`,
+`undo`, registers, `selection.start`, and the file picker. `plugin_lib/ex`, which vim
 instantiates unconditionally, hardcodes `:w`→`save` and `:q`→`quit`
 (`ex/root.zig:162-220`). Point vim at an IRC log and `/w` saves a file.
 

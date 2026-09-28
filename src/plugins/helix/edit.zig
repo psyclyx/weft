@@ -160,7 +160,7 @@ fn pasteText(bytes: []const u8, lines: bool, after: bool, slot: ?u8) void {
 
 /// `SPC y`: yank, then hand the unnamed register's text to the clipboard.
 pub fn yankToClipboard() void {
-    weft.run("hx-yank");
+    weft.run("helix.yank");
     if (!weft.clipboardSet(weft.registerTextIn(0))) weft.echo("clipboard unavailable");
 }
 
@@ -189,12 +189,12 @@ pub fn pasteClipboard(after: bool) void {
     _ = state.takeRegister();
     switch (clipboard()) {
         .none => {},
-        .register => weft.run(if (after) "hx-paste" else "hx-paste-before"),
-        .text => |t| weft.runStr2("hx-paste-text", if (after) "after" else "before", t),
+        .register => weft.run(if (after) "helix.paste" else "helix.paste-before"),
+        .text => |t| weft.runStr2("helix.paste-text", if (after) "after" else "before", t),
     }
 }
 
-/// `hx-paste-text <after|before> <text>`: text from elsewhere after (before)
+/// `helix.paste-text <after|before> <text>`: text from elsewhere after (before)
 /// the selection — whole lines when it ends in a line break.
 pub fn pasteClipboardText(where: []const u8, t: []const u8) void {
     if (t.len == 0) return;
@@ -206,12 +206,12 @@ pub fn replaceWithClipboard() void {
     _ = state.takeRegister();
     switch (clipboard()) {
         .none => {},
-        .register => weft.run("hx-replace-register"),
-        .text => |t| weft.runStr("hx-replace-text", t),
+        .register => weft.run("helix.replace-register"),
+        .text => |t| weft.runStr("helix.replace-text", t),
     }
 }
 
-/// `hx-replace-text <text>`: the selection becomes `t`, selected.
+/// `helix.replace-text <text>`: the selection becomes `t`, selected.
 pub fn replaceText(t: []const u8) void {
     writeSelect(sel.span(sel.get()), t);
     sel.flash();
@@ -345,7 +345,7 @@ pub fn setCase(c: Case) void {
 
 // ── Lines: join, indent, comment ────────────────────────────────────────
 
-/// `hx-line-block`: the target the line verbs map over — the selection's
+/// `helix.line-block`: the target the line verbs map over — the selection's
 /// lines, `[first line start, past the last line's newline)`.
 pub fn lineBlock() void {
     const r = sel.span(sel.get());
@@ -364,7 +364,7 @@ pub fn onLines(cmd: []const u8) void {
     noteEdit();
 }
 
-/// `hx-join-target`: what `J` joins — the selection's lines, or, for a
+/// `helix.join-target`: what `J` joins — the selection's lines, or, for a
 /// selection on one line, that line and the next.
 pub fn joinTarget() void {
     const r = sel.span(sel.get());
@@ -485,19 +485,19 @@ pub fn addBlankLine() void {
 pub const SurroundVerb = enum { add, delete, replace };
 
 /// Choose the pair, then surround. Adding wraps each selection
-/// (`hx-surround-wrap`, per selection); deleting and replacing are the
+/// (`helix.surround-wrap`, per selection); deleting and replacing are the
 /// surround plugin's own commands, which map over each selection's PAIR —
 /// so two selections inside one pair edit it once.
 pub fn surround(verb: SurroundVerb, pair: []const u8, replacement: ?[]const u8) void {
-    if (replacement) |r| weft.runStr2("surround-pair", pair, r) else weft.runStr("surround-pair", pair);
+    if (replacement) |r| weft.runStr2("surround.choose-pair", pair, r) else weft.runStr("surround.choose-pair", pair);
     weft.run(switch (verb) {
-        .add => "hx-surround-wrap",
+        .add => "helix.surround-wrap",
         .delete => "surround.delete",
         .replace => "surround.replace",
     });
 }
 
-/// `hx-surround-wrap`: the chosen pair around the selection.
+/// `helix.surround-wrap`: the chosen pair around the selection.
 pub fn surroundWrap() void {
     const r = sel.span(sel.get());
     if (weft.anchorRange(r)) |h| weft.runRangeArg("surround.add", h);

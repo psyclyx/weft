@@ -33,6 +33,7 @@ const View = view.View;
 const Run = view.Run;
 const Rect = view.Rect;
 const Hud = view.Hud;
+const chrome = @import("chrome.zig");
 
 /// Build a one-column caret `Surface` from plain multi-line text (capped to
 /// `max_rows`), no selection, no annotation column. A small GENERIC utility
@@ -276,10 +277,11 @@ pub fn drawCaretSurface(
     body: region.Rect,
 ) !void {
     const cl = (try layoutCaretSurface(v, scratch, surf, body)) orelse return;
-    try outlinedBox(scratch, rects, cl.x, cl.y, cl.w, cl.h, v.theme.selection, v.theme.accent);
+    const sink: chrome.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
+    try chrome.paintPanel(sink, .{ .x = cl.x, .y = cl.y, .w = cl.w, .h = cl.h }, v.theme.selection, v.theme.accent, .popup);
 
     for (cl.rows) |row| {
-        if (row.selected) try rects.append(scratch, .{ .x = cl.x, .y = row.y, .w = cl.w, .h = v.line_h, .color = v.theme.accent });
+        if (row.selected) try chrome.paintSelected(sink, .{ .x = cl.x, .y = row.y, .w = cl.w, .h = v.line_h }, v.theme.accent);
         for (row.spans) |sp| {
             const color = if (row.selected) v.theme.background else spanRoleColor(v, sp.role);
             try propLine(v, scratch, runs, sp.text, sp.x, row.y + v.ascent, color);
@@ -287,7 +289,7 @@ pub fn drawCaretSurface(
     }
 
     if (cl.info) |info| {
-        try outlinedBox(scratch, rects, info.x, info.y, info.w, info.h, v.theme.selection, v.theme.accent);
+        try chrome.paintPanel(sink, .{ .x = info.x, .y = info.y, .w = info.w, .h = info.h }, v.theme.selection, v.theme.accent, .popup);
         for (info.lines, 0..) |line, k| {
             const ly = info.y + @as(f32, @floatFromInt(k)) * v.line_h + v.ascent;
             try propLine(v, scratch, runs, line, info.x + v.cell_w, ly, v.theme.foreground);
@@ -347,8 +349,9 @@ pub fn drawDockSurface(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), 
     const dl = (try layoutDockSurface(v, scratch, surf, dock)) orelse return;
     try rects.append(scratch, .{ .x = dl.x, .y = dl.y, .w = dl.w, .h = dl.h, .color = v.theme.selection });
     try rects.append(scratch, .{ .x = dl.x, .y = dl.y, .w = dl.w, .h = 1, .color = v.theme.accent });
+    const sink: chrome.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
     for (dl.rows) |row| {
-        if (row.selected) try rects.append(scratch, .{ .x = dl.x, .y = row.y, .w = dl.w, .h = v.line_h, .color = v.theme.accent });
+        if (row.selected) try chrome.paintSelected(sink, .{ .x = dl.x, .y = row.y, .w = dl.w, .h = v.line_h }, v.theme.accent);
         const color = if (row.selected) v.theme.background else spanRoleColor(v, row.role);
         try propLine(v, scratch, runs, row.text, dl.x, row.y + v.ascent, color);
     }
@@ -442,12 +445,13 @@ pub fn drawSurfaces(
         const box_y = std.math.clamp(raw_y, body.y, @max(body.y, body.y + body.h - box_h));
         // Panel background with a thin accent outline, so the popup reads
         // as a distinct floating box (not text bleeding over the buffer).
-        try outlinedBox(scratch, rects, box_x, box_y, box_w, box_h, v.theme.selection, v.theme.accent);
+        const sink: chrome.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
+        try chrome.paintPanel(sink, .{ .x = box_x, .y = box_y, .w = box_w, .h = box_h }, v.theme.selection, v.theme.accent, .popup);
 
         for (surf.rows.items[0..nrows], 0..) |row, i| {
             const row_y = box_y + pad_y + @as(f32, @floatFromInt(i)) * v.line_h;
             if (surf.selected != null and surf.selected.? == i) {
-                try rects.append(scratch, .{ .x = box_x, .y = row_y, .w = box_w, .h = v.line_h, .color = v.theme.accent });
+                try chrome.paintSelected(sink, .{ .x = box_x, .y = row_y, .w = box_w, .h = v.line_h }, v.theme.accent);
             }
             var x = box_x + pad_x;
             const baseline = row_y + v.ascent;

@@ -123,6 +123,21 @@ pub const Resources = struct {
     /// the shape that stops "the result of whose exec?" from being a question.
     exec: ?Exec = null,
 
+    /// Capability names the guest declared (`declare_capability`, owned) —
+    /// what a designation claim outside the plugin's own name is checked
+    /// against (`designation/<kind>`). Here, not on a plane, because the
+    /// shared claim body reads it: a `.wasm` plugin fills it in `describe()`;
+    /// a `.js` one has no describe handshake, so it declares none and may
+    /// claim only in its own namespace.
+    declared_capabilities: std.ArrayList([]u8) = .empty,
+
+    /// A refusal a door met that a LOAD must not survive — a projection kind
+    /// the plugin may not claim (`wasm_host/tool.zig`), which would otherwise
+    /// load a producer that silently answers nothing. Both loaders read it
+    /// when init returns and fail the load; after the load it is the
+    /// caller's refused answer that matters, and nothing reads this.
+    load_refusal: ?anyerror = null,
+
     /// A completed child: what it said on both streams, and how it ended.
     pub const Exec = struct {
         /// The exit code, or -1 for a child that died by signal or never ran.
@@ -154,6 +169,10 @@ pub const Resources = struct {
         /// an `over` target command borrows `over`, which this owns.
         arity: ?@import("selection.zig").Arity = null,
         over: []u8 = &.{},
+        /// How it is presented to people (`declare_command_meta`): the text
+        /// form as declared, owned, and the value decoded from it, borrowing it.
+        meta_text: []u8 = &.{},
+        meta: command_mod.Presentation = .{},
 
         /// Parse a declared parameter list into `ArgSpec`s. Every guest argument
         /// crosses as a string (the membrane carries nothing else), so the only
@@ -186,6 +205,7 @@ pub const Resources = struct {
             gpa.free(self.params);
             gpa.free(self.args);
             gpa.free(self.over);
+            gpa.free(self.meta_text);
         }
     };
 
@@ -218,6 +238,14 @@ pub const Resources = struct {
         if (self.exec) |*e| e.deinit(self.gpa); // an unload mid-callback
         for (self.declared.items) |*d| d.deinit(self.gpa);
         self.declared.deinit(self.gpa);
+        for (self.declared_capabilities.items) |c| self.gpa.free(c);
+        self.declared_capabilities.deinit(self.gpa);
+    }
+
+    /// Whether the guest declared capability `name`.
+    pub fn declaresCapability(self: *const Resources, name: []const u8) bool {
+        for (self.declared_capabilities.items) |c| if (std.mem.eql(u8, c, name)) return true;
+        return false;
     }
 
     /// Whether anything here still has buffered output or a live reader — the

@@ -111,6 +111,11 @@ pub const Layer = struct {
     /// past it the spans no longer resolve, and `spanCount` reports none until
     /// the provider republishes — dropped, never guessed (§11.7).
     stamp: ?Document.Revision = null,
+    /// The round was opened to last until the next key (`beginUntilKey`):
+    /// dispatch drops its spans when the next key arrives
+    /// (`Layers.expireUntilKey`) — a search's highlights, gone the moment
+    /// you do anything else.
+    until_key: bool = false,
     spans: std.ArrayList(Span) = .empty,
     bulk: ?Bulk = null,
 
@@ -203,6 +208,14 @@ pub const Layer = struct {
     pub fn begin(self: *Layer, gpa: Allocator) void {
         self.clearSpans(gpa);
         self.stamp = self.doc.revision();
+        self.until_key = false;
+    }
+
+    /// `begin`, for a round that lasts only until the next key: the entry
+    /// revision still gates it, and the next dispatched key ends it.
+    pub fn beginUntilKey(self: *Layer, gpa: Allocator) void {
+        self.begin(gpa);
+        self.until_key = true;
     }
 
     /// Whether this feed's spans still resolve against the entry revision they
@@ -387,6 +400,16 @@ pub const Layers = struct {
         }
     }
 
+    /// A key arrived: every round opened to last until the next key is over.
+    /// Its spans go; the layer stays claimed for the provider's next round.
+    pub fn expireUntilKey(self: *Layers, gpa: Allocator) void {
+        for (self.list.items) |l| {
+            if (!l.until_key) continue;
+            l.clearSpans(gpa);
+            l.until_key = false;
+        }
+    }
+
     /// Drop every layer of `doc` (buffer close).
     pub fn dropDoc(self: *Layers, gpa: Allocator, doc: *const Document) void {
         var i: usize = 0;
@@ -403,6 +426,33 @@ pub const Layers = struct {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "layers: a round opened until the next key ends at the next key, and only that round" {
+    const gpa = std.testing.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "ab ab ab\n");
+    var store: Layers = .empty;
+    defer store.deinit(gpa);
+
+    const hits = try store.claimAnnotation(gpa, &doc, "hits", "snipe");
+    hits.beginUntilKey(gpa);
+    try hits.appendSpan(gpa, .{ .start = 3, .end = 5, .kind = 0, .message = "" });
+    const marks = try store.claimAnnotation(gpa, &doc, "marks", "other");
+    marks.begin(gpa);
+    try marks.appendSpan(gpa, .{ .start = 0, .end = 2, .kind = 0, .message = "" });
+    try std.testing.expectEqual(@as(usize, 1), hits.spanCount());
+
+    store.expireUntilKey(gpa);
+    try std.testing.expectEqual(@as(usize, 0), hits.spanCount());
+    // An ordinary round is untouched by keys.
+    try std.testing.expectEqual(@as(usize, 1), marks.spanCount());
+    // The layer stays claimed, and a plain round after it is not key-scoped.
+    hits.begin(gpa);
+    try hits.appendSpan(gpa, .{ .start = 6, .end = 8, .kind = 0, .message = "" });
+    store.expireUntilKey(gpa);
+    try std.testing.expectEqual(@as(usize, 1), hits.spanCount());
 }
 
 test "layers: virtual-text and gutter decorations anchor and rebase" {

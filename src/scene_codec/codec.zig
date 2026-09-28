@@ -499,7 +499,7 @@ fn encodeSceneNode(writer: *Writer, node: semantic.scene.Node, parent: u32, inde
             try writer.byte(2);
             try writeHandle(writer, field.ref);
             try writer.string(field.placeholder);
-            try writer.byte(if (field.single_line) 1 else 0);
+            try writer.byte(fieldFlags(field.single_line, field.primary));
         },
         .action => |action| {
             try writer.byte(3);
@@ -523,7 +523,17 @@ pub fn encodeScene(gpa: std.mem.Allocator, root: semantic.scene.Node) Error![]u8
 }
 
 const TempContainer = struct { axis: semantic.scene.Axis, child_count: usize, children: []u32 = &.{} };
-const TempField = struct { ref: semantic.scene.FieldRef, placeholder: []const u8, single_line: bool };
+const TempField = struct { ref: semantic.scene.FieldRef, placeholder: []const u8, single_line: bool, primary: bool };
+
+/// A field's flags share the byte `single_line` always had: bit 0 is
+/// `single_line`, bit 1 `primary`. An older encoder writes 0 or 1, which
+/// reads the same; any other bit is corruption.
+const field_single_line: u8 = 1;
+const field_primary: u8 = 2;
+
+fn fieldFlags(single_line: bool, primary: bool) u8 {
+    return (if (single_line) field_single_line else 0) | (if (primary) field_primary else 0);
+}
 const TempAction = struct { action: []const u8, label: []const u8, enabled: bool };
 
 const TempContent = union(enum) {
@@ -603,7 +613,13 @@ fn readTempNode(reader: *Reader, arena: std.mem.Allocator, versioned_targets: bo
     const content: TempContent = switch (try reader.byte()) {
         0 => .{ .container = TempContainer{ .axis = try axisFromTag(try reader.byte()), .child_count = try reader.count(Limits.max_children) } },
         1 => .{ .label = try reader.string(arena) },
-        2 => .{ .field = TempField{ .ref = try readFieldHandle(reader), .placeholder = try reader.string(arena), .single_line = try reader.strictBool() } },
+        2 => blk: {
+            const ref = try readFieldHandle(reader);
+            const placeholder = try reader.string(arena);
+            const flags = try reader.byte();
+            if (flags & ~(field_single_line | field_primary) != 0) return error.Corrupt;
+            break :blk .{ .field = TempField{ .ref = ref, .placeholder = placeholder, .single_line = flags & field_single_line != 0, .primary = flags & field_primary != 0 } };
+        },
         3 => blk: {
             const action = try reader.string(arena);
             if (action.len == 0) return error.InvalidData;
@@ -680,7 +696,7 @@ fn materializeNode(arena: std.mem.Allocator, records: []const TempNode, index: u
             node.content = .{ .container = .{ .axis = container.axis, .children = children } };
         },
         .label => |label| node.content = .{ .label = label },
-        .field => |field| node.content = .{ .field = .{ .ref = field.ref, .placeholder = field.placeholder, .single_line = field.single_line } },
+        .field => |field| node.content = .{ .field = .{ .ref = field.ref, .placeholder = field.placeholder, .single_line = field.single_line, .primary = field.primary } },
         .action => |action| node.content = .{ .action = .{ .action = action.action, .label = action.label, .enabled = action.enabled } },
     }
     return node;
@@ -1369,7 +1385,7 @@ const t = std.testing;
 
 test "scene codec: preorder scene round-trip preserves semantic fields" {
     const field_ref: semantic.scene.FieldRef = .{ .authority = .here, .slot = 4, .generation = 2 };
-    const leaf = semantic.scene.Node{ .id = @enumFromInt(2), .role = "button", .facts = &.{.{ .name = "kind", .value = "ok" }}, .actions = &.{.{ .id = "save", .label = "Save", .enabled = false }}, .layout = .{ .grow = 3, .column = 2 }, .focusable = true, .content = .{ .field = .{ .ref = field_ref, .placeholder = "name", .single_line = true } } };
+    const leaf = semantic.scene.Node{ .id = @enumFromInt(2), .role = "button", .facts = &.{.{ .name = "kind", .value = "ok" }}, .actions = &.{.{ .id = "save", .label = "Save", .enabled = false }}, .layout = .{ .grow = 3, .column = 2 }, .focusable = true, .content = .{ .field = .{ .ref = field_ref, .placeholder = "name", .single_line = true, .primary = true } } };
     const root = semantic.scene.Node{ .id = @enumFromInt(1), .role = "root", .content = .{ .container = .{ .axis = .horizontal, .children = &.{leaf} } } };
     const bytes = try encodeScene(t.allocator, root);
     defer t.allocator.free(bytes);

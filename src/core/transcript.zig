@@ -244,7 +244,7 @@ pub const node_fact = "node";
 /// `command.renderInto`, which (like `Context.render`) bypasses
 /// read-only by design: read-only blocks `edit` (interactive typing),
 /// never `render`/`renderInto` (model-driven production).
-pub fn fill(gpa: Allocator, status: *@import("status_feed.zig").Feed, tr: *const TranscriptDoc, doc: *Document, subs: *subbuffer.SubBuffers) command.RenderError!void {
+pub fn fill(gpa: Allocator, notices: *@import("status_feed.zig").Notices, tr: *const TranscriptDoc, doc: *Document, subs: *subbuffer.SubBuffers) command.RenderError!void {
     const Span = struct { start: usize, end: usize, node: GraphDoc.ObjId };
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(gpa);
@@ -264,7 +264,7 @@ pub fn fill(gpa: Allocator, status: *@import("status_feed.zig").Feed, tr: *const
     }
 
     const old_len = doc.text().byteLen();
-    try command.renderInto(gpa, status, doc, .plugin, projection_author, &.{
+    try command.renderInto(gpa, notices, doc, .plugin, projection_author, &.{
         .{ .range = .{ .start = 0, .end = old_len }, .bytes = text.items },
     });
 
@@ -329,8 +329,8 @@ pub fn lastRowClaim(subs: *const subbuffer.SubBuffers, doc: *const Document) ?*s
 /// second admission path invented here — `changed` is already
 /// frame-driven, this just answers the one extra question a graph-backed
 /// projection needs answered before a redraw would show anything true.
-pub fn refillOnChange(gpa: Allocator, status: *@import("status_feed.zig").Feed, tr: *const TranscriptDoc, doc: *Document, subs: *subbuffer.SubBuffers, changed: bool) command.RenderError!void {
-    if (changed) try fill(gpa, status, tr, doc, subs);
+pub fn refillOnChange(gpa: Allocator, notices: *@import("status_feed.zig").Notices, tr: *const TranscriptDoc, doc: *Document, subs: *subbuffer.SubBuffers, changed: bool) command.RenderError!void {
+    if (changed) try fill(gpa, notices, tr, doc, subs);
 }
 
 // ── `on_save` reconciliation (§2.6's `ReconcileMode.on_save`, formalized) ──
@@ -532,7 +532,7 @@ pub fn reconcileOnSave(gpa: Allocator, tr: *TranscriptDoc, doc: *Document, subs:
 }
 
 /// One transcript buffer's save binding — the opaque closure `install`
-/// hangs `transcript-save` off (`command.Command.data`, "the command's
+/// hangs `transcript.save` off (`command.Command.data`, "the command's
 /// closure payload", the exact mechanism `registerAction`'s own trampoline
 /// uses). Named deferral: this binds the `save` action to exactly ONE
 /// live `TranscriptDoc`/`SubBuffers` pair, matching files's own single-
@@ -562,10 +562,9 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
         // surface to build, not duplicated here; the honest floor for
         // this slice is an echoed refusal reason on the one channel every
         // command already reports through.
-        ctx.head.echo.clearRetainingCapacity();
         var buf: [96]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "transcript-save: refused ({t})", .{err}) catch "transcript-save: refused";
-        ctx.head.echo.appendSlice(gpa, msg) catch {};
+        const msg = std.fmt.bufPrint(&buf, "transcript.save: refused ({t})", .{err}) catch "transcript.save: refused";
+        ctx.head.echo.say(gpa, msg) catch {};
         return .{ .boolean = false };
     };
     // Re-fill: the buffer now shows the model's own canonical text for
@@ -573,12 +572,11 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     // coarseness left imprecise, and drops the `stale` rows' now-inert
     // claims) — the same "re-gather after apply" discipline files's
     // `on_save_apply` follows.
-    try fill(gpa, &ctx.buffers.status, bind.tr, &(try ctx.textEditor()).doc, bind.subs);
+    try fill(gpa, &ctx.buffers.notices, bind.tr, &(try ctx.textEditor()).doc, bind.subs);
     if (report.stale > 0) {
-        ctx.head.echo.clearRetainingCapacity();
         var buf: [64]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "transcript-save: {d} row(s) were stale, discarded", .{report.stale}) catch "transcript-save: some rows were stale";
-        ctx.head.echo.appendSlice(gpa, msg) catch {};
+        const msg = std.fmt.bufPrint(&buf, "transcript.save: {d} row(s) were stale, discarded", .{report.stale}) catch "transcript.save: some rows were stale";
+        ctx.head.echo.say(gpa, msg) catch {};
     }
     return .{ .boolean = true };
 }
@@ -590,17 +588,18 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
 /// default file-save provider), extended here to its first HOST-NATIVE
 /// provider — until now only wasm guests registered a tool-scoped `save`.
 pub fn install(gpa: Allocator, commands: *command.Commands, actions: *Actions, bind: *SaveBinding) !void {
-    _ = try commands.bind(gpa, "transcript-save", .{
-        .name = "transcript-save",
-        .summary = "Reconcile an edited transcript projection's rows back into the graph doc by NodeRef identity.",
+    _ = try commands.bind(gpa, "transcript.save", .{
+        .name = "transcript.save",
+        .summary = "Save the edits made in a transcript back into the conversation it shows.",
         .args = &.{},
         .handler = cTranscriptSave,
         .data = bind,
+        .meta = .{ .internal = true },
     });
     try actions.provide(.{
-        .action = "save",
+        .action = "file.save",
         .predicate = .{ .tool = projection_author },
-        .command = "transcript-save",
+        .command = "transcript.save",
         .priority = 10,
         .owner = "transcript",
     });
@@ -625,7 +624,7 @@ pub fn openBuffer(gpa: Allocator, buffers: *Buffers, display_name: []const u8) B
 
 const t = std.testing;
 /// Where a fill in these tests announces a refusal; none reads it.
-var test_status: @import("status_feed.zig").Feed = .{};
+var test_status: @import("status_feed.zig").Notices = .{};
 
 test "TranscriptDoc: append/read/edit" {
     const gpa = t.allocator;
@@ -960,7 +959,7 @@ test "install: `save` dispatches to transcript-save through the same tool-scoped
     // The trampoline `save` dispatches through — `builtins.install` binds
     // this in the real app; a focused unit test binds just the piece it
     // exercises.
-    try command.registerAction(gpa, &commands, &actions, "save", .pick);
+    try command.registerAction(gpa, &commands, &actions, "file.save", .pick, "Save.", .{});
 
     var tr = try TranscriptDoc.create(gpa, "alice");
     defer tr.deinit(gpa);
@@ -994,7 +993,7 @@ test "install: `save` dispatches to transcript-save through the same tool-scoped
         .quit = &quit,
         .head = &head,
     };
-    _ = try command.run(&commands, &ctx, "save", &.{});
+    _ = try command.run(&commands, &ctx, "file.save", &.{});
 
     const b1 = try tr.at(1).text(gpa);
     defer gpa.free(b1);

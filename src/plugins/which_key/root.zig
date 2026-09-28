@@ -6,15 +6,18 @@
 //! the same door files/git use. A colorscheme restyles it for free (spans
 //! carry a semantic Role, not a color): the KEY reads in the group/accent color
 //! so it pops from the plain command text. When there are more bindings than fit
-//! a page, it PAGINATES — `which-key-page-down`/`-up` (bound in `menu-nav`, which
+//! a page, it PAGINATES — `which-key.page-down`/`-up` (bound in `menu-nav`, which
 //! menus fall back to) scroll it, and a footer shows the position.
 //!
-//! A binding whose arms name INTENTIONS has no command name worth printing —
-//! what the key does is whatever the focused context offers. For those rows
-//! the hint asks the host's resolver the same question dispatch asks
-//! (`weft.menuBindingIntent`) and shows the answer: `Tab  hierarchy.toggle-
-//! expanded -> view` when it would run, the row dimmed with its reason when
-//! it would not. Asking is a READ — it runs no provider and invokes nothing.
+//! Every row reads by LABEL (doc/chrome.md §1.2): a leaf by its command's
+//! (`Split Editor Right`, `Open File…`), a group by the name config gave it;
+//! a command marked `internal` is keymap machinery and gets no row. A binding
+//! whose arms name INTENTIONS does whatever the focused context offers, so
+//! for those rows the hint asks the host's resolver the same question
+//! dispatch asks (`weft.menuBindingIntent`) and shows the answer: `Tab
+//! Expand/Collapse -> view` when it would run, the row dimmed with its reason
+//! when it would not. Asking is a READ — it runs no provider and invokes
+//! nothing.
 
 const std = @import("std");
 const weft = @import("weft");
@@ -36,8 +39,8 @@ const PAGE_STEP: usize = 12;
 var scroll_off: usize = 0;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "which-key-page-down", .arity = .whole, .call = pageDown },
-    .{ .name = "which-key-page-up", .arity = .whole, .call = pageUp },
+    .{ .name = "which-key.page-down", .arity = .whole, .call = pageDown, .summary = "Show the next page of key hints.", .internal = true },
+    .{ .name = "which-key.page-up", .arity = .whole, .call = pageUp, .summary = "Show the previous page of key hints.", .internal = true },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();
@@ -61,34 +64,43 @@ fn pageUp() void {
 /// whole-mode peek, exactly where the clutter is.)
 fn isBaselineEdit(cmd: []const u8) bool {
     const floor = [_][]const u8{
-        "insert-text",    "insert-newline", "insert-tab",   "delete-backward",
-        "delete-forward", "cursor-left",    "cursor-right", "cursor-up",
-        "cursor-down",
+        "edit.insert-text",  "edit.insert-newline", "edit.insert-tab", "edit.delete-before",
+        "edit.delete-after", "cursor.left",         "cursor.right",    "cursor.up",
+        "cursor.down",
     };
     for (floor) |c| if (std.mem.eql(u8, cmd, c)) return true;
     return false;
 }
 
-/// A menu's own leave/cancel/nav bindings are noise in the hint popup — every
-/// menu has them. Filter Escape/C-g/F1, the leave commands, the paging keys, and
-/// the baseline editing floor (see `isBaselineEdit`).
-fn isNoise(key: []const u8, cmd: []const u8) bool {
-    return std.mem.eql(u8, key, "Escape") or std.mem.eql(u8, key, "C-g") or
-        std.mem.eql(u8, key, "F1") or std.mem.eql(u8, cmd, "which-key-now") or
-        std.mem.eql(u8, cmd, "menu-escape") or std.mem.eql(u8, cmd, "leader-cancel") or
-        std.mem.eql(u8, cmd, "op-cancel") or
-        std.mem.eql(u8, cmd, "which-key-page-down") or std.mem.eql(u8, cmd, "which-key-page-up") or
-        isBaselineEdit(cmd);
+/// A menu's own leave/cancel/nav keys are noise in the hint popup — every
+/// menu has them — and so is anything its command says is keymap machinery
+/// (`internal`, doc/chrome.md §1.2: a mode's leave, the paging keys, a
+/// grammar's count digits), and the baseline editing floor (see
+/// `isBaselineEdit`). What is machinery is the command's to say, not a list
+/// kept here.
+fn isNoise(key: []const u8, cmd: []const u8, group: bool) bool {
+    if (std.mem.eql(u8, key, "Escape") or std.mem.eql(u8, key, "C-g") or std.mem.eql(u8, key, "F1"))
+        return true;
+    if (group) return false;
+    if (isBaselineEdit(cmd)) return true;
+    const meta = weft.commandMeta(cmd) orelse return false;
+    return meta.internal;
 }
 
-/// Drop the vocabulary prefix a hint row doesn't need: `std.hierarchy.toggle
-/// -expanded` reads as `hierarchy.toggle-expanded`, `core.view` as `view`. The
-/// full names stay the host's; this is presentation.
+/// Drop the vocabulary prefix a provider's name doesn't need: `core.view`
+/// reads as `view`. The full names stay the host's; this is presentation.
 fn shortName(name: []const u8) []const u8 {
     for ([_][]const u8{ "std.", "core." }) |prefix| {
         if (std.mem.startsWith(u8, name, prefix)) return name[prefix.len..];
     }
     return name;
+}
+
+/// What a person reads for `name` — its label, with the prompt mark when it
+/// asks for more (doc/chrome.md §1.2) — else the name itself.
+fn labelOf(buf: []u8, name: []const u8) []const u8 {
+    const meta = weft.commandMeta(name) orelse return shortName(name);
+    return meta.shown(buf, shortName(name));
 }
 
 /// Where the hint popup docks, from config: weft.set("which_key","placement",
@@ -109,7 +121,7 @@ fn countHints() usize {
     var total: usize = 0;
     var i: usize = 0;
     while (i < n) : (i += 1) {
-        if (!isNoise(weft.menuBindingKey(i), weft.menuBindingCmd(i))) total += 1;
+        if (!isNoise(weft.menuBindingKey(i), weft.menuBindingCmd(i), weft.menuBindingIsGroup(i))) total += 1;
     }
     return total;
 }
@@ -122,8 +134,11 @@ fn render() void {
         weft.surfaceClose();
         return;
     }
-    // Clamp the offset to a valid page start (last page if it ran past the end).
-    if (scroll_off >= total) scroll_off = (total - 1) / PAGE * PAGE;
+    // Clamp the offset so the last page ends at the last row. Paging past the
+    // end therefore STAYS at the end: clamping to a multiple of PAGE while
+    // stepping by PAGE_STEP sent a short menu round a cycle (0, 12, 0, …),
+    // which a reader paging until nothing changes never left.
+    scroll_off = @min(scroll_off, if (total > PAGE) total - PAGE else 0);
 
     weft.surfaceBegin(placement());
     var idx: usize = 0; // index among non-noise bindings
@@ -132,24 +147,27 @@ fn render() void {
     while (i < n) : (i += 1) {
         const key = weft.menuBindingKey(i);
         const cmd = weft.menuBindingCmd(i);
-        if (isNoise(key, cmd)) continue;
+        const group = weft.menuBindingIsGroup(i);
+        if (isNoise(key, cmd, group)) continue;
         defer idx += 1;
         if (idx < scroll_off) continue;
         if (shown >= PAGE) break;
-        const group = weft.menuBindingIsGroup(i);
         weft.surfaceRow();
+        var label_buf: [128]u8 = undefined;
         if (weft.menuBindingIntent(i)) |it| {
-            // An intention binding has no command NAME worth showing: what the
-            // key does is whatever the focused context offers. Paint what the
-            // resolver answers — "intent -> provider" when it would run, the
-            // whole row dimmed with its reason when it would not.
+            // An intention binding does whatever the focused context offers:
+            // paint what the resolver answers, by its LABEL — "Save -> git"
+            // when it would run, the whole row dimmed with its reason when it
+            // would not.
             weft.surfaceSpan(key, if (it.ready) .accent else .muted);
-            weft.surfaceSpan(shortName(it.name), if (it.ready) .leaf else .muted);
+            weft.surfaceSpan(labelOf(&label_buf, it.name), if (it.ready) .leaf else .muted);
             if (it.ready) weft.surfaceSpan("->", .muted);
             if (it.note.len > 0) weft.surfaceSpan(shortName(it.note), .muted);
         } else {
             weft.surfaceSpan(key, .accent); // the key always stands out
-            weft.surfaceSpan(cmd, if (group) .group else .leaf); // group vs leaf color
+            // A group is named by the config (`weft.group`); a leaf by its
+            // command's label, which is what a person reads for it everywhere.
+            weft.surfaceSpan(if (group) cmd else labelOf(&label_buf, cmd), if (group) .group else .leaf);
         }
         shown += 1;
     }

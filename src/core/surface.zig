@@ -46,11 +46,16 @@ pub const Role = enum(u32) {
     /// dim by column position, so the color is DATA the surface carries, not
     /// a layout side effect the drawer infers.
     annotation = 6,
+    /// Something needs attention (a warning's count): the diagnostic
+    /// warning colour.
+    warning = 7,
+    /// Something is wrong (an error's count): the diagnostic error colour.
+    danger = 8,
     _,
 
     pub fn fromInt(v: u32) Role {
         return switch (v) {
-            0, 1, 2, 3, 4, 5, 6 => @enumFromInt(v),
+            0, 1, 2, 3, 4, 5, 6, 7, 8 => @enumFromInt(v),
             else => .normal,
         };
     }
@@ -179,7 +184,7 @@ test "surface: begin/row/span/end retains rows; close clears; rebuild is atomic"
     s.begin(gpa, .corner);
     s.addRow(gpa);
     s.addSpan(gpa, "f", .group);
-    s.addSpan(gpa, "find-file", .leaf);
+    s.addSpan(gpa, "files.find", .leaf);
     s.addRow(gpa);
     s.addSpan(gpa, "g", .group);
     // Not visible until end.
@@ -192,7 +197,7 @@ test "surface: begin/row/span/end retains rows; close clears; rebuild is atomic"
     try t.expectEqual(@as(?usize, 1), s.selected);
     try t.expectEqualStrings("f", s.rows.items[0].spans.items[0].text);
     try t.expectEqual(Role.group, s.rows.items[0].spans.items[0].role);
-    try t.expectEqualStrings("find-file", s.rows.items[0].spans.items[1].text);
+    try t.expectEqualStrings("files.find", s.rows.items[0].spans.items[1].text);
 
     // A rebuild swaps atomically; the old rows are gone, new ones live.
     s.begin(gpa, .bottom);

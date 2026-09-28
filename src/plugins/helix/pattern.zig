@@ -58,7 +58,7 @@ pub const Op = enum {
 
 /// The one prompt every op shares; `op` says what it is for.
 pub const prompt = prompt_mod.Prompt(.{
-    .name = "helix-regex",
+    .name = "helix.regex",
     .on_accept = accept,
     .on_cancel = cancel,
     .on_change = preview,

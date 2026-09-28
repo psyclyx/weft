@@ -45,11 +45,11 @@ var slot_count: usize = 0;
 pub fn installMode(mode: []const u8, visit_cmd: []const u8) void {
     weft.restingMode(mode);
     weft.bindKey(mode, "Return", visit_cmd);
-    weft.bindKey(mode, "j", "cursor-down");
-    weft.bindKey(mode, "k", "cursor-up");
-    weft.bindKey(mode, "Down", "cursor-down");
-    weft.bindKey(mode, "Up", "cursor-up");
-    weft.bindKey(mode, "q", "buffer-back");
+    weft.bindKey(mode, "j", "cursor.down");
+    weft.bindKey(mode, "k", "cursor.up");
+    weft.bindKey(mode, "Down", "cursor.down");
+    weft.bindKey(mode, "Up", "cursor.up");
+    weft.bindKey(mode, "q", "buffer.back");
 }
 
 /// What a producer may add to one row while the raw text is in hand: its own
@@ -70,9 +70,28 @@ const Request = struct {
     /// is exactly what `make` exists to let you navigate, and exactly what the
     /// stdout-only fill door silently dropped.
     want_err: bool,
+    /// The context key that says this run is going (`Running`), and the place
+    /// it was said on, where it is retracted when the run lands.
+    running_key: []const u8 = "",
+    place: [1100]u8 = undefined,
+    place_len: usize = 0,
 };
 
-/// Focus the `name` tool buffer (reused across runs — `buffer-create` does NOT
+/// What a producer says while its command runs: `key` (its own,
+/// `make.running`) is `what` (`build`) on the place the run started in, and
+/// empty again when the output lands. A context key, so a predicate can read
+/// it — and so the status line, whose answers are about the context, asks
+/// the producer again the moment a run starts or ends.
+pub const Running = struct { key: []const u8, what: []const u8 };
+
+/// What `key` says is running in the primary context, or null for nothing —
+/// what a producer's status segment shows.
+pub fn runningHere(key: []const u8) ?[]const u8 {
+    const what = weft.contextGet(key) orelse return null;
+    return if (what.len == 0) null else what;
+}
+
+/// Focus the `name` tool buffer (reused across runs — `buffer.create` does NOT
 /// dedupe by name, so re-creating would pile up duplicates), put it in `mode`,
 /// and run `argv`, publishing its output as a projection when it lands.
 ///
@@ -85,15 +104,28 @@ const Request = struct {
 pub fn show(argv: []const []const u8, name: []const u8, mode: []const u8, opts: struct {
     row_style: ?RowStyle = null,
     want_err: bool = false,
+    running: ?Running = null,
 }) void {
     const slot = slotFor(name) orelse return;
     weft.focusOrCreateBuffer(name);
     weft.setMode(mode);
-    _ = weft.execWith(Request, .{
+    var req: Request = .{
         .slot = slot,
         .row_style = opts.row_style,
         .want_err = opts.want_err,
-    }, .{ .argv = argv }, landed);
+    };
+    if (opts.running) |r| if (weft.placeDesignation(&req.place)) |place| {
+        req.place_len = place.len;
+        req.running_key = r.key;
+        weft.contextSetAt(r.key, r.what, place) catch {};
+    };
+    if (!weft.execWith(Request, req, .{ .argv = argv }, landed)) settle(req);
+}
+
+/// The run is over: say so where it was said to be going.
+fn settle(req: Request) void {
+    if (req.running_key.len == 0) return;
+    weft.contextSetAt(req.running_key, "", req.place[0..req.place_len]) catch {};
 }
 
 // ── What an output entry IS (doc/model.md §2.1) ──────────────────────
@@ -191,6 +223,7 @@ test "output: a view parameter round-trips any bytes" {
 /// Nothing is read back out of the buffer — the bytes are right here, which is
 /// what the fill door could never say.
 fn landed(r: weft.ExecDone, req: Request) void {
+    settle(req);
     var scratch: [1 << 16]u8 = undefined;
     const out = r.read(.out, 0, &scratch);
     if (out.len > 0 or !req.want_err) return fill(req, out);

@@ -51,16 +51,16 @@ test "e2e/languages: two languages are two servers — both answer, and killing 
 
     // BOTH ATTACH: opening one file of each language brings up one server each,
     // neither displacing the other.
-    ed.runStr("open", "iso.zig");
-    ed.runStr("open", "iso.nix");
+    ed.runStr("file.open", "iso.zig");
+    ed.runStr("file.open", "iso.nix");
     try t.expect(h.drainUntilOracle(&app.proj, ed, "test -s .lsp-alpha-init && echo yes", "yes"));
     try t.expect(h.drainUntilOracle(&app.proj, ed, "test -s .lsp-beta-init && echo yes", "yes"));
 
     // BOTH ANSWER, each in its own buffer, each with its own tag.
-    ed.runStr("open", "iso.zig");
+    ed.runStr("file.open", "iso.zig");
     ed.settle(40);
     try lang.awaitPeerCompletion(ed, alpha);
-    ed.runStr("open", "iso.nix");
+    ed.runStr("file.open", "iso.nix");
     ed.settle(40);
     try lang.awaitPeerCompletion(ed, beta);
 
@@ -74,7 +74,7 @@ test "e2e/languages: two languages are two servers — both answer, and killing 
 
     // THE OTHER IS WHOLE: beta still serves its buffer, through the same
     // provider registration, with no repair step in between.
-    ed.runStr("open", "iso.nix");
+    ed.runStr("file.open", "iso.nix");
     ed.settle(40);
     try lang.awaitPeerCompletion(ed, beta);
 }
@@ -117,7 +117,7 @@ test "e2e/places: twenty-six projects, one language — every server stays up, a
     // Opening a file in each project mints its session and spawns its server.
     for (1..projects + 1) |n| {
         var path: [32]u8 = undefined;
-        ed.runStr("open", try std.fmt.bufPrint(&path, "p{d:0>2}/main.zig", .{n}));
+        ed.runStr("file.open", try std.fmt.bufPrint(&path, "p{d:0>2}/main.zig", .{n}));
     }
 
     // ALL 26 HANDSHOOK. One oracle counts the markers rather than 26 — a shed
@@ -138,7 +138,7 @@ test "e2e/places: twenty-six projects, one language — every server stays up, a
     var dir: [8]u8 = undefined;
     for (1..projects + 1) |n| {
         var path: [32]u8 = undefined;
-        ed.runStr("open", try std.fmt.bufPrint(&path, "p{d:0>2}/main.zig", .{n}));
+        ed.runStr("file.open", try std.fmt.bufPrint(&path, "p{d:0>2}/main.zig", .{n}));
         ed.settle(40);
         try lang.awaitCompletionItem(ed, peer.itemIn(&item, try std.fmt.bufPrint(&dir, "p{d:0>2}", .{n})));
     }
@@ -146,7 +146,7 @@ test "e2e/places: twenty-six projects, one language — every server stays up, a
     // AND THE FIRST ONE STILL DOES, LAST. It is now the least recently used
     // session in the table — precisely what the old shedding rule retired to
     // make room, and what a moved-out-from-under `*Session` would have lost.
-    ed.runStr("open", "p01/main.zig");
+    ed.runStr("file.open", "p01/main.zig");
     ed.settle(40);
     try lang.awaitCompletionItem(ed, peer.itemIn(&item, "p01"));
 }
@@ -191,7 +191,7 @@ test "e2e/places: a project root past the old 512-byte key limit starts a server
     }
 
     var path: [1024]u8 = undefined;
-    ed.runStr("open", try std.fmt.bufPrint(&path, "{s}/main.zig", .{deep}));
+    ed.runStr("file.open", try std.fmt.bufPrint(&path, "{s}/main.zig", .{deep}));
 
     // A server, started IN that project — the marker's LOCATION is the proof.
     var cmd: [2048]u8 = undefined;
@@ -248,8 +248,8 @@ test "e2e/places: two projects, ONE language — two servers, each rooted in and
         gpa.free(out);
     }
 
-    ed.runStr("open", "proj-a/main.zig");
-    ed.runStr("open", "proj-b/main.zig");
+    ed.runStr("file.open", "proj-a/main.zig");
+    ed.runStr("file.open", "proj-b/main.zig");
 
     // TWO SERVERS, each started IN its own project. The peer writes its marker
     // files relative to its own working directory, and the spawn door puts a
@@ -282,10 +282,10 @@ test "e2e/places: two projects, ONE language — two servers, each rooted in and
     // name would be one server serving both buffers — the exact pre-place
     // behaviour.
     var want: [128]u8 = undefined;
-    ed.runStr("open", "proj-a/main.zig");
+    ed.runStr("file.open", "proj-a/main.zig");
     ed.settle(40);
     try lang.awaitCompletionItem(ed, peer.itemIn(&want, "proj-a"));
-    ed.runStr("open", "proj-b/main.zig");
+    ed.runStr("file.open", "proj-b/main.zig");
     ed.settle(40);
     try lang.awaitCompletionItem(ed, peer.itemIn(&want, "proj-b"));
 
@@ -340,7 +340,7 @@ test "e2e/languages: a long file opened colors itself when its parse lands, and 
     // The initial parse runs on a pool worker, so the first frame is drawn
     // before any tree exists. Its landing must draw again by itself: before,
     // nothing damaged the frame, and the file stayed uncolored until a key.
-    ed.runStr("open", "long.js");
+    ed.runStr("file.open", "long.js");
     try t.expect(wakeUntilHighlighted(ed));
 
     // A jump far past the paint window: its FIRST frame is colored. Before,
@@ -379,7 +379,7 @@ test "e2e/languages: the harness registers exactly what languages.js does" {
     var declared: usize = 0;
     var lines = std.mem.splitScalar(u8, src, '\n');
     while (lines.next()) |line| {
-        const marker = "weft.run(\"grammar-add\", ";
+        const marker = "weft.run(\"syntax.add-grammar\", ";
         const at = std.mem.indexOf(u8, line, marker) orelse continue;
         // `"<exts>", "<grammar>", …` — the first two quoted strings.
         var rest = line[at + marker.len ..];
@@ -417,4 +417,41 @@ fn nextQuoted(rest: *[]const u8) ?[]const u8 {
     const close = std.mem.indexOfScalar(u8, after, '"') orelse return null;
     rest.* = after[close + 1 ..];
     return after[0..close];
+}
+
+// A language server that cannot start says so where the person looks. The
+// start is attempted from `on_activate` — a BACKGROUND entry, with no head
+// that asked — and the plugin's `weft.echo` there used to trap: the message
+// was lost and the rest of the activation (decorations, diagnostics) aborted
+// with it. A background echo is a notice to the whole system: it lands on the
+// notices every status line shows briefly (`Buffers.notices`).
+test "e2e/languages: a language server that cannot start says so from a background entry" {
+    const gpa = t.allocator;
+    var proj: h.Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    try h.core.file.writeBytesMakingDirs(gpa, "box/src", "box/src/main.zig", "pub fn main() void {}\n");
+    var ed: h.Editor = undefined;
+    try h.Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader: h.ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+    defer gpa.free(config_dir);
+    try h.bootConfigNamed(&ed, config_dir, "ide.js", &loader);
+    const local_sh = [_][]const u8{"/bin/sh"};
+    ed.prov.attach_deps.spawner = .{ .command = &local_sh };
+
+    // A zig file over a shell: a configured language in a place with no local
+    // directory, so no server can start there, and lsp says so as it activates.
+    var buf: [4096]u8 = undefined;
+    const file = try std.fmt.bufPrint(&buf, "weft://shell:box/file{s}/box/src/main.zig", .{proj.root});
+    ed.runStr("file.open", file);
+    ed.applyWindow();
+    ed.settle(2);
+    const said = ed.buffers.notices.get() orelse "";
+    if (std.mem.indexOf(u8, said, "lsp: this place has no local directory") == null) {
+        std.debug.print("[e2e/languages] notice: '{s}', echo: '{s}'\n", .{ said, ed.echoText() });
+        return error.TestExpectedEqual;
+    }
 }

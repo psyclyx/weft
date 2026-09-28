@@ -95,6 +95,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_declare_command", .handler = declare.hDeclareCommand },
     .{ .name = "wl_declare_command_doc", .handler = declare.hDeclareCommandDoc },
     .{ .name = "wl_declare_arity", .handler = declare.hDeclareArity },
+    .{ .name = "wl_declare_command_meta", .handler = declare.hDeclareCommandMeta },
     .{ .name = "wl_declare_capability", .handler = declare.hDeclareCapability },
     .{ .name = "wl_request_perm", .handler = declare.hRequestPerm },
 
@@ -149,6 +150,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_annotate_len", .handler = annotate.hLen },
     .{ .name = "wl_annotate_read", .handler = annotate.hRead },
     .{ .name = "wl_annotate_begin", .handler = annotate.hBegin },
+    .{ .name = "wl_annotate_begin_until_key", .handler = annotate.hBeginUntilKey },
     .{ .name = "wl_annotate_span", .handler = annotate.hSpan },
 
     // ── config_kv.zig — runtime kv scratch + the distinct config store ──
@@ -163,6 +165,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_arg_str", .handler = dispatch.hArgStr },
     .{ .name = "wl_set_result_int", .handler = dispatch.hSetResultInt },
     .{ .name = "wl_set_result_str", .handler = dispatch.hSetResultStr },
+    .{ .name = "wl_key_serial", .handler = dispatch.hKeySerial },
 
     // ── keymap.zig — the local config plane: bindings/modes/providers ──
     .{ .name = "wl_bind_key", .handler = keymap.hBindKey },
@@ -178,8 +181,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_posture", .handler = keymap.hPosture },
     .{ .name = "wl_declare_posture", .handler = keymap.hDeclarePosture },
     .{ .name = "wl_sticky_menu", .handler = keymap.hStickyMenu },
-    .{ .name = "wl_mode_names", .handler = keymap.hModeNames },
-    .{ .name = "wl_binding_table", .handler = keymap.hBindingTable },
+    .{ .name = "wl_mode_display", .handler = keymap.hModeDisplay },
     .{ .name = "wl_provide", .handler = keymap.hProvide },
 
     // ── commands.zig — register/run/introspect ──────────────────────────
@@ -190,13 +192,18 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_run_str", .handler = commands.hRunStr },
     .{ .name = "wl_run_str2", .handler = commands.hRunStr2 },
     .{ .name = "wl_run_argv", .handler = commands.hRunArgv },
+    .{ .name = "wl_run_argv_at", .handler = commands.hRunArgvAt },
     .{ .name = "wl_command_count", .handler = commands.hCommandCount },
+    .{ .name = "wl_command_revision", .handler = commands.hCommandRevision },
     .{ .name = "wl_command_name", .handler = commands.hCommandName },
     .{ .name = "wl_command_summary", .handler = commands.hCommandSummary },
     .{ .name = "wl_command_owner", .handler = commands.hCommandOwner },
     .{ .name = "wl_command_arity", .handler = commands.hCommandArity },
     .{ .name = "wl_command_arity_required", .handler = commands.hCommandArityRequired },
     .{ .name = "wl_command_arg", .handler = commands.hCommandArg },
+    .{ .name = "wl_command_meta", .handler = commands.hCommandMeta },
+    .{ .name = "wl_keys_for", .handler = commands.hKeysFor },
+    .{ .name = "wl_command_at", .handler = commands.hCommandAt },
 
     // ── intent.zig — the focused context's live offers ──────────────────
     .{ .name = "wl_intent_invoke", .handler = intent.hIntentInvoke },
@@ -226,6 +233,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_pick_category", .handler = pick.hPickCategory },
     .{ .name = "wl_pick_add", .handler = pick.hPickAdd },
     .{ .name = "wl_pick_add_buffer", .handler = pick.hPickAddBuffer },
+    .{ .name = "wl_pick_add_keyed", .handler = pick.hPickAddKeyed },
     .{ .name = "wl_pick_end", .handler = pick.hPickEnd },
     .{ .name = "wl_open_file_pick", .handler = pick.hOpenFilePick },
     .{ .name = "wl_pick_outcome_kind", .handler = pick.hPickOutcomeKind },
@@ -296,6 +304,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_context_get", .handler = context_doors.hContextGet },
     .{ .name = "wl_context_changed", .handler = context_doors.hContextChanged },
     .{ .name = "wl_places", .handler = context_doors.hPlaces },
+    .{ .name = "wl_subject_watch", .handler = context_doors.hSubjectWatch },
 
     // ── history.zig — the head's jumplist and macro recorder ──────────
     .{ .name = "wl_jump_push", .handler = history.hJumpPush },
@@ -672,7 +681,6 @@ const head_gated_list = [_][]const u8{
     "wl_set_mode", // keymap.zig hSetMode
     "wl_exit_to_resting", // keymap.zig hExitToResting
     "wl_declare_posture", // keymap.zig hDeclarePosture
-    "wl_echo", // dispatch.zig hEcho
     "wl_pick_end", // pick.zig hPickEnd
     "wl_open_file_pick", // pick.zig hOpenFilePick
     "wl_semantic_view_focus", // semantic.zig hSemanticViewFocus
@@ -680,6 +688,7 @@ const head_gated_list = [_][]const u8{
     "wl_semantic_interaction_close", // semantic.zig hSemanticInteractionClose
     "wl_semantic_action", // semantic.zig hSemanticAction
     "wl_intent_invoke_at", // intent.zig hIntentInvokeAt
+    "wl_run_argv_at", // commands.zig hRunArgvAt
 };
 
 test "membrane contract: table .head_gated metadata agrees with the handlers' actual requireDispatch gates" {

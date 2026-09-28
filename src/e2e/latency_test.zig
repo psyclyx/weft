@@ -141,7 +141,7 @@ const InsertDriver = struct {
     }
 };
 
-/// `j`/`k` — a bound single-key motion (`vim/n/motion.down`/`.up`), alternated
+/// `j`/`k` — a bound single-key motion (`vim.move-down`/`.up`), alternated
 /// so the cursor stays put (no risk of running off either end of the fixture).
 const MotionDriver = struct {
     ed: *Editor,
@@ -242,7 +242,7 @@ fn registerActionFixture(gpa: std.mem.Allocator, ed: *Editor) !void {
         .args = &.{},
         .handler = noopCommand,
     });
-    try core.command.registerAction(gpa, ed.commands, ed.ctx.actions, "latency-action", .pick);
+    try core.command.registerAction(gpa, ed.commands, ed.ctx.actions, "latency-action", .pick, "Measure an action's dispatch.", .{});
 
     var buf: [64]u8 = undefined;
     // 10 decoys: `lang` mismatch only.
@@ -426,7 +426,7 @@ test "e2e/latency: dispatch keystroke latency vs baseline" {
     try Editor.init(gpa, &ed);
     defer ed.deinit();
     try loadVim(&ed);
-    ed.runStr("open", path);
+    ed.runStr("file.open", path);
     try t.expectEqualStrings("normal", ed.mode());
     try registerActionFixture(gpa, &ed);
 

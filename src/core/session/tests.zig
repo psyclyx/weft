@@ -18,7 +18,7 @@ const subbuffer = @import("../subbuffer.zig");
 const GraphDoc = @import("../graph.zig");
 const TranscriptDoc = @import("../transcript.zig");
 /// Where a transcript fill announces a refusal; these tests read none.
-var test_status: @import("../status_feed.zig").Feed = .{};
+var test_status: @import("../status_feed.zig").Notices = .{};
 
 const session = @import("../session.zig");
 const Session = @import("Session.zig");

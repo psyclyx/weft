@@ -93,9 +93,9 @@ style: Style = .orderless,
 /// the ordinary bottom dock (command palette, buffer switch, file find).
 caret_anchor: ?usize = null,
 /// Sticky narrowing filter (space-joined tokens): a candidate must
-/// match it (orderless) IN ADDITION to the live query. `pick-narrow`
+/// match it (orderless) IN ADDITION to the live query. `pick.narrow`
 /// promotes the current query into it and clears the query; a further
-/// `pick-narrow` ANDs another facet; `pick-widen` clears it.
+/// `pick.narrow` ANDs another facet; `pick.widen` clears it.
 narrow: std.ArrayList(u8) = .empty,
 
 const Frec = struct { uses: u32, last: u64 };
@@ -505,7 +505,7 @@ fn commitClose(self: *Pick, ctx: *command.Context, owned_restore: []u8) void {
 /// acceptor, then restore the mode it displaced. Consumers use this when the
 /// target which made a picker meaningful becomes stale (for example, an async
 /// completion after a buffer switch). This is UI lifecycle, not input policy;
-/// key bindings still invoke the same operation through `pick-cancel`.
+/// key bindings still invoke the same operation through `pick.cancel`.
 pub fn dismiss(self: *Pick, ctx: *command.Context) !void {
     if (self.active) try self.finish(ctx, .cancelled);
 }
@@ -551,8 +551,11 @@ fn refilter(self: *Pick, gpa: Allocator) !void {
     }
     std.mem.sort(Scored, scored.items, {}, struct {
         fn lt(_: void, a: Scored, b: Scored) bool {
-            // Word-boundary hits first (acronyms / word starts), then a
-            // tighter span, then an earlier first match, then frecency.
+            // A word-start run first, then word-boundary hits (acronyms /
+            // word starts), then a tighter span — the order an item's own
+            // best occurrence is chosen by (`match.better`) — then an
+            // earlier first match, then frecency.
+            if (a.m.word != b.m.word) return a.m.word;
             if (a.m.boundaries != b.m.boundaries) return a.m.boundaries > b.m.boundaries;
             if (a.m.span != b.m.span) return a.m.span < b.m.span;
             if (a.m.start != b.m.start) return a.m.start < b.m.start;
@@ -880,59 +883,29 @@ fn cAcceptInput(ctx: *command.Context, args: struct {}) anyerror!Value {
     return cAccept(ctx, .{});
 }
 
-/// The command palette: pick over every command (summary as the
-/// docstring), run the choice.
-fn cPalette(ctx: *command.Context, args: struct {}) anyerror!Value {
-    _ = args;
-    var entries: std.ArrayList(Entry) = .empty;
-    defer entries.deinit(ctx.gpa);
-    for (0..ctx.commands.count()) |i| {
-        const n: command.Commands.Name = @enumFromInt(i);
-        if (ctx.commands.lookup(n)) |cmd| {
-            try entries.append(ctx.gpa, .{ .text = ctx.commands.nameOf(n), .doc = cmd.summary });
-        }
-    }
-    try ctx.head.pick.openWith(ctx, "command", entries.items, .{ .handler = runChoice }, .{ .category = "command" });
-    return .nil;
-}
-
-/// The core palette's accept. This is the FALLBACK palette — a weft with no
-/// plugins — so it stays argument-free and simply reports (`command.invoke`)
-/// rather than growing its own prompting; choosing `listen` here now says
-/// what `listen` takes instead of failing into a log line. The argument-taking
-/// experience is the `palette` plugin's (`plugin_lib/invoke`), where UI policy
-/// belongs.
-fn runChoice(ctx: *command.Context, data: ?*anyopaque, outcome: Outcome) anyerror!void {
-    _ = data;
-    const choice = outcome.text() orelse return;
-    command.invoke(ctx.commands, ctx, choice, &.{});
-}
-
 /// Register pick commands + the "pick" mode bindings.
 pub fn install(gpa: Allocator, commands: *command.Commands, keymap: *@import("../Keymap.zig")) !void {
     const defs = [_]command.Command{
-        command.define("pick-input", "Append text to the pick query.", cInput),
-        command.define("pick-backspace", "Delete the last query character.", cBackspace),
-        command.define("pick-next", "Select the next match.", cNext),
-        command.define("pick-prev", "Select the previous match.", cPrev),
-        command.define("pick-accept", "Accept the selected match (else the typed text, if free-text).", cAccept),
-        command.define("pick-accept-input", "Accept the typed text verbatim (free-text picks).", cAcceptInput),
-        command.define("pick-cancel", "Close the picker.", cCancel),
-        command.define("pick-complete", "Complete the query (common prefix, else selection).", cComplete),
-        command.define("pick-commands", "Open the command palette.", cPalette),
-        command.define("pick-narrow", "Promote the query into a sticky narrowing filter.", cNarrow),
-        command.define("pick-widen", "Drop the narrowing filter.", cWiden),
-        command.define("pick-style-cycle", "Cycle the completion style (orderless/flex/substring/prefix).", cStyleCycle),
+        command.define("pick.input", "Append text to the picker's query.", cInput).present(.{ .internal = true }),
+        command.define("pick.backspace", "Delete the last character of the query.", cBackspace).present(.{ .internal = true }),
+        command.define("pick.next", "Select the next match.", cNext).present(.{ .internal = true }),
+        command.define("pick.prev", "Select the previous match.", cPrev).present(.{ .internal = true }),
+        command.define("pick.accept", "Accept the selected match, or the typed text when the picker takes free text.", cAccept).present(.{ .internal = true }),
+        command.define("pick.accept-input", "Accept the typed text exactly as written.", cAcceptInput).present(.{ .internal = true }),
+        command.define("pick.cancel", "Close the picker.", cCancel).present(.{ .internal = true }),
+        command.define("pick.complete", "Complete the query to the common prefix, or else to the selected match.", cComplete).present(.{ .internal = true }),
+        command.define("pick.narrow", "Keep the current query as a filter and start a new one within it.", cNarrow).present(.{ .internal = true }),
+        command.define("pick.widen", "Drop the narrowing filter.", cWiden).present(.{ .internal = true }),
+        command.define("pick.cycle-style", "Cycle how the query matches: orderless, flex, substring or prefix.", cStyleCycle).present(.{ .internal = true }),
     };
     for (defs) |cmd| _ = try commands.bind(gpa, cmd.name, cmd);
 
     // The "pick" mode's KEY BINDINGS are config data, not core policy: the
-    // shipped `defaults.js` (which every config `weft.use`s) binds Down→pick-next,
-    // Return→pick-accept, etc. — so the picker is rebindable like everything
+    // shipped `defaults.js` (which every config `weft.use`s) binds Down→pick.next,
+    // Return→pick.accept, etc. — so the picker is rebindable like everything
     // else, and core ships only the COMMANDS + the mode's COMMIT declaration.
     // (The declaration IS mechanism — it names how typed text routes, not a key.)
-    try keymap.setCommitCommand(gpa, "pick", "pick-input");
-    _ = try commands.bind(gpa, "palette", (comptime command.define("palette", "Open the command palette.", cPalette)));
+    try keymap.setCommitCommand(gpa, "pick", "pick.input");
 }
 
 /// Replace the item set of a live pick, preserving query and selection

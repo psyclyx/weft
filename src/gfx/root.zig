@@ -32,6 +32,8 @@ pub const layout = @import("layout.zig");
 /// The display-free rendering harness the e2e suite and offscreen heads drive.
 pub const harness = @import("harness.zig");
 
+pub const icons = @import("icons.zig");
+
 /// Offscreen Vulkan target: ordinary images, no WSI or compositor.
 pub const headless_vulkan = @import("headless_vulkan.zig");
 
@@ -48,6 +50,7 @@ test {
     _ = @import("layout.zig");
     _ = view;
     _ = harness;
+    _ = icons;
     _ = region;
     _ = window_layout;
 }

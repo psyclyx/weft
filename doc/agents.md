@@ -16,7 +16,7 @@ the UI over the `weft.*` ABI, and agents are declared as config data.
     CLI harness (`claude -p`) edits the disk directly and weft could only observe;
     ACP is where the peer model pays off, so it's the only path.
 - **Config-driven, zero baked assumptions** (NixOS-friendly). Agents are data,
-  same shape as `lsp-add`/`grammar-add`:
+  same shape as `lsp-add`/`syntax.add-grammar`:
   ```js
   weft.agent("claude", { protocol: "acp", cmd: ["/…/claude-agent-acp"] });
   weft.agent("codex",  { protocol: "acp", cmd: ["codex-acp"] });
@@ -70,7 +70,7 @@ membrane for async approve/deny). The gaps:
    An `on_output(handle, chunk)` fired at the frame boundary (never nested in a
    guest call — the wasm-store re-entrancy rule).
 8. *(refinement)* **project** plugin: walk up to the dominating `.git`/marker,
-   track a current project, publish `project-root` / `project-switch` as
+   track a current project, publish `project.show-root` / `project-switch` as
    late-bound names the agent plugin (cwd), grep, and run consume.
 
 Permission UI needs **no** new primitive — the pick membrane already does async
@@ -90,7 +90,7 @@ approve/deny (a two-item pick), which also gives dired-reconcile its confirmatio
 
 The ACP client works end-to-end and is launchable in the running editor:
 
-- **Phase 0 primitives** — all in: proc spawn `cwd`; `fs.exists`; `project-root`
+- **Phase 0 primitives** — all in: proc spawn `cwd`; `fs.exists`; `project.show-root`
   detection; `edit_as` (named agent sub-peer authorship, with `Context.edit`
   refined so an `.agent` never joins the user's undo).
 - **Phase 1 — JS plugin host** — done: `quickjs.wasm` is a first-class plugin
@@ -111,21 +111,21 @@ The ACP client works end-to-end and is launchable in the running editor:
   ACP agent (no agent binary or display needed). **A working coding agent:**
   reads + writes your files + streams responses. Launchable: `weft.set("acp",
   "cmd",…)` + `weft.grant("acp", "proc"|"fs_read"|"fs_write")` +
-  `weft.plugin("acp.js")` + `agent-start`. The grants are not optional: a
+  `weft.plugin("acp.js")` + `acp.start`. The grants are not optional: a
   `.js` plugin declares nothing about itself, so an ungranted `weft.procSpawn`
   / `weft.fileRead` throws.
 
-**Multi-turn:** `weft.lineText()` + the `agent-send` command send the current
+**Multi-turn:** `weft.lineText()` + the `acp.send` command send the current
 line as the next prompt on the focused conversation, and `sendPrompt` echoes it
 into that conversation's transcript. Bind `SPC o s`.
 
-**Conversations are instances.** Every `agent-start` mints one: its own
+**Conversations are instances.** Every `acp.start` mints one: its own
 subprocess, its own ACP session, its own transcript buffer (`*agent*`,
 `*agent:2*`, … — the instanced tool-buffer naming idiom) and its own live
 `TranscriptDoc` on the host (one per projected buffer, `JsPlugin.conversations`).
 Streamed updates route by the proc handle that carried them, so two agents in
-flight can never land a chunk in each other's transcript. `agent-focus` picks
-which one `agent-send` addresses.
+flight can never land a chunk in each other's transcript. `acp.focus` picks
+which one `acp.send` addresses.
 
 **Permission:** `session/request_permission` → a pick — `weft.pick(prompt,
 options, token)` (bound to the JsPlugin) + `weft.onPick` answer the agent with
@@ -156,7 +156,7 @@ produced output read-only, its input line editable), guarded at the edit door.
 
 Concurrent conversations are supported (isolated transcripts, isolated
 permission continuations, per-conversation peers). Only a **dashboard** (one
-list across agents, grouped by status) is left as a future nicety — `agent-focus`
+list across agents, grouped by status) is left as a future nicety — `acp.focus`
 is the plain-pick stand-in.
 
 ## Build order (each phase committable, independently useful)

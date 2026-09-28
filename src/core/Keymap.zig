@@ -30,6 +30,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BindingFacet = @import("weft_input").BindingFacet;
+const Granularity = @import("weft_input").Granularity;
 
 const Keymap = @This();
 
@@ -42,7 +43,47 @@ const Keymap = @This();
 /// architecture §10.2), resolved first-applicable at dispatch. A plain
 /// command binding is a one-entry list — one representation, no second
 /// shape for the single case.
-const BindEntry = struct { commands: [][]const u8, priority: i32, owner: []u8 };
+///
+/// A key is a STACK of owners' bindings, not one slot: the winner is in the
+/// entry's own fields (what every reader reads), and `under` keeps every
+/// other owner's binding it shadows, so taking an owner's binding away —
+/// `unbind`, a plugin's teardown, a failed load's rollback — gives back what
+/// was there, never a hole. One binding per owner per key; the winner is the
+/// highest priority, the latest bound among equals.
+const BindEntry = struct {
+    commands: [][]const u8,
+    priority: i32,
+    owner: []u8,
+    under: std.ArrayList(Layer) = .empty,
+
+    fn top(self: BindEntry) Layer {
+        return .{ .commands = self.commands, .priority = self.priority, .owner = self.owner };
+    }
+
+    fn crown(self: *BindEntry, layer: Layer) void {
+        self.commands = layer.commands;
+        self.priority = layer.priority;
+        self.owner = layer.owner;
+    }
+};
+/// What a winner-less entry holds between losing its last binding and being
+/// removed or refilled (`takeLayer`) — never seen by a reader. An owner is
+/// never empty (`bindArms` asserts it), so an empty one marks it.
+var vacant_arms = [_][]const u8{};
+var vacant_owner = [_]u8{};
+const vacant: Layer = .{ .commands = &vacant_arms, .priority = 0, .owner = &vacant_owner };
+
+/// One owner's binding of a key, shadowed or not.
+const Layer = struct {
+    commands: [][]const u8,
+    priority: i32,
+    owner: []u8,
+
+    fn free(self: Layer, gpa: Allocator) void {
+        freeArms(gpa, self.commands);
+        gpa.free(self.owner);
+    }
+};
 const Bindings = std.StringArrayHashMapUnmanaged(BindEntry);
 const GroupEntry = struct { name: []u8, priority: i32, owner: []u8 };
 
@@ -63,11 +104,16 @@ pub const prio_config = 100;
 pub const max_bind_commands = 8;
 
 modes: std.StringArrayHashMapUnmanaged(Bindings) = .empty,
+/// Moves on every change to what a key resolves to in some mode — a bind or
+/// an unbind, a fallback, a variant, a menu tag — so a reading derived from
+/// the resolved tables (`keys_for.Index`, which key runs what) knows when to
+/// derive again. Only equality is meaningful.
+revision: u64 = 0,
 /// mode → parent mode: `lookup` walks the chain (vim's visual falls
 /// back to normal falls back to default).
 parents: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 /// mode → command a TEXT COMMIT runs in it (one string arg). A mode that
-/// declares one COMMITS TEXT — insert-flavored modes name `insert-text`, a
+/// declares one COMMITS TEXT — insert-flavored modes name `edit.insert-text`, a
 /// picker names its query-append command. Never inherited (see
 /// `commitCommand`): a mode that does not declare one cannot commit,
 /// whatever it inherits BINDINGS from.
@@ -103,16 +149,53 @@ group_names: std.StringArrayHashMapUnmanaged(GroupEntry) = .empty,
 /// `normal-source` in a document, helix says `helix-normal` binds through
 /// `helix-source`. Core pairs the facet with the mode and names neither.
 variants: std.StringArrayHashMapUnmanaged([]u8) = .empty,
+/// mode → what a person calls it on the status line (`NORMAL`, `INS`), and
+/// its tone. The GRAMMAR's declaration (`setModeDisplay`): a mode no grammar
+/// named has no chip, so a modeless grammar shows none and no internal mode
+/// id (`ide-structural`) ever reaches the screen.
+displays: std.StringArrayHashMapUnmanaged(ModeDisplay) = .empty,
+/// mode → how a head in it focuses a structural row that holds a field
+/// (doc/chrome.md §5.2): the GRAMMAR's declaration for its own modes, read
+/// down the fallback chain (`granularityOf`). Per mode, like `displays`, so
+/// two grammars loaded side by side each keep theirs — there is no
+/// system-wide granularity for the last loader to overwrite.
+granularities: std.StringArrayHashMapUnmanaged(Granularity) = .empty,
+
+/// What kind of state a mode is, for its chip's colour — the theme maps
+/// each to a colour (`Theme.modeChipColor`). Declared with the display name;
+/// never read off the mode's spelling.
+pub const ModeTone = enum(u32) {
+    /// At rest: keys are commands (vim's normal, helix's NOR).
+    normal = 0,
+    /// Typing inserts.
+    insert = 1,
+    /// A selection is being made or extended.
+    select = 2,
+    /// Typing replaces.
+    replace = 3,
+    /// Waiting for more keys: an operator, a menu.
+    pending = 4,
+
+    pub fn fromWire(v: u32) ModeTone {
+        if (v > @intFromEnum(ModeTone.pending)) return .normal;
+        return @enumFromInt(v);
+    }
+};
+
+/// A mode's name on the status line and its tone.
+pub const ModeDisplay = struct {
+    name: []const u8,
+    tone: ModeTone = .normal,
+};
 
 pub const empty: Keymap = .{};
 
 pub fn deinit(self: *Keymap, gpa: Allocator) void {
     for (self.modes.keys(), self.modes.values()) |mode_name, *bindings| {
         gpa.free(mode_name);
-        for (bindings.keys(), bindings.values()) |k, v| {
+        for (bindings.keys(), bindings.values()) |k, *v| {
             gpa.free(k);
-            freeArms(gpa, v.commands);
-            gpa.free(v.owner);
+            freeEntry(gpa, v);
         }
         bindings.deinit(gpa);
     }
@@ -140,15 +223,81 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
         gpa.free(v);
     }
     self.variants.deinit(gpa);
-    self.* = .{};
+    for (self.displays.keys(), self.displays.values()) |k, v| {
+        gpa.free(k);
+        gpa.free(v.name);
+    }
+    self.displays.deinit(gpa);
+    for (self.granularities.keys()) |k| gpa.free(k);
+    self.granularities.deinit(gpa);
+    // A keymap emptied and filled again is a change too, never a return to
+    // a revision something derived from before.
+    self.* = .{ .revision = self.revision +% 1 };
+}
+
+/// DECLARE what `mode` is called on the status line, and its tone. The last
+/// declaration wins; an empty `name` withdraws it (the mode shows no chip).
+pub fn setModeDisplay(self: *Keymap, gpa: Allocator, mode: []const u8, name: []const u8, tone: ModeTone) Allocator.Error!void {
+    if (name.len == 0) {
+        if (self.displays.fetchSwapRemove(mode)) |kv| {
+            gpa.free(kv.key);
+            gpa.free(kv.value.name);
+        }
+        return;
+    }
+    const owned = try gpa.dupe(u8, name);
+    errdefer gpa.free(owned);
+    const gop = try self.displays.getOrPut(gpa, mode);
+    if (gop.found_existing) {
+        gpa.free(gop.value_ptr.name);
+    } else {
+        gop.key_ptr.* = gpa.dupe(u8, mode) catch |err| {
+            self.displays.swapRemoveAt(gop.index);
+            return err;
+        };
+    }
+    gop.value_ptr.* = .{ .name = owned, .tone = tone };
+}
+
+/// What `mode` is called on the status line, or null when no grammar named
+/// it. Borrowed until the next declaration for `mode`.
+pub fn modeDisplay(self: *const Keymap, mode: []const u8) ?ModeDisplay {
+    return self.displays.get(mode);
+}
+
+/// DECLARE how a head in `mode` (and every mode falling back to it) focuses
+/// a structural row that holds a field. Re-declaring replaces.
+pub fn setGranularity(self: *Keymap, gpa: Allocator, mode: []const u8, granularity: Granularity) Allocator.Error!void {
+    const gop = try self.granularities.getOrPut(gpa, mode);
+    if (!gop.found_existing) {
+        gop.key_ptr.* = gpa.dupe(u8, mode) catch |err| {
+            self.granularities.swapRemoveAt(gop.index);
+            return err;
+        };
+    }
+    gop.value_ptr.* = granularity;
+}
+
+/// The granularity declared for `mode` or the nearest mode its fallback
+/// chain reaches, or null where no grammar declared one on the way (a menu,
+/// a picker, a mode of no grammar) — the caller then asks the mode the
+/// entry rests in.
+pub fn granularityOf(self: *const Keymap, mode: []const u8) ?Granularity {
+    var cur = mode;
+    for (0..8) |_| {
+        if (self.granularities.get(cur)) |g| return g;
+        cur = self.parents.get(cur) orelse return null;
+    }
+    return null;
 }
 
 /// Bind `keyspec` to `command` in `mode` at `priority`, owned by `owner`
-/// (the binder — a plugin name, "config", or "core"). The binding takes the
-/// slot only when its priority ≥ the current holder's, so a higher tier
-/// (config > plugin > core) always wins regardless of bind order. An
+/// (the binder — a plugin name, "config", or "core"). The binding wins the
+/// key only when its priority ≥ the current winner's, so a higher tier
+/// (config > plugin > core) always wins regardless of bind order; a lower
+/// one waits under it (`BindEntry.under`) for the day the higher one goes. An
 /// equal-priority bind from a *different* owner is a collision — surfaced as a
-/// warning; last one wins.
+/// warning; last one wins. An owner binding a key again replaces its own.
 pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8, command: []const u8, priority: i32, owner: []const u8) Allocator.Error!void {
     return self.bindArms(gpa, mode, key_in, &.{command}, priority, owner);
 }
@@ -158,7 +307,8 @@ pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8,
 /// list: it carries it whole to dispatch, which resolves first-applicable
 /// against the catalog (architecture §10.2).
 pub fn bindArms(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8, commands: []const []const u8, priority: i32, owner: []const u8) Allocator.Error!void {
-    std.debug.assert(commands.len > 0);
+    std.debug.assert(commands.len > 0 and owner.len > 0);
+    self.revision +%= 1;
     var kbuf: [256]u8 = undefined;
     const key = normalizeKey(&kbuf, key_in);
     const gop = try self.modes.getOrPut(gpa, mode);
@@ -166,22 +316,73 @@ pub fn bindArms(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const
         gop.key_ptr.* = try gpa.dupe(u8, mode);
         gop.value_ptr.* = .empty;
     }
+    const layer: Layer = .{ .commands = try dupeArms(gpa, commands), .priority = priority, .owner = try gpa.dupe(u8, owner) };
+    errdefer layer.free(gpa);
     const bgop = try gop.value_ptr.getOrPut(gpa, key);
-    if (bgop.found_existing) {
-        const cur = bgop.value_ptr.*;
-        if (priority < cur.priority) return; // a lower tier can't shadow a higher one
-        if (priority == cur.priority and !std.mem.eql(u8, cur.owner, owner))
-            std.log.warn("keymap: '{s}' in mode '{s}' bound by both '{s}' and '{s}' at priority {d}", .{ key, mode, cur.owner, owner, priority });
-        freeArms(gpa, cur.commands);
-        gpa.free(cur.owner);
-    } else {
-        bgop.key_ptr.* = try gpa.dupe(u8, key);
+    if (!bgop.found_existing) {
+        bgop.key_ptr.* = gpa.dupe(u8, key) catch |err| {
+            gop.value_ptr.swapRemoveAt(bgop.index);
+            return err;
+        };
+        bgop.value_ptr.* = .{ .commands = layer.commands, .priority = priority, .owner = layer.owner };
+        return;
     }
-    bgop.value_ptr.* = .{
-        .commands = try dupeArms(gpa, commands),
-        .priority = priority,
-        .owner = try gpa.dupe(u8, owner),
+    const entry = bgop.value_ptr;
+    try entry.under.ensureUnusedCapacity(gpa, 1);
+    // The owner's own earlier binding goes: one binding per owner per key.
+    _ = takeLayer(gpa, entry, owner);
+    if (entry.owner.len == 0) {
+        // It was the only binding, and the owner's: this one is the key's.
+        entry.crown(layer);
+    } else if (priority < entry.priority) {
+        entry.under.appendAssumeCapacity(layer); // a lower tier waits under a higher one
+    } else {
+        if (priority == entry.priority)
+            std.log.warn("keymap: '{s}' in mode '{s}' bound by both '{s}' and '{s}' at priority {d}", .{ key, mode, entry.owner, owner, priority });
+        entry.under.appendAssumeCapacity(entry.top());
+        entry.crown(layer);
+    }
+}
+
+/// Take `owner`'s binding out of `entry`, wherever it stands; when it was
+/// the winner, the best shadowed binding (highest priority, the latest among
+/// equals) wins in its place — or, with none, the entry is left with an
+/// empty owner and no arms, for the caller to remove or refill. Whether
+/// anything was taken.
+fn takeLayer(gpa: Allocator, entry: *BindEntry, owner: []const u8) bool {
+    if (entry.owner.len != 0 and std.mem.eql(u8, entry.owner, owner)) {
+        entry.top().free(gpa);
+        var best: ?usize = null;
+        for (entry.under.items, 0..) |l, i| {
+            if (best == null or l.priority >= entry.under.items[best.?].priority) best = i;
+        }
+        if (best) |i| entry.crown(entry.under.orderedRemove(i)) else entry.crown(vacant);
+        return true;
+    }
+    for (entry.under.items, 0..) |l, i| if (std.mem.eql(u8, l.owner, owner)) {
+        entry.under.orderedRemove(i).free(gpa);
+        return true;
     };
+    return false;
+}
+
+fn freeEntry(gpa: Allocator, entry: *BindEntry) void {
+    if (entry.owner.len != 0) entry.top().free(gpa);
+    for (entry.under.items) |l| l.free(gpa);
+    entry.under.deinit(gpa);
+}
+
+/// Take `owner`'s binding of `key` out of `bindings`, removing the key when
+/// nothing is left under it.
+fn unbindIn(gpa: Allocator, bindings: *Bindings, key: []const u8, owner: []const u8) void {
+    const entry = bindings.getPtr(key) orelse return;
+    if (!takeLayer(gpa, entry, owner)) return;
+    if (entry.owner.len != 0) return;
+    if (bindings.fetchSwapRemove(key)) |removed| {
+        var v = removed.value;
+        freeEntry(gpa, &v);
+        gpa.free(removed.key);
+    }
 }
 
 fn dupeArms(gpa: Allocator, commands: []const []const u8) Allocator.Error![][]const u8 {
@@ -201,23 +402,18 @@ fn freeArms(gpa: Allocator, commands: [][]const u8) void {
     gpa.free(commands);
 }
 
-/// Remove the binding at `mode`/`key` IFF it is currently owned by `owner`
-/// (else a no-op — never steal a slot a different, or since-rebound, owner
-/// holds). Used by `manifest.zig`'s reconcile teardown (doc/cwa-prior-docs-audit.md §5):
-/// a bind declared by a PREVIOUS config manifest but absent from the
-/// reloaded one must not leave a ghost binding behind. Frees the entry's
-/// owned strings on removal.
+/// Take `owner`'s binding of `mode`/`key` away, wherever it stands — never
+/// another owner's, winning or not. When it was winning, what it shadowed
+/// wins again. Used by `manifest.zig`'s reconcile teardown
+/// (doc/cwa-prior-docs-audit.md §5): a bind declared by a PREVIOUS config
+/// manifest but absent from the reloaded one must not leave a ghost binding
+/// behind.
 pub fn unbind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8, owner: []const u8) void {
     var kbuf: [256]u8 = undefined;
     const key = normalizeKey(&kbuf, key_in);
     const bindings = self.modes.getPtr(mode) orelse return;
-    const entry = bindings.get(key) orelse return;
-    if (!std.mem.eql(u8, entry.owner, owner)) return;
-    if (bindings.fetchSwapRemove(key)) |removed| {
-        gpa.free(removed.key);
-        freeArms(gpa, removed.value.commands);
-        gpa.free(removed.value.owner);
-    }
+    self.revision +%= 1;
+    unbindIn(gpa, bindings, key, owner);
 }
 
 /// Name an implicit chord group. `prefix` is the complete key sequence that
@@ -252,6 +448,40 @@ pub fn unsetGroupName(self: *Keymap, gpa: Allocator, mode: []const u8, prefix: [
         gpa.free(removed.key);
         gpa.free(removed.value.name);
         gpa.free(removed.value.owner);
+    }
+}
+
+/// Remove every binding and group label `owner` still holds, in every mode —
+/// a resident plugin's teardown (`JsPlugin.retract`), which binds by key
+/// and so has no list of what it bound to walk.
+pub fn unbindOwner(self: *Keymap, gpa: Allocator, owner: []const u8) void {
+    self.revision +%= 1;
+    for (self.modes.values()) |*bindings| {
+        var i: usize = 0;
+        while (i < bindings.count()) {
+            const entry = &bindings.values()[i];
+            if (!takeLayer(gpa, entry, owner) or entry.owner.len != 0) {
+                i += 1;
+                continue;
+            }
+            const k = bindings.keys()[i];
+            freeEntry(gpa, entry);
+            bindings.swapRemoveAt(i);
+            gpa.free(k);
+        }
+    }
+    var i: usize = 0;
+    while (i < self.group_names.count()) {
+        const v = self.group_names.values()[i];
+        if (!std.mem.eql(u8, v.owner, owner)) {
+            i += 1;
+            continue;
+        }
+        const k = self.group_names.keys()[i];
+        gpa.free(v.name);
+        gpa.free(v.owner);
+        self.group_names.swapRemoveAt(i);
+        gpa.free(k);
     }
 }
 
@@ -379,6 +609,7 @@ fn prefixIn(b: *const Bindings, seq: []const u8) bool {
 
 /// Make `mode` inherit `parent`'s bindings (chain-walked at lookup).
 pub fn setFallback(self: *Keymap, gpa: Allocator, mode: []const u8, parent: []const u8) Allocator.Error!void {
+    self.revision +%= 1;
     const gop = try self.parents.getOrPut(gpa, mode);
     if (gop.found_existing) {
         gpa.free(gop.value_ptr.*);
@@ -392,6 +623,7 @@ pub fn setFallback(self: *Keymap, gpa: Allocator, mode: []const u8, parent: []co
 /// keys up in `variant`. The variant is an ordinary mode: what it falls back
 /// to is the declarer's own `setFallback`. Re-declaring replaces.
 pub fn declareVariant(self: *Keymap, gpa: Allocator, mode: []const u8, facet: BindingFacet, variant: []const u8) Allocator.Error!void {
+    self.revision +%= 1;
     var buf: [256]u8 = undefined;
     const key = tagKey(&buf, mode, @tagName(facet)) orelse return;
     const gop = try self.variants.getOrPut(gpa, key);
@@ -530,6 +762,7 @@ pub const tag_resting = "resting";
 /// is about how LOOKUP works and lookup is core's: a menu inherits `menu`, and
 /// `menu` inherits `menu-nav`. What binds on either layer is config's.
 pub fn tagMode(self: *Keymap, gpa: Allocator, mode: []const u8, tag: []const u8) Allocator.Error!void {
+    self.revision +%= 1;
     var buf: [256]u8 = undefined;
     const key = tagKey(&buf, mode, tag) orelse return;
     const gop = try self.mode_tags.getOrPut(gpa, key);
@@ -888,11 +1121,11 @@ test "keymap: modal binding, rebinding, keyspec composition" {
     defer km.deinit(gpa);
 
     try km.bind(gpa, "normal", "i", "enter-insert", prio_plugin, "vim");
-    try km.bind(gpa, "normal", "C-s", "save", prio_plugin, "vim");
+    try km.bind(gpa, "normal", "C-s", "file.save", prio_plugin, "vim");
     try km.bind(gpa, "insert", "Escape", "enter-normal", prio_plugin, "vim");
 
     try t.expectEqualStrings("enter-insert", km.lookup("normal", "i").?);
-    try t.expectEqualStrings("save", km.lookup("normal", "C-s").?);
+    try t.expectEqualStrings("file.save", km.lookup("normal", "C-s").?);
     try t.expectEqual(@as(?[]const u8, null), km.lookup("normal", "Escape"));
 
     try t.expectEqualStrings("enter-normal", km.lookup("insert", "Escape").?);
@@ -916,8 +1149,8 @@ test "keymap: layering is order-independent — higher priority always wins" {
     // Core default, then a plugin shadows it, then user config shadows that.
     var a: Keymap = .empty;
     defer a.deinit(gpa);
-    try a.bind(gpa, "default", "j", "cursor-down", prio_core, "core");
-    try a.bind(gpa, "default", "j", "motion.down", prio_plugin, "vim");
+    try a.bind(gpa, "default", "j", "cursor.down", prio_core, "core");
+    try a.bind(gpa, "default", "j", "motions.down", prio_plugin, "vim");
     try a.bind(gpa, "default", "j", "my-thing", prio_config, "config");
     try t.expectEqualStrings("my-thing", a.lookup("default", "j").?);
 
@@ -926,9 +1159,33 @@ test "keymap: layering is order-independent — higher priority always wins" {
     var b: Keymap = .empty;
     defer b.deinit(gpa);
     try b.bind(gpa, "default", "j", "my-thing", prio_config, "config");
-    try b.bind(gpa, "default", "j", "motion.down", prio_plugin, "vim");
-    try b.bind(gpa, "default", "j", "cursor-down", prio_core, "core");
+    try b.bind(gpa, "default", "j", "motions.down", prio_plugin, "vim");
+    try b.bind(gpa, "default", "j", "cursor.down", prio_core, "core");
     try t.expectEqualStrings("my-thing", b.lookup("default", "j").?);
+}
+
+test "keymap: taking an owner's binding away gives back what it shadowed, at any tier" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.bind(gpa, "normal", "C-s", "std.persistence.save", prio_core, "core");
+    try km.bind(gpa, "normal", "C-s", "file.save", prio_config, "config");
+    // Same tier, another owner (last wins while it stands) …
+    try km.bind(gpa, "normal", "C-s", "jsp.save", prio_config, "jsp");
+    try t.expectEqualStrings("jsp.save", km.lookup("normal", "C-s").?);
+    // … and gone again: the config's binding is back, not a hole.
+    km.unbindOwner(gpa, "jsp");
+    try t.expectEqualStrings("file.save", km.lookup("normal", "C-s").?);
+    // A lower tier bound under it waits there, and shows when it is uncovered.
+    try km.bind(gpa, "normal", "C-s", "vim.write", prio_plugin, "vim");
+    try t.expectEqualStrings("file.save", km.lookup("normal", "C-s").?);
+    km.unbind(gpa, "normal", "C-s", "config");
+    try t.expectEqualStrings("vim.write", km.lookup("normal", "C-s").?);
+    // An owner's shadowed binding goes with it too: nothing of vim's returns.
+    km.unbindOwner(gpa, "vim");
+    try t.expectEqualStrings("std.persistence.save", km.lookup("normal", "C-s").?);
+    km.unbind(gpa, "normal", "C-s", "core");
+    try t.expectEqual(@as(?[]const u8, null), km.lookup("normal", "C-s"));
 }
 
 test "keymap: unbind removes only if the owner still matches; no-op otherwise" {
@@ -936,12 +1193,12 @@ test "keymap: unbind removes only if the owner still matches; no-op otherwise" {
     var km: Keymap = .empty;
     defer km.deinit(gpa);
 
-    try km.bind(gpa, "normal", "j", "cursor-down", prio_imported, "import:defaults");
-    try t.expectEqualStrings("cursor-down", km.lookup("normal", "j").?);
+    try km.bind(gpa, "normal", "j", "cursor.down", prio_imported, "import:defaults");
+    try t.expectEqualStrings("cursor.down", km.lookup("normal", "j").?);
 
     // A different owner can't steal-then-unbind the slot out from under it.
     km.unbind(gpa, "normal", "j", "someone-else");
-    try t.expectEqualStrings("cursor-down", km.lookup("normal", "j").?);
+    try t.expectEqualStrings("cursor.down", km.lookup("normal", "j").?);
 
     // A higher tier has since taken the slot — unbinding the ORIGINAL owner
     // must not remove the newer binding.
@@ -950,7 +1207,7 @@ test "keymap: unbind removes only if the owner still matches; no-op otherwise" {
     try t.expectEqualStrings("my-thing", km.lookup("normal", "j").?);
 
     // The rightful owner unbinds cleanly.
-    try km.bind(gpa, "normal", "k", "cursor-up", prio_imported, "import:defaults");
+    try km.bind(gpa, "normal", "k", "cursor.up", prio_imported, "import:defaults");
     km.unbind(gpa, "normal", "k", "import:defaults");
     try t.expectEqual(@as(?[]const u8, null), km.lookup("normal", "k"));
 
@@ -965,7 +1222,7 @@ test "keymap: menu modes are leaf prefix tables, with enumerable bindings" {
     defer km.deinit(gpa);
 
     try km.bind(gpa, "normal", "i", "insert", prio_plugin, "vim");
-    try km.bind(gpa, "leader", "f", "find-file", prio_plugin, "vim");
+    try km.bind(gpa, "leader", "f", "files.find", prio_plugin, "vim");
     try km.bind(gpa, "leader", "c", "collab", prio_plugin, "vim");
 
     // which-key shows only for modes the config declared as menus.
@@ -980,7 +1237,7 @@ test "keymap: menu modes are leaf prefix tables, with enumerable bindings" {
     try km.ownBindings(gpa, "leader", &hints);
     try t.expectEqual(@as(usize, 2), hints.items.len);
     try t.expectEqualStrings("f", hints.items[0].key);
-    try t.expectEqualStrings("find-file", hints.items[0].command);
+    try t.expectEqualStrings("files.find", hints.items[0].command);
 }
 
 test "keymap: sticky menus stay open (implies menu-mode)" {
@@ -1006,14 +1263,14 @@ test "keymap: the global layer applies under every mode, overridable locally" {
     defer km.deinit(gpa);
 
     // F1 bound only in the global layer (config's which-key key).
-    try km.bind(gpa, Keymap.global_mode, "F1", "which-key-now", prio_plugin, "cfg");
+    try km.bind(gpa, Keymap.global_mode, "F1", "which-key.show", prio_plugin, "cfg");
     try km.bind(gpa, "normal", "i", "insert", prio_plugin, "vim");
 
     // In normal (which has no F1 of its own) F1 falls through to global.
-    try t.expectEqualStrings("which-key-now", km.lookup("normal", "F1").?);
+    try t.expectEqualStrings("which-key.show", km.lookup("normal", "F1").?);
     // In a standalone tool mode with NO fallback chain, F1 still works —
     // that's the whole point (before, tool modes were islands).
-    try t.expectEqualStrings("which-key-now", km.lookup("tool", "F1").?);
+    try t.expectEqualStrings("which-key.show", km.lookup("tool", "F1").?);
     // A mode still overrides a global key by binding it locally.
     try km.bind(gpa, "tool", "F1", "tool-help", prio_plugin, "tool");
     try t.expectEqualStrings("tool-help", km.lookup("tool", "F1").?);
@@ -1025,16 +1282,16 @@ test "keymap: a menu inherits the menu-nav base for nav keys; baseMode stops at 
     defer km.deinit(gpa);
 
     // The nav base's keys are config data (here: Backspace pops a level).
-    try km.bind(gpa, Keymap.menu_nav_mode, "BackSpace", "menu-escape", prio_config, "cfg");
-    try km.bind(gpa, Keymap.menu_nav_mode, "PageDown", "which-key-page-down", prio_config, "cfg");
+    try km.bind(gpa, Keymap.menu_nav_mode, "BackSpace", "mode.leave-menu", prio_config, "cfg");
+    try km.bind(gpa, Keymap.menu_nav_mode, "PageDown", "which-key.page-down", prio_config, "cfg");
 
     // Declaring a menu auto-wires it to inherit menu-nav (no per-config wiring),
     // so its nav keys resolve through the fallback — but its OWN keys still win.
     try km.tagMode(gpa, "leader", tag_menu);
     try km.bind(gpa, "leader", "f", "leader-file", prio_config, "cfg");
     try t.expectEqualStrings("leader-file", km.lookup("leader", "f").?); // own key
-    try t.expectEqualStrings("menu-escape", km.lookup("leader", "BackSpace").?); // inherited nav
-    try t.expectEqualStrings("which-key-page-down", km.lookup("leader", "PageDown").?);
+    try t.expectEqualStrings("mode.leave-menu", km.lookup("leader", "BackSpace").?); // inherited nav
+    try t.expectEqualStrings("which-key.page-down", km.lookup("leader", "PageDown").?);
 
     // baseMode stops at the menu (a buffer is never remembered as a menu, nor as
     // the menu-nav base it falls back to) — so switchTo's menu-skip stays correct.
@@ -1076,8 +1333,8 @@ test "keymap: keyspec normalization — config writes SPC : / C-x C-f, stores ca
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);
-    try km.bind(gpa, "normal", "SPC :", "pick-commands", prio_config, "cfg");
-    try t.expectEqualStrings("pick-commands", km.lookup("normal", "space colon").?);
+    try km.bind(gpa, "normal", "SPC :", "palette.open", prio_config, "cfg");
+    try t.expectEqualStrings("palette.open", km.lookup("normal", "space colon").?);
 
     // displayKey is the inverse — which-key shows the config's notation back.
     try t.expectEqualStrings("SPC :", km.displayKey(&buf, "space colon"));
@@ -1109,8 +1366,8 @@ test "keymap: modifiers canonicalize to C-M-S- order, pointer gestures pass thro
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);
-    try km.bind(gpa, global_mode, "S-C-mouse-1", "pointer-extend-selection", prio_config, "cfg");
-    try t.expectEqualStrings("pointer-extend-selection", km.lookup("normal", spec).?);
+    try km.bind(gpa, global_mode, "S-C-mouse-1", "pointer.extend-selection", prio_config, "cfg");
+    try t.expectEqualStrings("pointer.extend-selection", km.lookup("normal", spec).?);
     // A pointer chord is a sequence like any other.
     try km.bind(gpa, "normal", "SPC mouse-3", "menu-at-point", prio_config, "cfg");
     try t.expectEqualStrings("menu-at-point", km.resolveExact("normal", "space mouse-3").?);
@@ -1121,13 +1378,13 @@ test "keymap: committing text is DECLARED per mode — bindings inherit, the dec
     var km: Keymap = .empty;
     defer km.deinit(gpa);
 
-    try km.bind(gpa, "insert", "C-s", "save", prio_core, "core");
-    try km.setCommitCommand(gpa, "insert", "insert-text");
+    try km.bind(gpa, "insert", "C-s", "file.save", prio_core, "core");
+    try km.setCommitCommand(gpa, "insert", "edit.insert-text");
     // A structural mode inheriting an insert-flavored parent's BINDINGS.
     try km.setFallback(gpa, "structural", "insert");
 
-    try t.expectEqualStrings("save", km.lookup("structural", "C-s").?); // bindings inherit
-    try t.expectEqualStrings("insert-text", km.commitCommand("insert").?);
+    try t.expectEqualStrings("file.save", km.lookup("structural", "C-s").?); // bindings inherit
+    try t.expectEqualStrings("edit.insert-text", km.commitCommand("insert").?);
     try t.expect(km.commitCommand("structural") == null); // the authority does not
     try t.expect(km.commitCommand("never-declared") == null);
 
@@ -1141,21 +1398,57 @@ test "keymap: an arm list is stored whole, in authored order; a plain bind is it
     var km: Keymap = .empty;
     defer km.deinit(gpa);
 
-    try km.bindArms(gpa, "normal", "Return", &.{ "std.target.activate", "vim-open-focused" }, prio_plugin, "vim");
+    try km.bindArms(gpa, "normal", "Return", &.{ "std.target.activate", "vim.next-line" }, prio_plugin, "vim");
     const authored = km.resolveExactArms("normal", "Return").?;
     try t.expectEqual(@as(usize, 2), authored.len);
     try t.expectEqualStrings("std.target.activate", authored[0]);
-    try t.expectEqualStrings("vim-open-focused", authored[1]);
+    try t.expectEqualStrings("vim.next-line", authored[1]);
     // The head is what a single-command reader sees — the keymap picks nothing.
     try t.expectEqualStrings("std.target.activate", km.lookup("normal", "Return").?);
 
     // Re-binding at a winning tier replaces the WHOLE list, fallbacks included.
-    try km.bind(gpa, "normal", "Return", "insert-newline", prio_config, "config");
+    try km.bind(gpa, "normal", "Return", "edit.insert-newline", prio_config, "config");
     const rebound = km.resolveExactArms("normal", "Return").?;
     try t.expectEqual(@as(usize, 1), rebound.len);
-    try t.expectEqualStrings("insert-newline", rebound[0]);
+    try t.expectEqualStrings("edit.insert-newline", rebound[0]);
 
     // A lower tier cannot shadow it.
     try km.bindArms(gpa, "normal", "Return", &.{"std.target.activate"}, prio_core, "core");
-    try t.expectEqualStrings("insert-newline", km.lookup("normal", "Return").?);
+    try t.expectEqualStrings("edit.insert-newline", km.lookup("normal", "Return").?);
+}
+
+test "keymap: a mode's status-line name is the grammar's declaration — undeclared is none, and inheritance does not lend one" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+
+    try km.setFallback(gpa, "visual", "normal");
+    try km.setModeDisplay(gpa, "normal", "NORMAL", .normal);
+    try t.expectEqualStrings("NORMAL", km.modeDisplay("normal").?.name);
+    // A fallback lends bindings, never a name: `visual` said nothing.
+    try t.expect(km.modeDisplay("visual") == null);
+    try km.setModeDisplay(gpa, "visual", "VISUAL", .select);
+    try t.expectEqual(ModeTone.select, km.modeDisplay("visual").?.tone);
+    // Redeclared, then withdrawn.
+    try km.setModeDisplay(gpa, "normal", "NOR", .normal);
+    try t.expectEqualStrings("NOR", km.modeDisplay("normal").?.name);
+    try km.setModeDisplay(gpa, "normal", "", .normal);
+    try t.expect(km.modeDisplay("normal") == null);
+    // An unknown tone on the wire is the resting one, not a trap.
+    try t.expectEqual(ModeTone.normal, ModeTone.fromWire(99));
+}
+
+test "keymap: structural focus granularity is per mode — two grammars keep theirs whatever loads last, and a fallback lends it" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.setFallback(gpa, "visual", "normal");
+    try km.setFallback(gpa, "ide-structural", "ide");
+    try km.setGranularity(gpa, "normal", .text);
+    try km.setGranularity(gpa, "ide", .row);
+    try t.expectEqual(Granularity.text, km.granularityOf("normal").?);
+    try t.expectEqual(Granularity.text, km.granularityOf("visual").?);
+    try t.expectEqual(Granularity.row, km.granularityOf("ide-structural").?);
+    // A mode no grammar declared for, on its chain, says nothing.
+    try t.expect(km.granularityOf("pick") == null);
 }

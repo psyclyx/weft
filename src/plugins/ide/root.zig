@@ -36,9 +36,7 @@
 const std = @import("std");
 const weft = @import("weft");
 
-const file_pick = 0;
 const path_pick = 1;
-const line_pick = 2;
 
 /// The arity of a command that runs once per selection.
 const each = weft.Arity.each_extent;
@@ -75,7 +73,7 @@ fn result(r: weft.Range) void {
 
 /// Drop the selection, if any.
 fn collapse() void {
-    weft.run("clear-selection");
+    weft.run("selection.clear");
 }
 
 // ── Moves: plain collapses, shifted extends ──────────────────────────
@@ -106,8 +104,8 @@ fn motionEnd(head: usize, handle: ?u32) usize {
 /// core's: it owns the sticky visual column.
 fn move(t: Target, extend: bool) void {
     if (t == .up or t == .down) {
-        if (!extend) collapse() else if (weft.selection() == null) weft.run("set-mark");
-        return weft.run(if (t == .up) "cursor-up" else "cursor-down");
+        if (!extend) collapse() else if (weft.selection() == null) weft.run("selection.start");
+        return weft.run(if (t == .up) "cursor.up" else "cursor.down");
     }
     const s = one();
     const r = s.range();
@@ -116,8 +114,8 @@ fn move(t: Target, extend: bool) void {
         .left => if (edge) r.start else weft.step(s.head, .back, .char),
         .right => if (edge) r.end else weft.step(s.head, .fwd, .char),
         .up, .down => unreachable,
-        .word_left => motionEnd(s.head, weft.runRange("motion.word-back")),
-        .word_right => motionEnd(s.head, weft.runRange("motion.word-fwd")),
+        .word_left => motionEnd(s.head, weft.runRange("motions.word-prev")),
+        .word_right => motionEnd(s.head, weft.runRange("motions.word-next")),
         .home => homeOf(s.head),
         .end => weft.lineAt(s.head).end,
         .doc_start => 0,
@@ -158,12 +156,6 @@ fn docStartJump() void {
 fn docEndJump() void {
     weft.jumpPush();
     place(caret(weft.byteLen()));
-}
-
-/// F12: leave a jump here, then ask the language server where to go.
-fn gotoDefinition() void {
-    weft.jumpPush();
-    weft.run("goto-definition");
 }
 
 fn selectAll() void {
@@ -321,7 +313,7 @@ fn selectAllMatches() void {
 // Where a gesture happened is a FACT of its dispatch (`weft.pointer()`): the
 // byte offset under the pointer in text, or none over a scene. The single
 // click before a double click already focused the pane and placed the caret
-// (`pointer-click`, the floor's `mouse-1`); these only widen what it did.
+// (`pointer.click`, the floor's `mouse-1`); these only widen what it did.
 
 fn pointerOffset() ?usize {
     const p = weft.pointer() orelse return null;
@@ -331,7 +323,7 @@ fn pointerOffset() ?usize {
 /// double-mouse-1: select the word under the pointer. Over a scene (a
 /// listing row) there is no word: a double click opens the row instead.
 fn selectWordAtPointer() void {
-    const off = pointerOffset() orelse return weft.run("pointer-activate");
+    const off = pointerOffset() orelse return weft.run("pointer.activate");
     const w = wordAround(off) orelse return;
     weft.setSelection(w);
 }
@@ -358,19 +350,19 @@ fn linesOf(s: weft.Selection) weft.Range {
     return .{ .start = weft.lineAt(r.start).start, .end = weft.lineAt(last).end };
 }
 
-/// `ide-lines`: the selection's lines.
+/// `ide.target-lines`: the selection's lines.
 fn targetLines() void {
     result(linesOf(one()));
 }
 
-/// `ide-tab-target`: a caret's own point (Tab types there), else the
+/// `ide.target-tab`: a caret's own point (Tab types there), else the
 /// selection's lines (Tab indents them).
 fn targetTab() void {
     const s = one();
     result(if (s.anchor == s.head) .{ .start = s.head, .end = s.head } else linesOf(s));
 }
 
-/// `ide-line-span`: the selection's lines with their line break — the
+/// `ide.target-line-span`: the selection's lines with their line break — the
 /// preceding one on a last line that has none — what C-S-k removes.
 fn targetLineSpan() void {
     var b = linesOf(one());
@@ -381,7 +373,7 @@ fn targetLineSpan() void {
     result(b);
 }
 
-/// `ide-line-end` / `ide-line-start`: where C-Return / C-S-Return open a
+/// `ide.target-line-end` / `ide.target-line-start`: where C-Return / C-S-Return open a
 /// line — one point per line however many carets sit on it.
 fn targetLineEnd() void {
     const l = weft.lineAt(one().head);
@@ -400,12 +392,12 @@ fn arg() ?weft.Range {
 /// Tab: indent a selection's lines; at a caret, the floor's tab.
 fn indent() void {
     const r = arg() orelse return;
-    if (r.start == r.end) return weft.run("insert-tab");
-    if (weft.anchorRange(r)) |h| weft.runRangeArg("op.indent", h);
+    if (r.start == r.end) return weft.run("edit.insert-tab");
+    if (weft.anchorRange(r)) |h| weft.runRangeArg("indent.increase", h);
 }
 /// S-Tab: dedent the selection's lines, or the caret's line.
 fn dedent() void {
-    if (weft.argRange(0)) |h| weft.runRangeArg("op.dedent", h);
+    if (weft.argRange(0)) |h| weft.runRangeArg("indent.decrease", h);
 }
 
 /// Line text copies: `slice` borrows one scratch, and a swap needs two
@@ -518,7 +510,7 @@ fn wholeLine(at: usize) weft.Range {
     return .{ .start = l.start, .end = if (l.end < weft.byteLen()) l.end + 1 else l.end };
 }
 
-/// `ide-transfer-target`: what copy and cut take — a caret's whole line
+/// `ide.target-transfer`: what copy and cut take — a caret's whole line
 /// (once, however many carets share it), else the selection.
 fn targetTransfer() void {
     const s = one();
@@ -548,13 +540,13 @@ fn yankTarget() ?weft.Range {
     return r;
 }
 
-/// `ide-copy-each`: copy the target.
+/// `ide.copy-each`: copy the target.
 fn copyEach() void {
     const r = yankTarget() orelse return;
     weft.flash(r.start, r.end);
 }
 
-/// `ide-cut-each`: copy the target, then delete it — a caret left where it
+/// `ide.cut-each`: copy the target, then delete it — a caret left where it
 /// was.
 fn cutEach() void {
     const r = yankTarget() orelse return;
@@ -565,11 +557,11 @@ fn cutEach() void {
 /// then the register onto the clipboard — which reads the whole of it, so
 /// it waits for the mapping to end.
 fn copy() void {
-    weft.run("ide-copy-each");
+    weft.run("ide.copy-each");
     mirrorToClipboard();
 }
 fn cut() void {
-    weft.run("ide-cut-each");
+    weft.run("ide.cut-each");
     mirrorToClipboard();
 }
 
@@ -586,11 +578,11 @@ fn cut() void {
 /// and a linewise yank linewise.
 fn paste() void {
     if (mirrorsClipboard()) switch (weft.clipboardPasteSource()) {
-        .foreign => |clip| return weft.runStr2("ide-paste-each", "text", clip),
+        .foreign => |clip| return weft.runStr2("ide.paste-each", "text", clip),
         .unavailable, .empty, .register => {},
     };
     if (weft.registerTextIn(0).len == 0) return;
-    weft.runStr("ide-paste-each", if (weft.registerLinewiseIn(0) and allCarets()) "lines" else "register");
+    weft.runStr("ide.paste-each", if (weft.registerLinewiseIn(0) and allCarets()) "lines" else "register");
 }
 
 /// Whether every selection is a bare caret — the one fact a paste reads
@@ -600,7 +592,7 @@ fn allCarets() bool {
     return true;
 }
 
-/// `ide-paste-each <text|lines|register> [text]`: put the text over this
+/// `ide.paste-each <text|lines|register> [text]`: put the text over this
 /// selection, or (`lines`) at the start of the caret's line, and leave a
 /// caret after what landed (a line paste: where it was, moved down with its
 /// line).
@@ -625,35 +617,17 @@ fn pasteEach(how: []const u8, text: ?[]const u8) void {
 // ── Opening and jumping (the pickers this grammar owns) ──────────────
 
 /// C-p: fuzzy-open a project file (the native recursive finder).
-fn quickOpen() void {
-    weft.pickCategory("file");
-    weft.openFilePick("open", file_pick);
-}
 /// C-o: open a path as typed — including one that does not exist yet.
 fn openPath() void {
     weft.pickBegin("open path", path_pick);
     weft.pickFreeText();
     weft.pickEnd();
 }
-/// C-g: go to a line by number.
-fn gotoLine() void {
-    weft.pickBegin("go to line", line_pick);
-    weft.pickFreeText();
-    weft.pickEnd();
-}
-
-/// Put one caret at the start of 1-based line `number`, clamped to the last,
-/// leaving a jump where it was.
-fn jumpToLine(number: usize) void {
-    weft.jumpPush();
-    _ = weft.setSelections(&.{caret(weft.lineStart(number))}, 0);
-}
-
 /// C-b: show or hide the docked viewport this config names (`weft.set("ide",
 /// "sidebar", …)`, default `sidebar`) through core's generic viewport door.
 fn toggleSidebar() void {
     const name = weft.config("sidebar");
-    weft.runStr("viewport-toggle", if (name.len > 0) name else "sidebar");
+    weft.runStr("viewport.toggle", if (name.len > 0) name else "sidebar");
 }
 
 fn onPickAccept(pick_id: u32) void {
@@ -667,11 +641,7 @@ fn onPickAccept(pick_id: u32) void {
     const trimmed = std.mem.trim(u8, text, " \t");
     if (trimmed.len == 0) return;
     switch (pick_id) {
-        file_pick, path_pick => weft.openTyped(trimmed),
-        line_pick => jumpToLine(std.fmt.parseInt(usize, trimmed, 10) catch {
-            weft.echo("go to line: not a line number");
-            return;
-        }),
+        path_pick => weft.openTyped(trimmed),
         else => {},
     }
 }
@@ -682,58 +652,55 @@ fn onPickAccept(pick_id: u32) void {
 // (`eachOver`), what shapes or ignores the set runs once (`.whole`), and a
 // goto from the primary's word is refused on several (`.one`).
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "ide-left", .call = left.plain, .arity = each, .summary = "move left, or collapse the selection to its start" },
-    .{ .name = "ide-right", .call = right.plain, .arity = each, .summary = "move right, or collapse the selection to its end" },
-    .{ .name = "ide-up", .call = up.plain, .arity = each, .summary = "collapse the selection and move up" },
-    .{ .name = "ide-down", .call = down.plain, .arity = each, .summary = "collapse the selection and move down" },
-    .{ .name = "ide-word-left", .call = word_left.plain, .arity = each, .summary = "move to the previous word" },
-    .{ .name = "ide-word-right", .call = word_right.plain, .arity = each, .summary = "move to the next word" },
-    .{ .name = "ide-home", .call = home.plain, .arity = each, .summary = "move to the first non-blank, then to column 0" },
-    .{ .name = "ide-end", .call = end_of_line.plain, .arity = each, .summary = "move to the end of the line" },
-    .{ .name = "ide-doc-start", .call = docStartJump, .arity = .whole, .summary = "move to the start of the buffer (a jump)" },
-    .{ .name = "ide-doc-end", .call = docEndJump, .arity = .whole, .summary = "move to the end of the buffer (a jump)" },
-    .{ .name = "ide-select-left", .call = left.extend, .arity = each, .summary = "extend the selection left" },
-    .{ .name = "ide-select-right", .call = right.extend, .arity = each, .summary = "extend the selection right" },
-    .{ .name = "ide-select-up", .call = up.extend, .arity = each, .summary = "extend the selection up" },
-    .{ .name = "ide-select-down", .call = down.extend, .arity = each, .summary = "extend the selection down" },
-    .{ .name = "ide-select-word-left", .call = word_left.extend, .arity = each, .summary = "extend the selection to the previous word" },
-    .{ .name = "ide-select-word-right", .call = word_right.extend, .arity = each, .summary = "extend the selection to the next word" },
-    .{ .name = "ide-select-home", .call = home.extend, .arity = each, .summary = "extend the selection to the smart line start" },
-    .{ .name = "ide-select-end", .call = end_of_line.extend, .arity = each, .summary = "extend the selection to the line end" },
-    .{ .name = "ide-select-doc-start", .call = doc_start.extend, .arity = each, .summary = "extend the selection to the buffer start" },
-    .{ .name = "ide-select-doc-end", .call = doc_end.extend, .arity = each, .summary = "extend the selection to the buffer end" },
-    .{ .name = "ide-select-all", .call = selectAll, .arity = .whole, .summary = "select the whole buffer" },
-    .{ .name = "ide-escape", .call = escape, .arity = .whole, .summary = "drop the selection, or break out of a capture" },
-    .{ .name = "ide-indent", .call = indent, .arity = eachOver("ide-tab-target"), .summary = "indent the selected lines, or insert a tab" },
-    .{ .name = "ide-dedent", .call = dedent, .arity = eachOver("ide-lines"), .summary = "dedent the selected lines" },
-    .{ .name = "ide-move-line-up", .call = moveLineUp, .arity = .whole, .summary = "move the line (or selected lines) up" },
-    .{ .name = "ide-move-line-down", .call = moveLineDown, .arity = .whole, .summary = "move the line (or selected lines) down" },
-    .{ .name = "ide-delete-line", .call = deleteLine, .arity = eachOver("ide-line-span"), .summary = "delete the line (or selected lines)" },
-    .{ .name = "ide-open-below", .call = openBelow, .arity = eachOver("ide-line-end"), .summary = "start a new line below this one" },
-    .{ .name = "ide-open-above", .call = openAbove, .arity = eachOver("ide-line-start"), .summary = "start a new line above this one" },
-    .{ .name = "ide-copy", .call = copy, .arity = .whole, .summary = "copy the selection (or the line)" },
-    .{ .name = "ide-cut", .call = cut, .arity = .whole, .summary = "cut the selection (or the line)" },
-    .{ .name = "ide-paste", .call = paste, .arity = .whole, .summary = "paste over the selection, or at the cursor" },
-    .{ .name = "ide-copy-each", .call = copyEach, .arity = eachOver("ide-transfer-target") },
-    .{ .name = "ide-cut-each", .call = cutEach, .arity = eachOver("ide-transfer-target") },
-    .{ .name = "ide-paste-each", .call = weft.thunk(pasteEach), .arity = each, .params = "how [text]" },
+    .{ .name = "ide.left", .call = left.plain, .arity = each, .summary = "Move left, or collapse the selection to its start.", .label = "Move Left" },
+    .{ .name = "ide.right", .call = right.plain, .arity = each, .summary = "Move right, or collapse the selection to its end.", .label = "Move Right" },
+    .{ .name = "ide.up", .call = up.plain, .arity = each, .summary = "Collapse the selection and move up.", .label = "Move Up" },
+    .{ .name = "ide.down", .call = down.plain, .arity = each, .summary = "Collapse the selection and move down.", .label = "Move Down" },
+    .{ .name = "ide.word-left", .call = word_left.plain, .arity = each, .summary = "Move to the previous word.", .label = "Previous Word" },
+    .{ .name = "ide.word-right", .call = word_right.plain, .arity = each, .summary = "Move to the next word.", .label = "Next Word" },
+    .{ .name = "ide.smart-home", .call = home.plain, .arity = each, .summary = "Move to the first non-blank character, then to column 0.", .label = "Line Start" },
+    .{ .name = "ide.line-end", .call = end_of_line.plain, .arity = each, .summary = "Move to the end of the line.", .label = "Line End" },
+    .{ .name = "ide.doc-start", .call = docStartJump, .arity = .whole, .summary = "Jump to the start of the buffer.", .label = "Go to Start of Buffer" },
+    .{ .name = "ide.doc-end", .call = docEndJump, .arity = .whole, .summary = "Jump to the end of the buffer.", .label = "Go to End of Buffer" },
+    .{ .name = "ide.select-left", .call = left.extend, .arity = each, .summary = "Extend the selection left.", .label = "Select Left" },
+    .{ .name = "ide.select-right", .call = right.extend, .arity = each, .summary = "Extend the selection right.", .label = "Select Right" },
+    .{ .name = "ide.select-up", .call = up.extend, .arity = each, .summary = "Extend the selection up.", .label = "Select Up" },
+    .{ .name = "ide.select-down", .call = down.extend, .arity = each, .summary = "Extend the selection down.", .label = "Select Down" },
+    .{ .name = "ide.select-word-left", .call = word_left.extend, .arity = each, .summary = "Extend the selection to the previous word.", .label = "Select Previous Word" },
+    .{ .name = "ide.select-word-right", .call = word_right.extend, .arity = each, .summary = "Extend the selection to the next word.", .label = "Select Next Word" },
+    .{ .name = "ide.select-smart-home", .call = home.extend, .arity = each, .summary = "Extend the selection to the smart line start.", .label = "Select to Line Start" },
+    .{ .name = "ide.select-line-end", .call = end_of_line.extend, .arity = each, .summary = "Extend the selection to the line end.", .label = "Select to Line End" },
+    .{ .name = "ide.select-doc-start", .call = doc_start.extend, .arity = each, .summary = "Extend the selection to the buffer start.", .label = "Select to Start of Buffer" },
+    .{ .name = "ide.select-doc-end", .call = doc_end.extend, .arity = each, .summary = "Extend the selection to the buffer end.", .label = "Select to End of Buffer" },
+    .{ .name = "ide.select-all", .call = selectAll, .arity = .whole, .summary = "Select the whole buffer.", .label = "Select All", .menu = "Selection", .group = "select", .order = 1 },
+    .{ .name = "ide.escape", .call = escape, .arity = .whole, .summary = "Drop the selection, or break out of a capture.", .label = "Clear Selection" },
+    .{ .name = "ide.indent", .call = indent, .arity = eachOver("ide.target-tab"), .summary = "Indent the selected lines, or insert a tab.", .label = "Indent", .menu = "Edit/Lines", .group = "indent", .order = 1, .icon = "indent-increase" },
+    .{ .name = "ide.dedent", .call = dedent, .arity = eachOver("ide.target-lines"), .summary = "Dedent the selected lines.", .label = "Dedent", .menu = "Edit/Lines", .group = "indent", .order = 2, .icon = "indent-decrease" },
+    .{ .name = "ide.move-line-up", .call = moveLineUp, .arity = .whole, .summary = "Move the line, or the selected lines, up.", .label = "Move Line Up", .menu = "Edit/Lines", .group = "move", .order = 1 },
+    .{ .name = "ide.move-line-down", .call = moveLineDown, .arity = .whole, .summary = "Move the line, or the selected lines, down.", .label = "Move Line Down", .menu = "Edit/Lines", .group = "move", .order = 2 },
+    .{ .name = "ide.delete-line", .call = deleteLine, .arity = eachOver("ide.target-line-span"), .summary = "Delete the line, or the selected lines.", .label = "Delete Line", .menu = "Edit/Lines", .group = "delete", .order = 1 },
+    .{ .name = "ide.open-below", .call = openBelow, .arity = eachOver("ide.target-line-end"), .summary = "Start a new line below this one.", .label = "Insert Line Below" },
+    .{ .name = "ide.open-above", .call = openAbove, .arity = eachOver("ide.target-line-start"), .summary = "Start a new line above this one.", .label = "Insert Line Above" },
+    .{ .name = "ide.copy", .call = copy, .arity = .whole, .summary = "Copy the selection, or the line.", .label = "Copy", .menu = "Edit", .group = "clipboard", .order = 2, .icon = "copy" },
+    .{ .name = "ide.cut", .call = cut, .arity = .whole, .summary = "Cut the selection, or the line.", .label = "Cut", .menu = "Edit", .group = "clipboard", .order = 1, .icon = "scissors" },
+    .{ .name = "ide.paste", .call = paste, .arity = .whole, .summary = "Paste over the selection, or at the cursor.", .label = "Paste", .menu = "Edit", .group = "clipboard", .order = 3, .icon = "clipboard-paste" },
+    .{ .name = "ide.copy-each", .call = copyEach, .arity = eachOver("ide.target-transfer"), .summary = "Copy each selection, or its line.", .internal = true },
+    .{ .name = "ide.cut-each", .call = cutEach, .arity = eachOver("ide.target-transfer"), .summary = "Cut each selection, or its line.", .internal = true },
+    .{ .name = "ide.paste-each", .call = weft.thunk(pasteEach), .arity = each, .params = "how [text]", .summary = "Paste the given text at each selection.", .internal = true },
     // The targets the line and transfer keys map over — range commands,
     // each answering for the one selection it is run on.
-    .{ .name = "ide-lines", .call = targetLines, .arity = each },
-    .{ .name = "ide-tab-target", .call = targetTab, .arity = each },
-    .{ .name = "ide-line-span", .call = targetLineSpan, .arity = each },
-    .{ .name = "ide-line-end", .call = targetLineEnd, .arity = each },
-    .{ .name = "ide-line-start", .call = targetLineStart, .arity = each },
-    .{ .name = "ide-transfer-target", .call = targetTransfer, .arity = each },
-    .{ .name = "quick-open", .call = quickOpen, .arity = .whole, .summary = "fuzzy-open a project file" },
-    .{ .name = "open-path", .call = openPath, .arity = .whole, .summary = "open a file by typed path" },
-    .{ .name = "goto-line", .call = gotoLine, .arity = .whole, .summary = "go to a line by number" },
-    .{ .name = "ide-toggle-sidebar", .call = toggleSidebar, .arity = .whole, .summary = "show or hide the docked sidebar" },
-    .{ .name = "ide-add-next-match", .call = addNextMatch, .arity = .whole, .summary = "select the word, then add the next occurrence of the selection" },
-    .{ .name = "ide-select-all-matches", .call = selectAllMatches, .arity = .whole, .summary = "select every occurrence of the selection" },
-    .{ .name = "ide-select-word-at-pointer", .call = selectWordAtPointer, .arity = .whole, .summary = "select the word under the pointer (a scene row: open it)" },
-    .{ .name = "ide-select-line-at-pointer", .call = selectLineAtPointer, .arity = .whole, .summary = "select the line under the pointer" },
-    .{ .name = "ide-goto-definition", .arity = .one, .call = gotoDefinition, .summary = "leave a jump, then go to the definition" },
+    .{ .name = "ide.target-lines", .call = targetLines, .arity = each, .summary = "Answer the whole lines a selection covers.", .internal = true },
+    .{ .name = "ide.target-tab", .call = targetTab, .arity = each, .summary = "Answer where the indent key acts for a selection.", .internal = true },
+    .{ .name = "ide.target-line-span", .call = targetLineSpan, .arity = each, .summary = "Answer the line span a selection covers.", .internal = true },
+    .{ .name = "ide.target-line-end", .call = targetLineEnd, .arity = each, .summary = "Answer the end of a selection's line.", .internal = true },
+    .{ .name = "ide.target-line-start", .call = targetLineStart, .arity = each, .summary = "Answer the start of a selection's line.", .internal = true },
+    .{ .name = "ide.target-transfer", .call = targetTransfer, .arity = each, .summary = "Answer the text a clipboard key moves for a selection.", .internal = true },
+    .{ .name = "ide.open-path", .call = openPath, .arity = .whole, .summary = "Open a file by typing its path.", .label = "Open Path", .prompts = true, .icon = "file" },
+    .{ .name = "ide.toggle-sidebar", .call = toggleSidebar, .arity = .whole, .summary = "Show or hide the docked sidebar.", .label = "Sidebar", .menu = "View", .group = "panels", .order = 1, .icon = "sidebar", .toggle = "viewport.sidebar.shown" },
+    .{ .name = "ide.add-next-match", .call = addNextMatch, .arity = .whole, .summary = "Select the word, then add the next occurrence of the selection.", .label = "Add Next Occurrence", .menu = "Selection", .group = "cursors", .order = 1 },
+    .{ .name = "ide.select-all-matches", .call = selectAllMatches, .arity = .whole, .summary = "Select every occurrence of the selection.", .label = "Select All Occurrences", .menu = "Selection", .group = "cursors", .order = 2 },
+    .{ .name = "ide.select-word-at-pointer", .call = selectWordAtPointer, .arity = .whole, .summary = "Select the word under the pointer, or open the scene row there.", .internal = true },
+    .{ .name = "ide.select-line-at-pointer", .call = selectLineAtPointer, .arity = .whole, .summary = "Select the line under the pointer.", .internal = true },
 };
 
 fn initExtra() void {
@@ -741,7 +708,7 @@ fn initExtra() void {
     // (BackSpace, Delete, Return's activate-else-break list, C-q) and
     // declares that it commits typed text — a declaration, never inherited.
     weft.setFallback("ide", "default");
-    weft.textInput("ide", "insert-text");
+    weft.textInput("ide", "edit.insert-text");
 
     // §10.4: a modeless grammar's resting mode commits text, so a structural
     // entry needs a second state that does not. `ide-structural` inherits
@@ -754,6 +721,9 @@ fn initExtra() void {
     weft.bindingVariant(.source, "ide", "ide-source");
     weft.restingPosture(.text, "ide");
     weft.restingPosture(.structural, "ide-structural");
+    // A listing is a list control here: focus is the row, and its name is
+    // edited only when asked (F2, a slow second click) — doc/chrome.md §5.2.
+    weft.runStr2("mode.set-structural-focus", "ide", "row");
     // The break-out capture can never take away, retained in both resting
     // states (§10.4). Escape reaches it too, from a capture.
     for ([_][]const u8{ "ide", "ide-structural" }) |m|
@@ -764,57 +734,69 @@ fn initExtra() void {
     // falls back to this plugin's text command where nothing offers it — so
     // one key serves every entry without this file knowing what any is.
     const intended = [_]struct { key: []const u8, arms: []const []const u8 }{
-        .{ .key = "Left", .arms = &.{ "std.navigation.left", "ide-left" } },
-        .{ .key = "Right", .arms = &.{ "std.navigation.right", "ide-right" } },
-        .{ .key = "Up", .arms = &.{ "std.navigation.up", "ide-up" } },
-        .{ .key = "Down", .arms = &.{ "std.navigation.down", "ide-down" } },
-        .{ .key = "C-Left", .arms = &.{ "std.navigation.word-previous", "ide-word-left" } },
-        .{ .key = "C-Right", .arms = &.{ "std.navigation.word-next", "ide-word-right" } },
-        .{ .key = "Home", .arms = &.{ "std.navigation.line-start", "ide-home" } },
-        .{ .key = "End", .arms = &.{ "std.navigation.line-end", "ide-end" } },
+        .{ .key = "Left", .arms = &.{ "std.navigation.left", "ide.left" } },
+        .{ .key = "Right", .arms = &.{ "std.navigation.right", "ide.right" } },
+        .{ .key = "Up", .arms = &.{ "std.navigation.up", "ide.up" } },
+        .{ .key = "Down", .arms = &.{ "std.navigation.down", "ide.down" } },
+        .{ .key = "C-Left", .arms = &.{ "std.navigation.word-prev", "ide.word-left" } },
+        .{ .key = "C-Right", .arms = &.{ "std.navigation.word-next", "ide.word-right" } },
+        .{ .key = "Home", .arms = &.{ "std.navigation.line-start", "ide.smart-home" } },
+        .{ .key = "End", .arms = &.{ "std.navigation.line-end", "ide.line-end" } },
         // Tab folds a row that has children; in text it indents.
-        .{ .key = "Tab", .arms = &.{ "std.hierarchy.toggle-expanded", "ide-indent" } },
-        .{ .key = "C-c", .arms = &.{ "std.transfer.yank", "ide-copy" } },
-        .{ .key = "C-x", .arms = &.{ "std.transfer.delete-to-register", "ide-cut" } },
-        .{ .key = "C-v", .arms = &.{ "std.transfer.paste", "ide-paste" } },
-        .{ .key = "C-z", .arms = &.{ "std.history.undo", "undo" } },
-        .{ .key = "C-S-z", .arms = &.{ "std.history.redo", "redo" } },
-        .{ .key = "C-y", .arms = &.{ "std.history.redo", "redo" } },
+        .{ .key = "Tab", .arms = &.{ "std.hierarchy.toggle-expanded", "ide.indent" } },
+        .{ .key = "C-c", .arms = &.{ "std.transfer.yank", "ide.copy" } },
+        .{ .key = "C-x", .arms = &.{ "std.transfer.delete-to-register", "ide.cut" } },
+        .{ .key = "C-v", .arms = &.{ "std.transfer.paste", "ide.paste" } },
+        .{ .key = "C-z", .arms = &.{ "std.history.undo", "edit.undo" } },
+        .{ .key = "C-S-z", .arms = &.{ "std.history.redo", "edit.redo" } },
+        .{ .key = "C-y", .arms = &.{ "std.history.redo", "edit.redo" } },
     };
     for (intended) |b| weft.bindKeys("ide", b.key, b.arms);
+    // Over text, THESE are what the transfer words mean: core offers
+    // std.transfer.* where a grammar provides the matching action, so the
+    // context menu over text has Cut, Copy and Paste, and the keys above
+    // reach the same arms through the words.
+    weft.provide("selection.cut", .{ .posture = "text" }, "ide.cut", 0);
+    weft.provide("selection.copy", .{ .posture = "text" }, "ide.copy", 0);
+    weft.provide("selection.paste-after", .{ .posture = "text" }, "ide.paste", 0);
+    // Escape cancels what is pending where something offers that — a row's
+    // name being edited, put back as it was — and is ide's own way out
+    // everywhere else.
+    weft.bindKeys("ide", "Escape", &.{ "std.gesture.cancel", "ide.escape" });
     // In a listing Tab is fold-or-nothing: never a character (GATE 2).
     weft.bindKeys("ide-structural", "Tab", &.{"std.hierarchy.toggle-expanded"});
     // Delete removes the selected rows — every one, marked or in a range.
-    weft.bindKey("ide-structural", "Delete", "selection-delete");
+    weft.bindKey("ide-structural", "Delete", "selection.delete");
 
     // Text-only keys: no standard word names these yet, so they bind the
     // text command outright. S-Tab arrives as ISO_Left_Tab on most layouts.
     const binds = [_][2][]const u8{
-        .{ "S-Left", "ide-select-left" },                    .{ "S-Right", "ide-select-right" },
-        .{ "S-Up", "ide-select-up" },                        .{ "S-Down", "ide-select-down" },
-        .{ "C-S-Left", "ide-select-word-left" },             .{ "C-S-Right", "ide-select-word-right" },
-        .{ "S-Home", "ide-select-home" },                    .{ "S-End", "ide-select-end" },
-        .{ "C-Home", "ide-doc-start" },                      .{ "C-End", "ide-doc-end" },
-        .{ "C-S-Home", "ide-select-doc-start" },             .{ "C-S-End", "ide-select-doc-end" },
-        .{ "C-a", "ide-select-all" },                        .{ "Escape", "ide-escape" },
-        .{ "S-Tab", "ide-dedent" },                          .{ "ISO_Left_Tab", "ide-dedent" },
-        .{ "C-slash", "comment-selection" },                 .{ "M-Up", "ide-move-line-up" },
-        .{ "M-Down", "ide-move-line-down" },                 .{ "C-S-k", "ide-delete-line" },
-        .{ "C-Return", "ide-open-below" },                   .{ "C-S-Return", "ide-open-above" },
-        .{ "C-d", "ide-add-next-match" },                    .{ "C-S-l", "ide-select-all-matches" },
+        .{ "S-Left", "ide.select-left" },                    .{ "S-Right", "ide.select-right" },
+        .{ "S-Up", "ide.select-up" },                        .{ "S-Down", "ide.select-down" },
+        .{ "C-S-Left", "ide.select-word-left" },             .{ "C-S-Right", "ide.select-word-right" },
+        .{ "S-Home", "ide.select-smart-home" },              .{ "S-End", "ide.select-line-end" },
+        .{ "C-Home", "ide.doc-start" },                      .{ "C-End", "ide.doc-end" },
+        .{ "C-S-Home", "ide.select-doc-start" },             .{ "C-S-End", "ide.select-doc-end" },
+        .{ "C-a", "ide.select-all" },                        .{ "S-Tab", "ide.dedent" },
+        .{ "ISO_Left_Tab", "ide.dedent" },                   .{ "C-slash", "comment.toggle-selection" },
+        .{ "M-Up", "ide.move-line-up" },                     .{ "M-Down", "ide.move-line-down" },
+        .{ "C-S-k", "ide.delete-line" },                     .{ "C-Return", "ide.open-below" },
+        .{ "C-S-Return", "ide.open-above" },                 .{ "C-d", "ide.add-next-match" },
+        .{ "C-S-l", "ide.select-all-matches" },
         // The pointer's share of the grammar: what a second and third quick
         // click mean, and C-click's extra selection — a caret in text, a
         // marked row in a listing (core's, one act on either kind).
-        .{ "double-mouse-1", "ide-select-word-at-pointer" }, .{ "triple-mouse-1", "ide-select-line-at-pointer" },
-        .{ "C-mouse-1", "pointer-add-selection" },
+                     .{ "double-mouse-1", "ide.select-word-at-pointer" },
+        .{ "triple-mouse-1", "ide.select-line-at-pointer" }, .{ "C-mouse-1", "pointer.add-selection" },
     };
     for (binds) |b| weft.bindKey("ide", b[0], b[1]);
 
-    // A bar caret: a modeless editor is always between cells.
-    for ([_][]const u8{ "ide", "ide-structural" }) |m| {
-        weft.runStr2("set-cursor", m, "bar");
-        weft.runStr2("cursor-blink", m, "on");
-    }
+    // A bar caret where `ide` types: a modeless editor is always between
+    // cells. `ide-structural` declares no shape — typing inserts nothing
+    // there, so core derives its caret (doc/chrome.md §5.2): none on a
+    // focused row, a bar only while a row's name is being edited.
+    weft.runStr2("cursor.set-style", "ide", "bar");
+    for ([_][]const u8{ "ide", "ide-structural" }) |m| weft.runStr2("cursor.set-blink", m, "on");
 
     weft.setMode("ide");
 }

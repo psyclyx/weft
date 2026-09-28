@@ -200,6 +200,9 @@ pub const ResolvedPresence = struct {
 };
 
 pub fn init(gpa: Allocator, session: *Session, doc: *Document, name: []const u8) !Collab {
+    // From here on a peer may write into it: its text is no longer this
+    // machine's alone to keep on disk (`Document.storable`).
+    doc.bound_to_peer = true;
     return .{
         .gpa = gpa,
         .session = session,
@@ -211,7 +214,7 @@ pub fn init(gpa: Allocator, session: *Session, doc: *Document, name: []const u8)
 
 pub fn deinit(self: *Collab) void {
     // A joined doc reverts to solo-owned when its collab goes away
-    // (disconnect keeps the buffer as a local file; buffer-close unbinds
+    // (disconnect keeps the buffer as a local file; buffer.close unbinds
     // before the doc is freed — the doc always outlives this).
     if (self.client_bound) self.doc.my_grant = .own;
     self.announced.deinit();

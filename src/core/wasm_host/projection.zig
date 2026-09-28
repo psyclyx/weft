@@ -282,7 +282,7 @@ fn repaint(p: *WasmPlugin, entry: *Buffers.Buffer, view: *projection.View, kind:
         .rerender => view.render() catch return null,
     };
     const end = editor.text().byteLen();
-    command.renderInto(gpa, &p.activeCtx().buffers.status, doc, .plugin, p.name, &.{
+    command.renderInto(gpa, &p.activeCtx().buffers.notices, doc, .plugin, p.name, &.{
         .{ .range = .{ .start = 0, .end = end }, .bytes = text },
     }) catch return null;
 

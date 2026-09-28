@@ -1,6 +1,6 @@
 //! notes — capture + review over plain files (design §6.6, org-lite), a `.wasm`
-//! plugin. `notes-capture` appends a line to a notes file via `fs.append`;
-//! `notes-open` opens it through the ordinary `open` path — a real,
+//! plugin. `notes.capture` appends a line to a notes file via `fs.append`;
+//! `notes.open` opens it through the ordinary `open` path — a real,
 //! path-backed buffer (dedupes, editable, adopts the path if the file is new)
 //! — not a copy into an unrelated scratch buffer. perms `{fs_read, fs_write}`;
 //! `open` is a host command, not an `fs.read` import, so no read grant is
@@ -17,7 +17,7 @@
 //! and publishes one decoration per embed. An embed that cannot resolve
 //! publishes its reason instead, beside the line that still reads as itself;
 //! an embed never errors its host, and resolution never runs on the typing
-//! path — the round fires on entry activation and on `notes-embeds`, and the
+//! path — the round fires on entry activation and on `notes.show-embeds`, and the
 //! §11.7 revision stamp drops the whole set the moment the note is edited,
 //! until the next round.
 //!
@@ -32,7 +32,7 @@
 //! whole scanned note instead of only what is on screen (§11.6 windowing is
 //! the missing half of "lazily"); and a pushed offer table is scoped by
 //! ENTRY, not by cursor line, so `std.target.activate` is offered while a
-//! note holding embeds is focused and `notes-embed-activate` says so when the
+//! note holding embeds is focused and `notes.activate-embed` says so when the
 //! cursor is elsewhere in it.
 
 const std = @import("std");
@@ -72,12 +72,12 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "notes-capture", .call = capture, .arity = .whole, .params = "text [file]", .summary = "append a line to the notes file" },
-    .{ .name = "notes-open", .call = open, .arity = .whole, .params = "[file]", .summary = "open the notes file itself" },
-    .{ .name = "notes-capture-here", .arity = .one, .call = captureHere, .params = "[file]", .summary = "append an embed naming where you are now" },
-    .{ .name = "notes-embeds", .call = embedsRefresh, .arity = .whole, .summary = "render this note's embeds live beside their own bytes" },
-    .{ .name = "notes-embeds-off", .call = embedsOff, .arity = .whole, .summary = "stop rendering this note's embeds" },
-    .{ .name = "notes-embed-activate", .arity = .one, .call = embedActivate, .summary = "open what the embed on this line designates" },
+    .{ .name = "notes.capture", .call = capture, .arity = .whole, .params = "text [file]", .summary = "Append a line to the notes file.", .label = "Capture Note", .menu = "File/Notes", .group = "notes", .order = 1, .icon = "notebook-pen", .prompts = true },
+    .{ .name = "notes.open", .call = open, .arity = .whole, .params = "[file]", .summary = "Open the notes file itself.", .label = "Open Notes", .menu = "File/Notes", .group = "notes", .order = 2, .icon = "notebook-pen" },
+    .{ .name = "notes.capture-here", .arity = .one, .call = captureHere, .params = "[file]", .summary = "Append an embed to the notes naming where you are now.", .label = "Capture Location", .menu = "File/Notes", .group = "notes", .order = 3 },
+    .{ .name = "notes.show-embeds", .call = embedsRefresh, .arity = .whole, .summary = "Render this note's embeds live beside their own bytes.", .label = "Show Note Embeds", .menu = "File/Notes", .group = "embeds", .order = 1 },
+    .{ .name = "notes.hide-embeds", .call = embedsOff, .arity = .whole, .summary = "Stop rendering this note's embeds.", .label = "Hide Note Embeds", .menu = "File/Notes", .group = "embeds", .order = 2 },
+    .{ .name = "notes.activate-embed", .arity = .one, .call = embedActivate, .summary = "Open what the embed on this line designates.", .internal = true },
 };
 
 fn describeExtra() void {
@@ -88,7 +88,7 @@ fn describeExtra() void {
 /// A note takes focus: publish its embeds, and offer activation exactly while
 /// an entry that HAS embeds is focused. Buffer-granular eligibility is as fine
 /// as a pushed offer table gets today — there is no cursor-motion feed to
-/// republish against, so `notes-embed-activate` says so when the cursor is not
+/// republish against, so `notes.activate-embed` says so when the cursor is not
 /// on an embed line rather than guessing another arm's meaning.
 fn on_activate() callconv(.c) void {
     const entry = activeEntry() orelse return offerActivate(false);
@@ -173,7 +173,7 @@ fn offerActivate(wanted: bool) void {
     // Republished per round, stamped with the round it describes: a decision
     // resolved against a superseded scan dies at the effect door.
     weft.offersBegin("", round);
-    weft.offer("std.target.activate", "notes-embed-activate", "");
+    weft.offer("std.target.activate", "notes.activate-embed", "");
     weft.offersCommit();
     offering = true;
 }

@@ -55,7 +55,7 @@ const window_layout = h.window_layout;
 
 /// Run `cmd` (no args) and return its integer result, or 0 if it didn't set
 /// one — a thin wrapper `Editor`/`SecondHead` don't expose (they only run
-/// for side effects), used below to observe `head-poll-count` without
+/// for side effects), used below to observe `head.poll-count` without
 /// depending on a head mutation `on_poll` itself no longer makes.
 fn runInt(ed: *Editor, cmd: []const u8) i64 {
     const v = command.run(ed.commands, ed.ctx, cmd, &.{}) catch return 0;
@@ -87,7 +87,7 @@ fn enterNormal(ctx: *command.Context, data: ?*anyopaque, args: []const command.V
 }
 
 /// A minimal modal keymap — "normal" (resting: commits no text) / "insert"
-/// (self-inserts via core's `insert-text`, the same builtin the modeless
+/// (self-inserts via core's `edit.insert-text`, the same builtin the modeless
 /// `default` floor uses) — built from plain core commands, no guest plugin.
 /// Mirrors vim's normal/insert shape just enough to exercise dot-repeat's
 /// rest-point logic (`dispatch.dotAtRest`) without touching the wasm host.
@@ -95,13 +95,13 @@ fn initModal(gpa: std.mem.Allocator, ed: *Editor) !void {
     _ = try ed.commands.bind(gpa, "enter-insert", .{ .name = "enter-insert", .summary = "test: enter insert", .args = &.{}, .handler = enterInsert });
     _ = try ed.commands.bind(gpa, "enter-normal", .{ .name = "enter-normal", .summary = "test: enter normal", .args = &.{}, .handler = enterNormal });
     try ed.keymap.bind(gpa, "normal", "i", "enter-insert", core.Keymap.prio_config, "test");
-    // A bare MOTION (no edit) — "cursor-right" is a real core builtin
+    // A bare MOTION (no edit) — "cursor.right" is a real core builtin
     // (`core.builtins`' modeless `default`-floor binding, reused here) —
     // for exercising dot-repeat's "did this dispatch actually change
     // anything" distinction without needing any guest plugin.
-    try ed.keymap.bind(gpa, "normal", "l", "cursor-right", core.Keymap.prio_config, "test");
+    try ed.keymap.bind(gpa, "normal", "l", "cursor.right", core.Keymap.prio_config, "test");
     try ed.keymap.bind(gpa, "insert", "Escape", "enter-normal", core.Keymap.prio_config, "test");
-    try ed.keymap.setCommitCommand(gpa, "insert", "insert-text");
+    try ed.keymap.setCommitCommand(gpa, "insert", "edit.insert-text");
     try ed.head.setModeRaw(gpa, "normal");
 }
 
@@ -133,7 +133,7 @@ test "two heads: A mid-chord does not touch B's mode/pending, and B types in ins
     try t.expectEqual(@as(usize, 0), b.head.pending.len);
 
     // B types — this dispatch resolves through B's OWN mode's commit command
-    // (insert-text), not A's half-typed chord.
+    // (edit.insert-text), not A's half-typed chord.
     b.typeText("hello");
     const text1 = try ed.textAlloc();
     defer gpa.free(text1);
@@ -161,7 +161,7 @@ test "two heads: A in a menu mode does not move B out of normal" {
     // never self-inserts) AND reachable as a one-shot menu, the same shape
     // `dispatch.dispatchSpec` gives any bound command whose name NAMES a menu
     // mode (see its "legacy mode-menu path" comment) — the same mechanism a
-    // real git-status keybinding uses.
+    // real git.status keybinding uses.
     try ed.keymap.tagMode(gpa, "tool-mode", "menu");
     try ed.keymap.tagMode(gpa, "tool-mode", "resting");
     try ed.keymap.bind(gpa, "normal", "g", "tool-mode", core.Keymap.prio_config, "test");
@@ -203,17 +203,18 @@ test "two heads: distinct pick sessions — opening/typing in one doesn't touch 
     try b.init(&ed, "default");
     defer b.deinit(gpa);
 
-    // Both open the command palette — a real, builtin pick session (core
-    // builtins install it; no plugin needed) — through the real command path.
-    ed.run("palette");
-    b.run("palette");
+    // Both open the command palette — a real pick session, the palette
+    // plugin's — through the real command path.
+    try ed.load("palette", @embedFile("guest_palette_wasm"));
+    ed.run("palette.open");
+    b.run("palette.open");
     try t.expect(ed.pick.active);
     try t.expect(b.head.pick.active);
     try t.expectEqualStrings("pick", ed.mode());
     try t.expectEqualStrings("pick", b.mode());
 
     // Typing dispatches through each head's OWN "pick" mode commit command
-    // (pick-input) into each head's OWN query — not the other's.
+    // (pick.input) into each head's OWN query — not the other's.
     ed.typeText("no");
     try t.expectEqualStrings("no", ed.pick.query.items);
     try t.expectEqual(@as(usize, 0), b.head.pick.query.items.len);
@@ -223,10 +224,10 @@ test "two heads: distinct pick sessions — opening/typing in one doesn't touch 
     try t.expectEqualStrings("no", ed.pick.query.items); // untouched by B's typing
 
     // Closing A's picker leaves B's open.
-    ed.run("pick-cancel");
+    ed.run("pick.cancel");
     try t.expect(!ed.pick.active);
     try t.expect(b.head.pick.active);
-    b.run("pick-cancel");
+    b.run("pick.cancel");
     try t.expect(!b.head.pick.active);
 }
 
@@ -242,8 +243,8 @@ test "two heads: distinct dot-repeat registers — B's `.` never replays A's cha
     try Editor.init(gpa, &ed);
     defer ed.deinit();
     try initModal(gpa, &ed);
-    _ = try ed.commands.bind(gpa, "repeat-change", .{ .name = "repeat-change", .summary = "test: repeat", .args = &.{}, .handler = h.dispatch.repeatChangeHandler });
-    try ed.keymap.bind(gpa, "normal", ".", "repeat-change", core.Keymap.prio_config, "test");
+    _ = try ed.commands.bind(gpa, "edit.repeat", .{ .name = "edit.repeat", .summary = "test: repeat", .args = &.{}, .handler = h.dispatch.repeatChangeHandler });
+    try ed.keymap.bind(gpa, "normal", ".", "edit.repeat", core.Keymap.prio_config, "test");
 
     // Seed some prior edits/commits on A BEFORE B ever attaches — the exact
     // shape the two-head gap (`DotRepeat.synced`) exists for: a head that
@@ -257,7 +258,7 @@ test "two heads: distinct dot-repeat registers — B's `.` never replays A's cha
     defer b.deinit(gpa);
 
     // B's FIRST action after attaching: a BARE MOTION (no edit) — "l"
-    // (cursor-right), not `.`. This is the exact scenario `DotRepeat.synced`
+    // (cursor.right), not `.`. This is the exact scenario `DotRepeat.synced`
     // exists for: WITHOUT it, B's fresh-but-unsynced bookkeeping
     // (commits=0/cursor=0 defaults) misreads the gap since B's creation —
     // during which A already committed the "seed " edit above — as an
@@ -321,7 +322,7 @@ test "two heads: A closing its pane does not strand B on a freed/retyped node �
     defer ed.deinit();
 
     // A vsplits: left (A's pane, kept) | right (a new sibling peek).
-    ed.run("window-vsplit");
+    ed.run("window.split-right");
     ed.applyWindow();
     try t.expectEqual(@as(usize, 2), ed.paneCount());
 
@@ -332,15 +333,15 @@ test "two heads: A closing its pane does not strand B on a freed/retyped node �
     // Move B's focus onto the RIGHT (sibling) pane — a real window command,
     // applied explicitly AS head B (`SecondHead.applyWindow`) — so A and B
     // now hold handles to two DIFFERENT, sibling leaves of one shared tree.
-    b.run("window-focus-right");
+    b.run("window.focus-right");
     b.applyWindow(&ed);
 
     // A closes ITS OWN (left) pane. `Layout.closeFocused`'s doc: this frees
     // TWO node addresses — the closed leaf (A's) AND its sibling's node
     // shell (B's pane's OLD address; the sibling's CONTENT survives, moved
     // to the parent's address, but that specific struct does not). B never
-    // touched `window-close` — this is entirely A's action.
-    ed.run("window-close");
+    // touched `window.close` — this is entirely A's action.
+    ed.run("window.close");
     ed.applyWindow();
     try t.expectEqual(@as(usize, 1), ed.paneCount());
 
@@ -354,7 +355,7 @@ test "two heads: A closing its pane does not strand B on a freed/retyped node �
 
     // And B can keep dispatching real window commands from its RECOVERED
     // focus — no invalid access, no stuck state.
-    b.run("window-vsplit");
+    b.run("window.split-right");
     b.applyWindow(&ed);
     try t.expectEqual(@as(usize, 2), ed.paneCount());
 }
@@ -369,10 +370,8 @@ test "two heads: distinct echo lines" {
     try b.init(&ed, "default");
     defer b.deinit(gpa);
 
-    ed.head.echo.clearRetainingCapacity();
-    ed.head.echo.appendSlice(gpa, "from A") catch unreachable;
-    b.head.echo.clearRetainingCapacity();
-    b.head.echo.appendSlice(gpa, "from B") catch unreachable;
+    ed.head.echo.say(gpa, "from A") catch unreachable;
+    b.head.echo.say(gpa, "from B") catch unreachable;
 
     try t.expectEqualStrings("from A", ed.echoText());
     try t.expectEqualStrings("from B", b.echoText());
@@ -397,8 +396,8 @@ test "two heads: a guest-plugin (wasm) command dispatched as B mutates B's Head,
     try t.expectEqualStrings("default", ed.mode());
     try t.expectEqualStrings("default", b.mode());
 
-    // "head-poke" (weft.setMode + weft.echo) dispatched "as" B.
-    b.run("head-poke");
+    // "headtest.poke" (weft.setMode + weft.echo) dispatched "as" B.
+    b.run("headtest.poke");
 
     // B mutated: both writes landed on B's Head.
     try t.expectEqualStrings("poked", b.mode());
@@ -409,7 +408,7 @@ test "two heads: a guest-plugin (wasm) command dispatched as B mutates B's Head,
     // second head silently acted on the plugin's LOAD-TIME ctx (head A)
     // instead — `wpCmdTrampoline` discarded the dispatching `ctx` entirely.
     try t.expectEqualStrings("default", ed.mode());
-    try t.expectEqual(@as(usize, 0), ed.head.echo.items.len);
+    try t.expectEqual(@as(usize, 0), ed.head.echo.text().len);
 }
 
 test "two heads: a wl_run-nested guest command keeps the dispatching head through the nesting" {
@@ -423,21 +422,21 @@ test "two heads: a wl_run-nested guest command keeps the dispatching head throug
     try b.init(&ed, "default");
     defer b.deinit(gpa);
 
-    // "head-relay": wl_run("head-poke") (a nested, in-guest reentrant
+    // "headtest.relay": wl_run("headtest.poke") (a nested, in-guest reentrant
     // dispatch through THIS SAME plugin) then a SECOND weft.echo write AFTER
     // the nested call returns. Both the nested call's writes and the outer
     // handler's post-nesting write must land on B throughout — this is what
     // fails under a "reset active_ctx to the load-time default as soon as a
     // nested dispatch returns" bug (a bare set instead of save/restore):
     // the post-nesting echo would land back on A instead.
-    b.run("head-relay");
+    b.run("headtest.relay");
 
-    try t.expectEqualStrings("poked", b.mode()); // set by the NESTED head-poke
+    try t.expectEqualStrings("poked", b.mode()); // set by the NESTED head.poke
     try t.expectEqualStrings("after-relay", b.echoText()); // written AFTER the nested call returned — still B
 
     // A never touched, at any point in the nesting.
     try t.expectEqualStrings("default", ed.mode());
-    try t.expectEqual(@as(usize, 0), ed.head.echo.items.len);
+    try t.expectEqual(@as(usize, 0), ed.head.echo.text().len);
 }
 
 test "two heads: on_poll (background) can no longer force a mode or echo onto ANY head (task #19 item 4)" {
@@ -451,18 +450,18 @@ test "two heads: on_poll (background) can no longer force a mode or echo onto AN
     try b.init(&ed, "default");
     defer b.deinit(gpa);
 
-    // B is "the last-dispatching head": it dispatches head-poke (so its
-    // mode/echo are visibly different from A's default) and head-spawn
+    // B is "the last-dispatching head": it dispatches head.poke (so its
+    // mode/echo are visibly different from A's default) and head.spawn
     // (perm proc; spawns a real subprocess so a REAL readiness-driven
     // on_poll fires off the frame-loop tick, not a synthetic direct export
     // call).
-    b.run("head-poke");
-    b.run("head-spawn");
+    b.run("headtest.poke");
+    b.run("headtest.spawn");
     try t.expectEqualStrings("poked", b.mode());
     try t.expectEqualStrings("default", ed.mode()); // A untouched by B's dispatches
 
     // Drive the async loop for real until on_poll has fired at least once —
-    // observed via `head-poll-count` (a command result, not a head mutation:
+    // observed via `head.poll-count` (a command result, not a head mutation:
     // on_poll's OWN head-touching writes are exactly what this test proves
     // no longer take effect, so the loop can't key off them the way the
     // pre-item-4 version of this test did). Bounded, generous — a plain
@@ -470,9 +469,9 @@ test "two heads: on_poll (background) can no longer force a mode or echo onto AN
     var round: usize = 0;
     while (round < 200) : (round += 1) {
         ed.settle(1);
-        if (runInt(&ed, "head-poll-count") != 0) break;
+        if (runInt(&ed, "headtest.poll-count") != 0) break;
     }
-    try t.expect(runInt(&ed, "head-poll-count") >= 1); // on_poll really did fire
+    try t.expect(runInt(&ed, "headtest.poll-count") >= 1); // on_poll really did fire
 
     // BEFORE task #19 item 4: on_poll's `weft.setMode("polled")`/
     // `weft.echo("polled")` silently landed on A (the load-time/system-
@@ -483,9 +482,9 @@ test "two heads: on_poll (background) can no longer force a mode or echo onto AN
     // `wasm_host/plugin.zig`) — the guest call unwinds right there, so the
     // `weft.echo` right after it never runs either. Neither head moves.
     try t.expectEqualStrings("default", ed.mode()); // A: never touched, was "polled" before this fix
-    try t.expectEqual(@as(usize, 0), ed.head.echo.items.len);
+    try t.expectEqual(@as(usize, 0), ed.head.echo.text().len);
     // B, meanwhile, is untouched by the background entry either way — still
-    // exactly where its own last dispatch (head-poke) left it.
+    // exactly where its own last dispatch (head.poke) left it.
     try t.expectEqualStrings("poked", b.mode());
     try t.expectEqualStrings("poked", b.echoText());
 }

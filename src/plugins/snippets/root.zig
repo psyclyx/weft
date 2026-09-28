@@ -1,5 +1,5 @@
 //! snippets — expand named templates (design §6.4 cape.snippet-flavored), a
-//! `.wasm` plugin (perms `{fs_read}`). `snippets-expand` reads a snippets file
+//! `.wasm` plugin (perms `{fs_read}`). `snippets.expand` reads a snippets file
 //! (arg1, or the default), finds the line whose trigger matches arg0, and
 //! inserts its body at the cursor with literal `\n` turned into newlines. The
 //! file is `trigger<TAB>body` per line — the simplest thing that composes the
@@ -23,7 +23,7 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "snippets-expand", .arity = .one, .call = expand, .params = "trigger [file]", .summary = "insert the named snippet's body at the cursor" },
+    .{ .name = "snippets.expand", .arity = .one, .call = expand, .params = "trigger [file]", .summary = "Insert the named snippet's body at the cursor.", .label = "Insert Snippet", .menu = "Edit/Insert", .group = "insert", .order = 1, .prompts = true },
 };
 
 fn describeExtra() void {

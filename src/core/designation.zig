@@ -47,9 +47,9 @@ pub fn of(entry: *Buffers.Buffer, out: []u8) ?[]const u8 {
             // the only honest name the entry has.
             if (Designation.ofPath(.file, f.path)) |d| return d.render(out) catch null;
         },
-        // A remote shell's file is named when it is opened (the shell knows
-        // its host; the backing does not), and declared then.
-        .shell, .none => {},
+        // A remote file is named when it is opened (its tier knows the
+        // authority; the backing does not), and declared then.
+        .remote, .none => {},
     }
     const id = ed.doc.id.text();
     return Designation.ofDoc(.here, &id).render(out) catch null;
@@ -168,6 +168,22 @@ pub fn presentTarget(ctx: *command.Context, entry: *Buffers.Buffer, located: sem
     entry.name = name;
 }
 
+/// The place a published directory IS (doc/place.md §2): the container, on
+/// the locus its binder's designation names — `here`, a peer by its
+/// fingerprint, a shell by its id (substrate §7, R1/R2). Read from the one
+/// name a trusted publisher bound, so a container's locus cannot disagree
+/// with what it is called: there is no second field to set wrong. Null when
+/// the container is unnamed, stale, or on a locus this embedding cannot hold
+/// (no `Loci`), since a place whose locus is unknown must not read as here.
+pub fn placeOf(ctx: *command.Context, located: semantic_model.target.Located) Allocator.Error!?@import("place.zig").Place {
+    const router = ctx.filesystems orelse return null;
+    const text = router.designationOf(located.target, located.revision) orelse return null;
+    const d = durable.parse(text) orelse return null;
+    if (d.kind != .directory) return null;
+    const locus: @import("locus.zig").Locus = if (d.authority == .here) .here else if (ctx.loci) |loci| try loci.of(d.authority) else return null;
+    return .{ .container = .{ .locus = locus, .ref = located.target, .revision = located.revision } };
+}
+
 /// What an open came to: the entry now showing the designation, or why
 /// nothing does, in words fit for the status line.
 pub const Outcome = union(enum) {
@@ -210,8 +226,9 @@ pub fn resolveRelative(ctx: *command.Context, gpa: Allocator, rel: []const u8) !
 pub const refuse_relative_elsewhere = "this place has no local directory to resolve a relative name against: give an absolute path or a weft:// designation";
 
 /// Open what `d` designates, for the kinds core itself can answer: a live
-/// entry already showing it (any kind), a document (live, or reopened from
-/// the parked store), a process (only while its entry lives), a projection
+/// entry already showing it (any kind), a document (live, or reopened by
+/// `Buffers.revive` — parked, or restored from the document store, which
+/// outlives the process), a process (only while its entry lives), a projection
 /// (its producer re-run with `text`, the designation, as the one argument).
 /// Paths and peers are the shell's — it owns the filesystems and the
 /// connections — so for those this answers only the live-entry case and
@@ -309,7 +326,7 @@ fn openAs(ctx: *command.Context, d: Designation, text: []const u8, as: []const u
         // kind, paths and peers included), then find it again.
         var subject_buf: [max_len]u8 = undefined;
         const subject_text = subject_d.render(&subject_buf) catch return .{ .refused = refuse_subject_unopened };
-        const opened = try command.run(ctx.commands, ctx, "open", &.{.{ .string = subject_text }});
+        const opened = try command.run(ctx.commands, ctx, "file.open", &.{.{ .string = subject_text }});
         const found = find(ctx.buffers, subject_d);
         if (opened == .string or found == null) {
             if (ctx.buffers.resolve(restore)) |b| if (b.id != ctx.buffers.active_id) try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
@@ -474,8 +491,8 @@ test "designation: a producer owns its kind, and the grammar's kinds are nobody'
     const gpa = t.allocator;
     var openers: Openers = .empty;
     defer openers.deinit(gpa);
-    try openers.claim(gpa, "git.status", "git-status-open", "git");
-    try t.expectEqualStrings("git-status-open", openers.find("git.status").?.command);
+    try openers.claim(gpa, "git.status", "git.status-open", "git");
+    try t.expectEqualStrings("git.status-open", openers.find("git.status").?.command);
     try t.expectError(error.ClaimedByAnother, openers.claim(gpa, "git.status", "mine", "other"));
     try openers.claim(gpa, "git.status", "git-status-again", "git");
     try t.expectEqualStrings("git-status-again", openers.find("git.status").?.command);
@@ -485,7 +502,7 @@ test "designation: a producer owns its kind, and the grammar's kinds are nobody'
     try t.expect(openers.find("git.status") == null);
     try t.expect(openers.wasReleased("git.status"));
     // A released kind is claimable again.
-    try openers.claim(gpa, "git.status", "git-status-open", "git");
+    try openers.claim(gpa, "git.status", "git.status-open", "git");
     try t.expect(openers.find("git.status") != null and !openers.wasReleased("git.status"));
 
     // A plugin's namespace is its name: the kind itself, under it, its
@@ -548,7 +565,7 @@ test "designation: a projection OF a subject runs with the subject open, and a r
     var openers: Openers = .empty;
     defer openers.deinit(gpa);
     env.ctx.designations = &openers;
-    _ = try env.commands.bind(gpa, "open", command.define("open", "", TestProducers.open));
+    _ = try env.commands.bind(gpa, "file.open", command.define("file.open", "", TestProducers.open));
     _ = try env.commands.bind(gpa, "t-project", command.define("t-project", "", TestProducers.project));
     _ = try env.commands.bind(gpa, "t-nothing", command.define("t-nothing", "", TestProducers.nothing));
     try openers.claim(gpa, "t.proj", "t-project", "t");

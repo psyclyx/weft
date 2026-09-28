@@ -58,6 +58,13 @@ pub const schema = @import("weft_schema");
 /// modules under the wasm target too: a plugin can author scenes and targets,
 /// but cannot import host runtime implementation files sideways.
 pub const semantic = @import("weft_semantic");
+/// A command's presentation and its text form (doc/chrome.md §1.2) — the
+/// same module the host decodes it with.
+pub const presentation = @import("weft_membrane").presentation;
+pub const Presentation = presentation.Presentation;
+/// The command id grammar (doc/chrome.md §1.1); `plugin` checks every entry
+/// against it at comptime.
+pub const command_id = @import("weft_membrane").command_id;
 pub const semantic_codec = @import("weft_scene_codec");
 pub const fs = @import("weft_fs");
 pub const fs_codec = @import("weft_fs_codec");
@@ -81,11 +88,16 @@ var arg_scratch: [1 << 12]u8 = undefined;
 /// A command.s OWNER, apart again: one palette row reads a name, a summary and
 /// an owner, and each read would otherwise land on the last one.
 var owner_scratch: [1 << 8]u8 = undefined;
+/// What `commandMeta` decodes from: its strings borrow this, so a caller can
+/// hold a presentation beside a name and a summary.
+var meta_scratch: [1 << 10]u8 = undefined;
+/// What `keysFor` answers into.
+var keys_scratch: [1 << 10]u8 = undefined;
 /// A separate scratch for a command's declared ARGUMENT NAMES
 /// (`commandArg`) — the third of the introspection trio, and it needs its own
 /// so all three compose. A palette row is `commandName` + `commandSummary` +
 /// the parameter shape at once; sharing `scratch` with `commandName` meant
-/// rendering `<slot>` over the front of `explain-binding` and listing a row
+/// rendering `<slot>` over the front of `action.explain` and listing a row
 /// called `slotain-binding` that nothing could ever run.
 var param_scratch: [256]u8 = undefined;
 /// A separate scratch for offer reasons and refusals, so a UI can hold an
@@ -120,7 +132,7 @@ pub fn declareCommand(name: []const u8) void {
 /// This is what makes a plugin command a first-class citizen: the palette
 /// documents it and asks for its arguments, the `:` line hints its shape while
 /// you type, and a refusal names what was missing. Without it a command is a
-/// bare name — which is all a plugin could say before, and why `net-open` from
+/// bare name — which is all a plugin could say before, and why `net.open` from
 /// the palette used to dial nothing at all.
 pub fn describeCommand(name: []const u8, params: []const u8, summary: []const u8) void {
     e.wl_declare_command_doc(
@@ -131,6 +143,16 @@ pub fn describeCommand(name: []const u8, params: []const u8, summary: []const u8
         p(summary.ptr),
         @intCast(summary.len),
     );
+}
+/// Say how a declared command is PRESENTED to people (doc/chrome.md §1.2):
+/// its label, menu path, icon and the rest. The manifest calls this for every
+/// entry that sets any of them; an entry that sets none says nothing, and its
+/// id is what a UI shows.
+pub fn declareCommandMeta(name: []const u8, meta: Presentation) void {
+    var buf: [1024]u8 = undefined;
+    const text = presentation.encode(&buf, meta) catch return;
+    if (text.len == 0) return;
+    e.wl_declare_command_meta(p(name.ptr), @intCast(name.len), p(text.ptr), @intCast(text.len));
 }
 /// Say how a declared command maps over a selection of several extents
 /// (`Arity`). The manifest calls this for every entry; `.one` sends
@@ -311,7 +333,12 @@ pub fn pointer() ?Pointer {
         .focused = w[7] & 2 != 0,
     };
 }
-/// The active buffer's backing path, or null. Valid until the next read call.
+/// The path of the LOCAL file backing the active buffer, or null — for a
+/// scratch, a projection, and a remote file (a shell's, a peer's), whose
+/// path names a file on another locus: taking it for this machine's would
+/// act on a different file. A path from here is safe to open, run and hand
+/// to a local tool; a remote entry is named by its `designation()`. Valid
+/// until the next read call.
 pub fn path() ?[]const u8 {
     const n = e.wl_path(p(&scratch), scratch.len);
     if (n < 0) return null;
@@ -506,6 +533,13 @@ pub const Annotations = struct {
         return e.wl_annotate_begin(self.handle) == 1;
     }
 
+    /// `begin`, for a round whose paint lasts only until the next key: the
+    /// next key dispatched (by anyone) takes it away — highlights that should
+    /// vanish the moment you do anything else, with no hook to hear the key.
+    pub fn beginUntilKey(self: Annotations) bool {
+        return e.wl_annotate_begin_until_key(self.handle) == 1;
+    }
+
     /// One span in the open round, colored by `role` (a styles-palette class).
     /// `text` is the display string for a decoration placement, ignored by
     /// `.range`.
@@ -549,11 +583,14 @@ pub fn setSelection(r: Range) void {
 /// What an extent is a range of.
 pub const SelectionKind = enum(u32) { text = 0, rows = 1 };
 
-/// One extent's endpoints. `anchor == head` is a caret (a single row).
+/// One extent's endpoints. `anchor == head` is a caret (a single row). An
+/// `inclusive` text extent (vim's `v`) has its caret ON a character: its
+/// ends are still the range it covers, the caret the last character of it.
 pub const Selection = struct {
     anchor: usize,
     head: usize,
     kind: SelectionKind = .text,
+    inclusive: bool = false,
 
     pub fn range(s: Selection) Range {
         return .{ .start = @min(s.anchor, s.head), .end = @max(s.anchor, s.head) };
@@ -565,8 +602,8 @@ pub const Selections = struct { primary: usize, items: []Selection };
 
 /// How many extents `selections()` can carry in one read.
 pub const max_selections = 1024;
-/// Words per extent in the door's record: kind, anchor, head.
-const extent_words = 3;
+/// Words per extent in the door's record: kind, anchor, head, flags.
+const extent_words = 4;
 var sel_words: [1 + extent_words * max_selections]u32 = undefined;
 var sel_items: [max_selections]Selection = undefined;
 
@@ -583,7 +620,7 @@ pub fn selections() Selections {
     const n = @min(total, max_selections);
     for (sel_items[0..n], 0..) |*s, i| {
         const at = 1 + extent_words * i;
-        s.* = .{ .kind = std.enums.fromInt(SelectionKind, sel_words[at]) orelse .text, .anchor = sel_words[at + 1], .head = sel_words[at + 2] };
+        s.* = .{ .kind = std.enums.fromInt(SelectionKind, sel_words[at]) orelse .text, .anchor = sel_words[at + 1], .head = sel_words[at + 2], .inclusive = sel_words[at + 3] & 1 != 0 };
     }
     return .{ .primary = if (n == 0) 0 else sel_words[0], .items = sel_items[0..n] };
 }
@@ -599,6 +636,7 @@ pub fn setSelections(items: []const Selection, primary: usize) bool {
         sel_words[at] = @intFromEnum(s.kind);
         sel_words[at + 1] = @intCast(s.anchor);
         sel_words[at + 2] = @intCast(s.head);
+        sel_words[at + 3] = @intFromBool(s.inclusive);
     }
     return e.wl_selections_set(p(&sel_words), @intCast(items.len)) == 0;
 }
@@ -799,6 +837,14 @@ pub fn setResultStr(s: []const u8) void {
     e.wl_set_result_str(p(s.ptr), @intCast(s.len));
 }
 
+/// How many keys this head has dispatched, the one being dispatched included.
+/// Compare it with a value saved on an earlier key to ask "was the key before
+/// this one mine?" — a repeat-on-the-same-key (Emacs's transient map) with no
+/// keymap in core that knows it is one.
+pub fn keySerial() u32 {
+    return e.wl_key_serial();
+}
+
 // ── Config surface (the local plane) ─────────────────────────────────
 /// Bind `key` in keymap `mode` to `cmd` (late-bound; resolves at keypress).
 pub fn bindKey(mode: []const u8, key: []const u8, cmd: []const u8) void {
@@ -806,7 +852,7 @@ pub fn bindKey(mode: []const u8, key: []const u8, cmd: []const u8) void {
 }
 /// Bind `key` in keymap `mode` to a FIRST-APPLICABLE list (architecture
 /// §10.2): `bindKeys("normal", "Return", &.{ "std.target.activate",
-/// "vim-open-focused" })` runs the activation intention where the focus
+/// "vim.next-line" })` runs the activation intention where the focus
 /// offers one and the plugin's own command everywhere else. The grammar
 /// authors the order; resolution happens at the keypress, against the focus.
 /// Framed as the config surface frames `weft.bind`'s list — one wire shape
@@ -916,6 +962,18 @@ pub fn stickyMenu(mode: []const u8) void {
     e.wl_sticky_menu(p(mode.ptr), @intCast(mode.len));
 }
 
+/// What kind of state a mode is — the colour its status-line chip takes
+/// comes from the theme's entry for it, never from the mode's spelling.
+/// Restates the host's `Keymap.ModeTone` wire values.
+pub const ModeTone = enum(u32) { normal = 0, insert = 1, select = 2, replace = 3, pending = 4 };
+
+/// DECLARE what `mode` is called on the status line (`NORMAL`, `INS`) and its
+/// tone. A mode never named shows no chip — so a modeless grammar names none,
+/// and a mode id is never what a person reads. `""` withdraws the name.
+pub fn modeDisplay(mode: []const u8, name: []const u8, tone: ModeTone) void {
+    e.wl_mode_display(p(mode.ptr), @intCast(mode.len), p(name.ptr), @intCast(name.len), @intFromEnum(tone));
+}
+
 /// Register `cmd` as a provider for `action` under the predicate `when`, at
 /// `prio` (higher wins; ties break toward the more specific `when`). Auto-
 /// declares the action if `declareAction` hasn't run — a language plugin can
@@ -953,7 +1011,7 @@ pub fn callString(cmd: []const u8) ?[]const u8 {
     const n = e.wl_call_string(p(cmd.ptr), @intCast(cmd.len), p(&call_string_scratch), call_string_scratch.len);
     return if (n < 0) null else call_string_scratch[0..@intCast(n)];
 }
-/// Invoke `cmd` with a single integer arg (e.g. buffer-switch).
+/// Invoke `cmd` with a single integer arg (e.g. buffer.switch).
 pub fn runInt(cmd: []const u8, n: i32) void {
     e.wl_run_int(p(cmd.ptr), @intCast(cmd.len), n);
 }
@@ -961,7 +1019,7 @@ pub fn runInt(cmd: []const u8, n: i32) void {
 pub fn runStr(cmd: []const u8, s: []const u8) void {
     e.wl_run_str(p(cmd.ptr), @intCast(cmd.len), p(s.ptr), @intCast(s.len));
 }
-/// Invoke `cmd` with two string args (e.g. set-cursor <mode> <style>).
+/// Invoke `cmd` with two string args (e.g. cursor.set-style <mode> <style>).
 pub fn runStr2(cmd: []const u8, a: []const u8, b: []const u8) void {
     e.wl_run_str2(p(cmd.ptr), @intCast(cmd.len), p(a.ptr), @intCast(a.len), p(b.ptr), @intCast(b.len));
 }
@@ -985,9 +1043,28 @@ pub fn runArgs(cmd: []const u8, args: []const []const u8) void {
     e.wl_run_argv(p(cmd.ptr), @intCast(cmd.len), p(&vec), @intCast(n));
 }
 
+/// `runArgs` in a chosen context: a menubar row that asked for its argument
+/// runs in the primary context (the editor it describes), whichever pane has
+/// the keys. False when no command has that name. Dispatching entries only.
+pub fn runArgsIn(where: OfferContext, cmd: []const u8, args: []const []const u8) bool {
+    var vec: [4]u32 = undefined;
+    const n = @min(args.len, vec.len / 2);
+    for (args[0..n], 0..) |a, i| {
+        vec[i * 2] = p(a.ptr);
+        vec[i * 2 + 1] = @intCast(a.len);
+    }
+    return e.wl_run_argv_at(@intFromEnum(where), p(cmd.ptr), @intCast(cmd.len), p(&vec), @intCast(n)) == 0;
+}
+
 // ── Introspection (palettes/help/buffers) ────────────────────────────
 pub fn commandCount() usize {
     return e.wl_command_count();
+}
+/// Where the command registry stands: a different value means a command was
+/// bound, unbound or described since. Key any reading of the whole registry
+/// on it.
+pub fn commandRevision() u32 {
+    return e.wl_command_revision();
 }
 /// The `i`-th command's name (into `scratch`), or null for an empty slot.
 pub fn commandName(i: usize) ?[]const u8 {
@@ -1022,6 +1099,70 @@ pub fn commandArityRequired(i: usize) ?usize {
     const n = e.wl_command_arity_required(@intCast(i));
     if (n < 0) return null;
     return @intCast(n);
+}
+/// How `name` — a command, an action, or an intention — is presented to a
+/// person HERE: its label, menu, icon, and whether it is keymap machinery.
+/// An intention answers with its provider's presentation where one answers
+/// it, else the standard vocabulary's. Null when nothing by that name
+/// answers. Strings borrow one shared scratch, overwritten by the next call.
+pub fn commandMeta(name: []const u8) ?Presentation {
+    const n = e.wl_command_meta(p(name.ptr), @intCast(name.len), p(&meta_scratch), meta_scratch.len);
+    if (n < 0 or n > meta_scratch.len) return null;
+    return presentation.decode(meta_scratch[0..@intCast(n)]);
+}
+/// The keys that run `name` where the person is — the binding mode of the
+/// focused context, or the one a pick was opened from — shortest first, as a
+/// person reads them (`C-s`, `SPC f s`). Walk the answer with `keyLines`.
+/// Empty when no key runs it here.
+pub fn keysFor(name: []const u8) []const u8 {
+    const n = e.wl_keys_for(p(name.ptr), @intCast(name.len), p(&keys_scratch), keys_scratch.len);
+    if (n < 0 or n > keys_scratch.len) return "";
+    return keys_scratch[0..@intCast(n)];
+}
+/// The first (shortest) key `keysFor` answered, or "".
+pub fn firstKey(listing: []const u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, listing, '\n') orelse listing.len;
+    return listing[0..end];
+}
+
+var standing_scratch: [1 << 11]u8 = undefined;
+
+/// How a name stands in a chosen context (`commandAt`): whether it would run
+/// there, why not, and the keys that run it there. Strings borrow one shared
+/// scratch, overwritten by the next `commandAt`.
+pub const Standing = struct {
+    /// Why it would not run there, in words a person reads; "" when it would.
+    reason: []const u8 = "",
+    /// The whole answer (`key` lines, shortest first, as the keymap
+    /// displays them).
+    text: []const u8 = "",
+
+    pub fn ready(self: Standing) bool {
+        return self.reason.len == 0;
+    }
+
+    /// The shortest key, or "".
+    pub fn firstKey(self: Standing) []const u8 {
+        var lines = std.mem.splitScalar(u8, self.text, '\n');
+        while (lines.next()) |line| if (std.mem.startsWith(u8, line, "key\t")) return line[4..];
+        return "";
+    }
+};
+
+/// How `name` — a command, an action or an intention — stands in `where`:
+/// the menu row's question (doc/chrome.md §2.1). A reading; the head never
+/// moves. Null when nothing by that name answers.
+pub fn commandAt(where: OfferContext, name: []const u8) ?Standing {
+    const n = e.wl_command_at(@intFromEnum(where), p(name.ptr), @intCast(name.len), p(&standing_scratch), standing_scratch.len);
+    if (n < 0 or n > standing_scratch.len) return null;
+    const text = standing_scratch[0..@intCast(n)];
+    var out: Standing = .{ .text = text };
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "reason\t")) out.reason = line["reason\t".len..];
+    }
+    if (std.mem.indexOf(u8, text, "state\tdisabled") != null and out.reason.len == 0) out.reason = "unavailable";
+    return out;
 }
 /// The `i`-th command's `k`-th argument NAME (into `param_scratch`, so it
 /// survives a paired `commandName`/`commandSummary` read), or null when there
@@ -1072,6 +1213,9 @@ pub const Offer = struct {
     label: []const u8,
     group: []const u8,
     order: ?i32,
+    /// An icon name from the theme's set, or "" — the command's own
+    /// (doc/chrome.md §1.2) unless its provider said otherwise.
+    icon: []const u8,
 };
 
 var offers_scratch: [1 << 16]u8 = undefined;
@@ -1089,7 +1233,7 @@ pub const Offers = struct {
         const availability = std.enums.fromInt(OfferAvailability, self.byte()) orelse return null;
         const has_order = self.byte() != 0;
         const order: i32 = @bitCast(self.word());
-        var parts: [5][]const u8 = undefined;
+        var parts: [6][]const u8 = undefined;
         for (&parts) |*part| {
             const n = self.word();
             if (self.at + n > self.bytes.len) return null;
@@ -1105,6 +1249,7 @@ pub const Offers = struct {
             .reason = parts[2],
             .label = parts[3],
             .group = parts[4],
+            .icon = parts[5],
         };
     }
 
@@ -1189,6 +1334,21 @@ pub fn places() ContextKeys {
     const n = e.wl_places(p(&places_scratch), places_scratch.len);
     const len: usize = if (n <= 0) 0 else @min(@as(usize, @intCast(n)), places_scratch.len);
     return .{ .it = std.mem.splitScalar(u8, places_scratch[0..len], '\n'), .empty = len == 0 };
+}
+
+/// Hear `on_subject_changed` whenever the entry opening `subject` (a
+/// designation) reads differently — an edit, or a parse that landed later —
+/// at the frame boundary, bound to that entry, so `outline`, `byteLen`,
+/// `designation` and the other document reads answer for it. A projection
+/// watches what it presents. False when refused (not a designation, or past
+/// the per-plugin bound). Watches end when the plugin unloads.
+pub fn subjectWatch(subject: []const u8) bool {
+    return e.wl_subject_watch(p(subject.ptr), @intCast(subject.len), 1) == 0;
+}
+
+/// Stop hearing about `subject`.
+pub fn subjectUnwatch(subject: []const u8) void {
+    _ = e.wl_subject_watch(p(subject.ptr), @intCast(subject.len), 0);
 }
 
 var changed_scratch: [4096]u8 = undefined;
@@ -1282,54 +1442,6 @@ pub fn offersCommit() void {
 /// nonapplicable — an empty table would still be a claim.
 pub fn offersRetract() void {
     e.wl_offers_retract();
-}
-
-// ── Reading the keymap tables ────────────────────────────────────────
-//
-// The head-scoped which-key reads are `menuBinding*`. These two read the
-// TABLES, with the mode named — which is the only way to answer "what key
-// runs this command" for a mode you are not standing in.
-//
-// Both write into `out` (caller-owned, so a listing survives the next read)
-// and answer null when it is too small, never a truncated listing.
-
-/// Every mode with a binding table, newline-joined.
-pub fn modeNames(out: []u8) ?[]const u8 {
-    const n = e.wl_mode_names(p(out.ptr), @intCast(out.len));
-    if (n < 0) return null;
-    return out[0..@intCast(n)];
-}
-
-/// Mode `mode`'s bindings resolved through its fallback chain, one
-/// `<key>\t<command>` per line. Walk it with `bindingRows`.
-pub fn bindingTable(mode: []const u8, out: []u8) ?[]const u8 {
-    const n = e.wl_binding_table(p(mode.ptr), @intCast(mode.len), p(out.ptr), @intCast(out.len));
-    if (n < 0) return null;
-    return out[0..@intCast(n)];
-}
-
-/// One row of `bindingTable`.
-pub const BindingRow = struct { key: []const u8, command: []const u8 };
-
-/// Split a `bindingTable` listing into rows. A line without a tab is skipped
-/// rather than guessed at.
-pub const BindingRows = struct {
-    rest: []const u8,
-
-    pub fn next(self: *BindingRows) ?BindingRow {
-        while (self.rest.len > 0) {
-            const nl = std.mem.indexOfScalar(u8, self.rest, '\n') orelse self.rest.len;
-            const line = self.rest[0..nl];
-            self.rest = if (nl == self.rest.len) self.rest[nl..] else self.rest[nl + 1 ..];
-            const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
-            return .{ .key = line[0..tab], .command = line[tab + 1 ..] };
-        }
-        return null;
-    }
-};
-
-pub fn bindingRows(listing: []const u8) BindingRows {
-    return .{ .rest = listing };
 }
 
 pub fn bufferCount() usize {
@@ -1434,18 +1546,18 @@ pub fn focusBuffer(name: []const u8) bool {
         const other = bufferName(i) orelse continue;
         if (!std.mem.eql(u8, other, name)) continue;
         const id = bufferId(i) orelse return false;
-        runInt("buffer-switch", id);
+        runInt("buffer.switch", id);
         return true;
     }
     return false;
 }
 
 /// Focus `name`, creating the buffer if there is none. Tool plugins reuse one
-/// named buffer across runs, and `buffer-create` does NOT dedupe by name — so
+/// named buffer across runs, and `buffer.create` does NOT dedupe by name — so
 /// "create it if it isn't there" is the only spelling that doesn't pile up
 /// duplicates on the second invocation.
 pub fn focusOrCreateBuffer(name: []const u8) void {
-    if (!focusBuffer(name)) runStr("buffer-create", name);
+    if (!focusBuffer(name)) runStr("buffer.create", name);
 }
 
 /// The instance-`n` buffer name for `base`: `*base*` at 1, `*base:n*` above.
@@ -1523,7 +1635,7 @@ pub fn Instances(comptime T: type) type {
             const name = instanceName(base, ordinal, &name_buf) orelse return null;
             self.slots.ensureUnusedCapacity(allocator, 1) catch return null;
             const slot = allocator.create(Slot) catch return null;
-            runStr("buffer-create", name);
+            runStr("buffer.create", name);
             self.opens += 1;
             slot.* = .{
                 .name_buf = undefined,
@@ -1631,6 +1743,12 @@ pub fn pickAdd(text: []const u8, doc: []const u8) void {
 /// whatever took its slot.
 pub fn pickAddBuffer(text: []const u8, doc: []const u8, i: usize) void {
     e.wl_pick_add_buffer(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len), @intCast(i));
+}
+/// Add one item whose public KEY is not its text: a command row a person
+/// reads by its label and an annotator looks up by its id. The accept still
+/// reads the candidate by its add order (`PickCandidate.index`).
+pub fn pickAddKeyed(text: []const u8, doc: []const u8, key: []const u8) void {
+    e.wl_pick_add_keyed(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len), p(key.ptr), @intCast(key.len));
 }
 /// Open the accumulated pick.
 pub fn pickEnd() void {
@@ -2009,7 +2127,7 @@ pub fn designationOpener(kind: []const u8, command: []const u8) bool {
 
 /// Open a designation — or an absolute path — through the ordinary `open`.
 pub fn openDesignation(target: []const u8) void {
-    runStr("open", target);
+    runStr("file.open", target);
 }
 
 /// Open a name as a person typed it — a designation, an absolute path, a
@@ -2019,7 +2137,7 @@ pub fn openDesignation(target: []const u8) void {
 /// directory itself: a second resolver is a second set of rules (`..`,
 /// `host:path`, a place with no local directory) to drift from the first.
 pub fn openTyped(name: []const u8) void {
-    runStr("open", name);
+    runStr("file.open", name);
 }
 
 /// The designation of a projection that is ABOUT a place — a status, a
@@ -2153,10 +2271,10 @@ pub fn clipboardHoldsRegister(clip: []const u8, own: []const u8, linewise: bool)
 // ── History: the jumplist and macros ──────────────────────────────────
 // Core keeps a per-head jumplist and macro registers; the grammar decides what
 // is a jump and which keys record. Travel and replay are commands:
-// `run("jump-back")`, `runStr("jump-forward", "3")`, `run("jumplist-pick")`,
-// `runStr("macro-record-start", "a")`, `run("macro-record-stop")`,
-// `run("macro-record-toggle")` (register `@`), `runStr2("macro-play", "a",
-// "3")`, `run("macro-play")` (the last one played or recorded).
+// `run("jump.back")`, `runStr("jump.forward", "3")`, `run("jump.pick")`,
+// `runStr("macro.record-start", "a")`, `run("macro.record-stop")`,
+// `run("macro.record-toggle")` (register `@`), `runStr2("macro.play", "a",
+// "3")`, `run("macro.play")` (the last one played or recorded).
 
 /// Remember the caret as a jump (before a search, a goto, a big motion).
 /// Moving between entries is recorded by core already.

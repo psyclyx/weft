@@ -6,17 +6,17 @@
 //!   - `on_context_changed`: counts deliveries and keeps the moved keys. A
 //!     toolbar would re-read its offers and redraw here; the count is what
 //!     proves the event fires once per change and never on a quiet frame.
-//!   - `ow-fired`: that count, as the command's integer result.
-//!   - `ow-keys`: the last delivery's moved keys, comma-joined.
-//!   - `ow-context-set <key> <value> <scope>` / `ow-context-get <key>`:
+//!   - `ow.fired`: that count, as the command's integer result.
+//!   - `ow.keys`: the last delivery's moved keys, comma-joined.
+//!   - `ow.context-set <key> <value> <scope>` / `ow.context-get <key>`:
 //!     `wl_context_set` ("ok", "held", "refused") and `wl_context_get` (the
 //!     value, or "<unset>").
-//!   - `ow-list <where>`: `wl_offers_list` for context `where` (0 active, 1
+//!   - `ow.list <where>`: `wl_offers_list` for context `where` (0 active, 1
 //!     primary), one `intention|provider|availability|reason|label|group|order`
 //!     line per offer, as the command's string result.
-//!   - `ow-invoke <where> <intention>`: `wl_intent_invoke_at` — "invoked",
+//!   - `ow.invoke <where> <intention>`: `wl_intent_invoke_at` — "invoked",
 //!     "unknown", or the refusal text.
-//!   - `ow-provide`: provides `plugin.offerwatch.probe` and labels it through
+//!   - `ow.provide`: provides `plugin.offerwatch.probe` and labels it through
 //!     `wl_provide_affordance`, so the presentation override is observable.
 //!
 //! No permissions: reading offers and invoking one through the effect door
@@ -137,7 +137,7 @@ fn invoke() void {
 fn probe() void {}
 
 fn provideProbe() void {
-    weft.provide("plugin.offerwatch.probe", .{ .all = &.{} }, "ow-probe", 0);
+    weft.provide("plugin.offerwatch.probe", .{ .all = &.{} }, "offerwatch.probe", 0);
     weft.setResultInt(@intCast(weft.provideAffordance("plugin.offerwatch.probe", .{
         .label = "Probe",
         .group = "watch",
@@ -146,19 +146,19 @@ fn provideProbe() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "ow-fired", .arity = .one, .call = firedCount },
-    .{ .name = "ow-keys", .arity = .one, .call = lastKeys },
-    .{ .name = "ow-context-set", .arity = .one, .call = contextSet },
-    .{ .name = "ow-context-get", .arity = .one, .call = contextGet },
-    .{ .name = "ow-context-set-at", .arity = .one, .call = contextSetAt },
-    .{ .name = "ow-designation", .arity = .one, .call = designation },
-    .{ .name = "ow-designate", .arity = .one, .call = designate },
-    .{ .name = "ow-create", .arity = .one, .call = create },
-    .{ .name = "ow-claim", .arity = .one, .call = claim },
-    .{ .name = "ow-list", .arity = .one, .call = list },
-    .{ .name = "ow-invoke", .arity = .one, .call = invoke },
-    .{ .name = "ow-probe", .arity = .one, .call = probe },
-    .{ .name = "ow-provide", .arity = .one, .call = provideProbe },
+    .{ .name = "offerwatch.fired", .arity = .one, .call = firedCount, .summary = "Exercise the ow.fired fixture command.", .internal = true },
+    .{ .name = "offerwatch.keys", .arity = .one, .call = lastKeys, .summary = "Exercise the ow.keys fixture command.", .internal = true },
+    .{ .name = "offerwatch.context-set", .arity = .one, .call = contextSet, .summary = "Exercise the ow.context-set fixture command.", .internal = true },
+    .{ .name = "offerwatch.context-get", .arity = .one, .call = contextGet, .summary = "Exercise the ow.context-get fixture command.", .internal = true },
+    .{ .name = "offerwatch.context-set-at", .arity = .one, .call = contextSetAt, .summary = "Exercise the ow.context-set-at fixture command.", .internal = true },
+    .{ .name = "offerwatch.designation", .arity = .one, .call = designation, .summary = "Exercise the ow.designation fixture command.", .internal = true },
+    .{ .name = "offerwatch.designate", .arity = .one, .call = designate, .summary = "Exercise the ow.designate fixture command.", .internal = true },
+    .{ .name = "offerwatch.create", .arity = .one, .call = create, .summary = "Exercise the ow.create fixture command.", .internal = true },
+    .{ .name = "offerwatch.claim", .arity = .one, .call = claim, .summary = "Exercise the ow.claim fixture command.", .internal = true },
+    .{ .name = "offerwatch.list", .arity = .one, .call = list, .summary = "Exercise the ow.list fixture command.", .internal = true },
+    .{ .name = "offerwatch.invoke", .arity = .one, .call = invoke, .summary = "Exercise the ow.invoke fixture command.", .internal = true },
+    .{ .name = "offerwatch.probe", .arity = .one, .call = probe, .summary = "Exercise the ow.probe fixture command.", .internal = true },
+    .{ .name = "offerwatch.provide", .arity = .one, .call = provideProbe, .summary = "Exercise the ow.provide fixture command.", .internal = true },
 };
 
 comptime {

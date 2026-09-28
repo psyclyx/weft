@@ -8,7 +8,7 @@
 weft.viewport("sidebar", {
   edge: "left",
   extent: 0.25,
-  // Out of `focus-other`'s rotation: you reach it deliberately, never by
+  // Out of `window.focus-next`'s rotation: you reach it deliberately, never by
   // cycling past it.
   cycles: false,
   // It owns its entry — an open that lands elsewhere never drags it off its

@@ -9,21 +9,21 @@ const weft = @import("weft");
 var id_dup_up: u32 = 0;
 
 fn describe() callconv(.c) void {
-    weft.declareCommand("dup-up");
+    weft.declareCommand("demo-config.dup-up");
 }
 
 fn init() callconv(.c) void {
-    id_dup_up = weft.register("dup-up");
+    id_dup_up = weft.register("demo-config.dup-up");
     // Wire a key, as a config would (late-bound: the target resolves at press).
-    weft.bindKey("default", "C-d", "dup-up");
+    weft.bindKey("default", "C-d", "demo-config.dup-up");
 }
 
 fn on_command(id: u32) callconv(.c) void {
     _ = id;
     // Compose two other commands through the registry — the config-as-glue
     // pattern. Each authors as its own plugin peer, grade-gated.
-    weft.run("duplicate-line");
-    weft.run("upcase-line");
+    weft.run("edit.duplicate-line");
+    weft.run("edit.upcase-line");
 }
 
 comptime {

@@ -47,6 +47,36 @@ pub const Authority = union(enum) {
 
 pub const scheme = "weft://";
 
+/// Whether `id` may name a shell locus. A shell id is what ssh is handed as
+/// its destination, so it must be nothing ssh could read as an option or as
+/// anything but a host: `host`, `user@host`, `host:port`, `user@host:port`,
+/// each word over `[A-Za-z0-9._-]`, none empty or starting with `-`, a port
+/// all digits. Every reader that turns text into a shell host — this grammar
+/// and `open`'s scp form — asks here, so `-oProxyCommand=…` has no spelling
+/// that parses.
+pub fn validShellHost(id: []const u8) bool {
+    const at = std.mem.indexOfScalar(u8, id, '@');
+    if (at) |i| if (!validHostWord(id[0..i])) return false;
+    const rest = if (at) |i| id[i + 1 ..] else id;
+    const colon = std.mem.indexOfScalar(u8, rest, ':');
+    if (!validHostWord(if (colon) |c| rest[0..c] else rest)) return false;
+    if (colon) |c| {
+        const port = rest[c + 1 ..];
+        if (port.len == 0 or port.len > 5) return false;
+        for (port) |ch| if (!std.ascii.isDigit(ch)) return false;
+    }
+    return true;
+}
+
+fn validHostWord(word: []const u8) bool {
+    if (word.len == 0 or word[0] == '-') return false;
+    for (word) |ch| switch (ch) {
+        'A'...'Z', 'a'...'z', '0'...'9', '.', '_', '-' => {},
+        else => return false,
+    };
+    return true;
+}
+
 /// What a designation designates. The four named kinds are the grammar's own
 /// and mean the same thing to every reader; a `projection` kind belongs to the
 /// producer that registered it (`git.status`, `grep`, `offers`) and means
@@ -398,7 +428,7 @@ fn parseAuthority(text: []const u8) ?Authority {
     if (std.mem.eql(u8, text, "here")) return .here;
     if (std.mem.startsWith(u8, text, "shell:")) {
         const id = text["shell:".len..];
-        return if (id.len == 0) null else .{ .shell = id };
+        return if (validShellHost(id)) .{ .shell = id } else null;
     }
     return .{ .peer = text };
 }
@@ -577,6 +607,15 @@ test "a malformed designation is not a designation" {
     try t.expect(parse("weft:///file/x") == null);
     try t.expect(parse("weft://here//x") == null);
     try t.expect(parse("weft://shell:/file/x") == null);
+    // A shell authority is what ssh is handed: nothing it reads as an option.
+    try t.expect(parse("weft://shell:-oProxyCommand=x/file/x") == null);
+    try t.expect(parse("weft://shell:me@-oProxyCommand=x/file/x") == null);
+    try t.expect(parse("weft://shell:-me@box/file/x") == null);
+    try t.expect(parse("weft://shell:box;touch/file/x") == null);
+    try t.expect(parse("weft://shell:box:x/file/x") == null);
+    try t.expect(parse("weft://shell:@box/file/x") == null);
+    try t.expect(parse("weft://shell:me@box:2222/file/x").?.authority.eql(.{ .shell = "me@box:2222" }));
+    try t.expect(parse("weft://shell:build-01.lan/file/x") != null);
     try t.expect(parse("weft://here/proc/") == null);
     try t.expect(parse("weft://here/git.status/") == null);
 }

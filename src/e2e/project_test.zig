@@ -69,13 +69,13 @@ fn pairBodyChanged(before: []const u8, after: []const u8, right: bool) bool {
 // entry and that every entry loaded successfully, including the resident
 // `dap.js` plugin through the same QuickJS reactor used by the desktop app.
 const shipped_config_plugins = [_][]const u8{
-    "edit",     "complete",    "project",     "structural", "region",       "shell",     "palette",
-    "motions",  "textobjects", "operators",   "surround",   "vim",          "ts",        "comment",
-    "indent",   "whitespace",  "numbers",     "autopair",   "consult",      "git",       "grep",
-    "run",      "make",        "notes",       "fmt",        "buffers",      "windows",   "modes",
-    "snippets", "direnv",      "llm",         "console",    "repl",         "net",       "which_key",
-    "files",    "lsp",         "debug",       "dap.js",     "languages.js", "dashboard", "panel",
-    "problems", "terminal",    "breadcrumbs",
+    "edit",     "complete",    "project",   "structural",   "region",    "shell",     "palette",
+    "motions",  "textobjects", "operators", "surround",     "vim",       "ts",        "comment",
+    "indent",   "whitespace",  "numbers",   "autopair",     "consult",   "git",       "grep",
+    "run",      "make",        "notes",     "fmt",          "buffers",   "modes",     "snippets",
+    "direnv",   "llm",         "console",   "repl",         "net",       "which_key", "files",
+    "lsp",      "debug",       "dap.js",    "languages.js", "dashboard", "panel",     "problems",
+    "terminal", "breadcrumbs",
 };
 
 fn assertShippedConfigLoaded(loader: *const ConfigLoader) !void {
@@ -149,11 +149,11 @@ test "e2e/project: weft `save` writes the buffer to disk" {
     try loadWorkspace(&ed);
 
     // The natural way: open the path, type code, save.
-    ed.runStr("open", path); // new file → adopts the path
+    ed.runStr("file.open", path); // new file → adopts the path
     ed.press("i", "");
     ed.typeText("const x = 41;\n");
     ed.press("Escape", "");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave(); // drive the async save to completion, deterministically
 
     const on_disk = try core.file.readAlloc(gpa, path);
@@ -179,9 +179,9 @@ test "e2e/project: opening the saved file recognizes its language" {
     // (task #19 item 4 — `on_activate` is BACKGROUND, `wl_echo` is head-
     // gated; see src/plugins/modes/root.zig's doc). Assert the structural
     // guarantee instead: neither open lands language text on the echo line.
-    ed.runStr("open", zig_path);
+    ed.runStr("file.open", zig_path);
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "zig") == null);
-    ed.runStr("open", js_path); // switching buffers re-fires on_activate
+    ed.runStr("file.open", js_path); // switching buffers re-fires on_activate
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "javascript") == null);
 }
 
@@ -194,7 +194,7 @@ test "e2e/regression: switching from a semantic view edits the new text buffer" 
 
     try core.file.writeBytesMakingDirs(gpa, app.proj.root, "semantic.txt", "field draft\n");
     try core.file.writeBytesMakingDirs(gpa, app.proj.root, "plain.txt", "");
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     const listing_id = ed.buffers.active_id;
     const listing = ed.buffers.get(listing_id) orelse return error.NoListing;
     try t.expect(listing.editor == null);
@@ -206,7 +206,7 @@ test "e2e/regression: switching from a semantic view edits the new text buffer" 
     // typing must reach THIS buffer, not the row the listing left focused —
     // the listing's rows are editable, so "which thing is my typing about" is
     // answered by which ENTRY is active, and by nothing else.
-    ed.runStr("open", "plain.txt");
+    ed.runStr("file.open", "plain.txt");
     ed.press("i", "");
     ed.typeText("typed through text buffer");
     const text = try ed.textAlloc();
@@ -225,23 +225,25 @@ test "e2e/dashboard: configured candidate section is a semantic view, not docume
     try Editor.init(gpa, &ed);
     defer ed.deinit();
     try loadVim(&ed);
-    try ed.setConfig("dashboard", "sections", "recent\tLatest\tproject-recent\topen\t1");
+    try ed.setConfig("dashboard", "sections", "recent\tLatest\tproject.recent\tfile.open\t1");
     try ed.load("project", @embedFile("guest_project_wasm"));
     try ed.load("dashboard", @embedFile("guest_dashboard_wasm"));
+    // The dashboard's "Open file" is the files plugin's one file picker.
+    try ed.load("files", @embedFile("guest_files_wasm"));
 
-    ed.runStr("open", "README.md");
+    ed.runStr("file.open", "README.md");
     const base_origin = ed.render.fb.view.origin_x;
-    ed.run("dashboard");
+    ed.run("dashboard.open");
 
     try t.expectEqualStrings("*dashboard*", ed.bufferName());
     // Dashboard has a local mode so it can own j/k/Return/o/n/q, but it is
     // not an input island: unclaimed workspace chords inherit from normal.
-    try t.expectEqualStrings("vim-find-file", ed.keymap.lookup("dashboard", "space f f").?);
-    try t.expectEqualStrings("dashboard-open-file", ed.keymap.lookup("dashboard", "o").?);
+    try t.expectEqualStrings("files.find", ed.keymap.lookup("dashboard", "space f f").?);
+    try t.expectEqualStrings("files.find", ed.keymap.lookup("dashboard", "o").?);
     ed.chord("SPC f f");
     try t.expect(ed.pick.active);
     try t.expectEqualStrings("pick", ed.head.currentMode());
-    ed.run("pick-cancel");
+    ed.run("pick.cancel");
     try t.expectEqualStrings("dashboard", ed.head.currentMode());
     // Vim's old leader/window wrappers and capture exits must not smuggle
     // their historical `normal` return target into a tool that inherits them.
@@ -304,12 +306,12 @@ test "e2e/project: git push/pull/fetch transients are sticky menus" {
 
     // And the generated verbs are real, findable commands — the toggle named
     // for its FLAG, the action named for what it does.
-    try t.expect(ed.commands.find("git-push-toggle-force-with-lease") != null);
-    try t.expect(ed.commands.find("git-push-do") != null);
-    try t.expect(ed.commands.find("git-push-cancel") != null);
+    try t.expect(ed.commands.find("git.push-toggle-force-with-lease") != null);
+    try t.expect(ed.commands.find("git.push-do") != null);
+    try t.expect(ed.commands.find("git.push-cancel") != null);
 }
 
-// Task #21: `git-rebase-interactive` re-sets `git-rebase-menu` when a rebase
+// Task #21: `git.rebase-interactive` re-sets `git-rebase-menu` when a rebase
 // is already mid-flight, MEANING to keep the transient open (`c`/`a`/`s` are
 // what the user needs next). Before the fix that re-set was undone by
 // dispatch.zig's leaf auto-pop: a leaf that leaves the mode UNCHANGED in a
@@ -357,7 +359,7 @@ test "e2e/project: git-rebase-interactive keeps git-rebase-menu open on a real c
     }
 
     // ── Open git on the now-conflicted repo. ──
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "Branch:"));
     try t.expectEqualStrings("git", ed.mode());
 
@@ -367,7 +369,7 @@ test "e2e/project: git-rebase-interactive keeps git-rebase-menu open on a real c
     try t.expectEqualStrings("git-rebase-menu", ed.mode());
     try t.expectEqual(@as(usize, 1), ed.head.transient_stack.items.len);
 
-    ed.press("i", ""); // git-rebase-interactive: rebase in progress -> re-set, sticky holds it open
+    ed.press("i", ""); // git.rebase-interactive: rebase in progress -> re-set, sticky holds it open
     try t.expectEqualStrings("git-rebase-menu", ed.mode());
     try t.expectEqual(@as(usize, 1), ed.head.transient_stack.items.len); // not grown, not popped
 
@@ -376,7 +378,7 @@ test "e2e/project: git-rebase-interactive keeps git-rebase-menu open on a real c
     // Seq's `;`-sequenced re-gather always leaves via `weft.setMode("git")`,
     // a DIFFERENT mode than git-rebase-menu, so it closes regardless of
     // stickiness. ──
-    ed.press("c", ""); // git-rebase-continue
+    ed.press("c", ""); // git.rebase-continue
     try t.expectEqualStrings("git", ed.mode());
     try t.expect(!ed.head.hasOpenTransients());
     // Drain `c`'s async `git rebase --continue` (it fails fast — conflict
@@ -400,7 +402,7 @@ test "e2e/project: git-rebase-interactive keeps git-rebase-menu open on a real c
     // buffer already contains a stale "Branch:" from the `c` step's
     // re-gather, so a text-containment check would pass before the abort's
     // OWN re-gather actually lands). ──
-    ed.press("a", ""); // git-rebase-abort
+    ed.press("a", ""); // git.rebase-abort
     try t.expectEqualStrings("git", ed.mode());
     try t.expect(!ed.head.hasOpenTransients());
     try t.expect(drainUntilOracle(&proj, &ed, "test -d .git/rebase-merge && echo yes || echo no", "no"));
@@ -480,18 +482,18 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // scratch buffer keeps its id when it is opened in place).
     try core.file.writeBytesMakingDirs(gpa, proj.root, "helper.lua", "");
     try core.file.writeBytesMakingDirs(gpa, proj.root, "main.zig", "");
-    ed.runStr("open", "helper.lua");
-    ed.runStr("open", "main.zig");
-    mirror.runStr("open", "helper.lua");
-    mirror.runStr("open", "main.zig");
+    ed.runStr("file.open", "helper.lua");
+    ed.runStr("file.open", "main.zig");
+    mirror.runStr("file.open", "helper.lua");
+    mirror.runStr("file.open", "main.zig");
     // Establish the visual baseline before transport/authentication. Recording
     // mode rests here; the ordinary scenario only captures the same real UI.
     proj.capture(&ed, "spine-collaboration-disconnected");
     // Keep that baseline's useful config-loaded echo, then clear it through
     // the ordinary action so the connection chip remains visible while the
     // shared file later becomes dirty.
-    ed.runStr("echo", "");
-    mirror.runStr("echo", "");
+    ed.runStr("app.echo", "");
+    mirror.runStr("app.echo", "");
     try Loopback.init(&link, gpa, &ed, &mirror, "alice", "bob");
     have_link = true;
     collab_clock = .{ .link = &link };
@@ -616,7 +618,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     try t.expect(pairBodyChanged(bob_moved, alice_moved, true));
     proj.capture(&ed, "spine-cursor-alice-moved");
     proj.rest();
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
 
     // CONTENT is verified on disk (the artifact a human checks), not via the
@@ -648,12 +650,12 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // Project search and run output are ordinary config/plugin surfaces. A
     // result is visited through Return, then a location-shaped run message is
     // likewise navigable without knowing the producer's implementation.
-    ed.runStr("grep", "pub fn main");
+    ed.runStr("grep.search", "pub fn main");
     try t.expect(drainToolContains(&ed, "*grep*", "main.zig"));
     proj.capture(&ed, "spine-grep-results");
     ed.press("Return", "");
     try t.expect(!std.mem.eql(u8, ed.mode(), "grep"));
-    ed.runStr("run-command", "printf 'main.zig:1: run ok\\n'");
+    ed.runStr("run.command", "printf 'main.zig:1: run ok\\n'");
     try t.expect(drainToolContains(&ed, "*output*", "main.zig:1"));
     proj.capture(&ed, "spine-run-output");
     ed.press("Return", "");
@@ -681,7 +683,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // layout action, and autopair is an insert-mode editing provider. These
     // are ordinary config binds, not direct command/keymap calls.
     ed.press("F1", "");
-    try t.expect(h.surfaceHasText(&ed, "repeat-change"));
+    try t.expect(h.surfaceHasText(&ed, "Repeat Last Change")); // by label, not id
     proj.capture(&ed, "spine-which-key");
     ed.press("Escape", "");
     ed.chord("SPC w v");
@@ -691,7 +693,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.chord("SPC w o");
     ed.applyWindow();
     try t.expectEqual(@as(usize, 1), ed.paneCount());
-    ed.run("buf-scratch");
+    ed.run("buffer.scratch");
     ed.press("i", "");
     ed.press("parenleft", "(");
     ed.typeText("autopair");
@@ -704,11 +706,11 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
 
     // The smaller composable plugins get real effects too; being
     // present in the config manifest is not behavioral coverage.
-    ed.run("duplicate-line");
-    ed.run("upcase-line");
-    ed.runStr("mark-region", "text");
+    ed.run("edit.duplicate-line");
+    ed.run("edit.upcase-line");
+    ed.runStr("region.mark", "text");
     try t.expect(ed.subs.list.items.len > 0);
-    ed.runStr("insert-shell", "printf shell-plugin");
+    ed.runStr("shell.insert-output", "printf shell-plugin");
     try t.expect(drainBufferContains(&ed, "shell-plugin"));
     ed.press("o", "");
     ed.typeText("41");
@@ -721,7 +723,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         try t.expect(std.mem.indexOf(u8, numbered, "42") != null);
     }
     try core.file.writeBytesMakingDirs(gpa, proj.root, "weft-snippets.txt", "demo\tSNIPPET\\nBODY\n");
-    ed.runStr("snippets-expand", "demo");
+    ed.runStr("snippets.expand", "demo");
     {
         const expanded = try ed.textAlloc();
         defer gpa.free(expanded);
@@ -738,10 +740,10 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // Every operation enters through a shipped key/action. Captures happen
     // while a surface or visible decoration is live, so the demo and test
     // cannot silently exercise behavior that never reaches the editor.
-    ed.runStr("open", "main.zig");
+    ed.runStr("file.open", "main.zig");
     const main_syntax = language_support.attachedSyntax(&ed) orelse return error.SyntaxDidNotAttach;
     try t.expect(language_support.waitForTree(&ed, main_syntax));
-    const node_kind = try core.command.run(ed.commands, ed.ctx, "node-kind", &.{});
+    const node_kind = try core.command.run(ed.commands, ed.ctx, "ts.node-kind", &.{});
     try t.expect(node_kind == .string and node_kind.string.len > 0);
     ed.chord("SPC p R");
     try t.expect(ed.echoText().len > 0);
@@ -781,46 +783,46 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.chord("SPC c b");
     ed.settle(20);
     proj.capture(&ed, "spine-make-build");
-    ed.runStr("open", "main.zig");
+    ed.runStr("file.open", "main.zig");
     ed.chord("SPC c t");
     ed.settle(20);
     proj.capture(&ed, "spine-make-test");
-    ed.runStr("open", "main.zig");
+    ed.runStr("file.open", "main.zig");
     ed.chord("SPC n n");
     proj.capture(&ed, "spine-notes");
-    ed.runStr("open", "main.zig");
+    ed.runStr("file.open", "main.zig");
     ed.chord("SPC o e");
     ed.settle(12);
     proj.capture(&ed, "spine-direnv");
-    ed.runStr("open", "main.zig");
+    ed.runStr("file.open", "main.zig");
     ed.chord("SPC o c");
     ed.press("i", "");
     ed.typeText("printf console-ok");
     ed.press("Escape", "");
-    ed.run("console-send");
+    ed.run("console.send");
     try t.expect(drainToolContains(&ed, "*console*", "console-ok"));
     proj.capture(&ed, "spine-console");
-    ed.runStr("open", "main.zig");
+    ed.runStr("file.open", "main.zig");
     ed.chord("SPC o r");
-    ed.runStr("repl-send", "printf 'repl-ok\\n'\n");
+    ed.runStr("repl.send", "printf 'repl-ok\\n'\n");
     try t.expect(drainToolContains(&ed, "*repl*", "repl-ok"));
     proj.capture(&ed, "spine-repl");
-    ed.run("repl-quit");
-    ed.runStr("open", "main.zig");
-    ed.runStr("net-open", "127.0.0.1:1");
+    ed.run("repl.quit");
+    ed.runStr("file.open", "main.zig");
+    ed.runStr("net.open", "127.0.0.1:1");
     ed.settle(12);
     proj.capture(&ed, "spine-net-local-failure");
-    ed.run("net-close");
-    ed.runStr("open", "main.zig");
+    ed.run("net.close");
+    ed.runStr("file.open", "main.zig");
 
     // The minimal agent adapter is exercised with a hermetic CLI selected
     // through its ordinary plugin config. This drives its real fs-write + proc
     // path and produces the same *llm* tool buffer as a user's `llm` binary.
     try ed.setConfig("llm", "cmd", "sed 's/^/assistant: /'");
-    ed.runStr("llm-ask", "demo prompt");
+    ed.runStr("llm.ask", "demo prompt");
     try t.expect(drainToolContains(&ed, "*llm*", "assistant: demo prompt"));
     proj.capture(&ed, "spine-llm-agent");
-    ed.runStr("open", "main.zig");
+    ed.runStr("file.open", "main.zig");
 
     // Coverage map for the shipped plugins. Concrete interactions above and
     // below cover the ordinary editing stack, syntax/LSP, pickers, project,
@@ -842,7 +844,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // Open the directory through the generic target handler. The scene is a
     // retained structured view (not a files text buffer), and ordinary j/k
     // navigation is supplied by the Vim plugin over the generic focus path.
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     const directory_view = ed.toolView().?;
     const directory_scene = ed.session.system.semantic.views.get(directory_view).?.scene;
     try t.expectEqualStrings("files", directory_scene.role);
@@ -871,7 +873,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // same generic target/field/action vocabulary a larger project uses.
     _ = try proj.oracle("mkdir -p rename-dir");
     try core.file.writeBytesMakingDirs(gpa, proj.root, "rename-dir/old.txt", "rename me\n");
-    ed.runStr("open", "rename-dir");
+    ed.runStr("file.open", "rename-dir");
     ed.press("i", "");
     for (0..7) |_| ed.press("Delete", "");
     ed.typeText("new.txt");
@@ -891,13 +893,9 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.typeText("new.txt");
     ed.press("Escape", "");
     proj.capture(&ed, "spine-files-rename-plan");
+    // One name typed applies as typed: no dialog to answer.
     ed.chord("SPC v a");
-    try t.expect(ed.head.interactions.active() != null);
-    ed.press("n", "n"); // cancel leaves the retained plan and dialog closed
     try t.expect(ed.head.interactions.active() == null);
-    try t.expectEqual(core.file.Kind.file, core.file.statKind(gpa, "rename-dir/old.txt"));
-    ed.chord("SPC v a");
-    ed.press("y", "y");
     try t.expect(drainUntilOracle(&proj, &ed, "test -f rename-dir/new.txt && test ! -e rename-dir/old.txt && printf ok", "ok"));
 
     // Empty directory creation and permissions are independent generic
@@ -906,7 +904,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     _ = try proj.oracle("mkdir -p create-dir");
     try core.file.writeBytesMakingDirs(gpa, proj.root, "create-dir/.seed", "");
     core.file.deleteFile(gpa, "create-dir/.seed");
-    ed.runStr("open", "create-dir");
+    ed.runStr("file.open", "create-dir");
     const create_view = ed.toolView().?;
     try t.expectEqual(@as(usize, 0), ed.session.system.semantic.views.get(create_view).?.scene.content.container.children.len);
     ed.chord("SPC v n");
@@ -936,7 +934,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     try core.file.writeBytesMakingDirs(gpa, proj.root, "copy-source/source.txt", "copied content\n");
     try core.file.writeBytesMakingDirs(gpa, proj.root, "copy-destination/.seed", "");
     core.file.deleteFile(gpa, "copy-destination/.seed");
-    ed.runStr("open", "copy-source");
+    ed.runStr("file.open", "copy-source");
     try spineFocusFilesName(&ed, gpa, "source.txt");
     ed.press("quotedbl", "");
     ed.press("a", "");
@@ -952,7 +950,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     };
     try t.expect(saw_retained_delete);
     proj.capture(&ed, "spine-files-retained-delete");
-    ed.runStr("open", "copy-destination");
+    ed.runStr("file.open", "copy-destination");
     ed.press("quotedbl", "");
     ed.press("a", "");
     ed.press("p", "");
@@ -962,7 +960,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     const copied = try core.file.readAlloc(gpa, "copy-destination/source.txt");
     defer gpa.free(copied);
     try t.expectEqualStrings("copied content\n", copied);
-    ed.runStr("open", "copy-source");
+    ed.runStr("file.open", "copy-source");
     ed.chord("SPC v a");
     ed.press("y", "y");
     try t.expectEqual(core.file.Kind.none, core.file.statKind(gpa, "copy-source/source.txt"));
@@ -972,7 +970,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     _ = try proj.oracle("mkdir -p refresh-dir");
     try core.file.writeBytesMakingDirs(gpa, proj.root, "refresh-dir/a-dirty.txt", "dirty\n");
     try core.file.writeBytesMakingDirs(gpa, proj.root, "refresh-dir/z-clean.txt", "clean\n");
-    ed.runStr("open", "refresh-dir");
+    ed.runStr("file.open", "refresh-dir");
     try spineFocusFilesName(&ed, gpa, "a-dirty.txt");
     ed.press("i", "");
     for (0.."a-dirty.txt".len) |_| ed.press("Delete", "");
@@ -998,15 +996,15 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     }
     try t.expect(saw_stale_draft);
 
-    // ── 1.5. git-status BEFORE a repo exists says so — and points the way. ──
+    // ── 1.5. git.status BEFORE a repo exists says so — and points the way. ──
     // The project is a real isolated tmp dir with no git ancestor, so this is a
     // genuine clean slate (git used to render a fake `Branch: (no branch)`).
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "Not a git repository."));
-    try t.expect(drainToolContains(&ed, "*git*", "git-init")); // and it names the fix
+    try t.expect(drainToolContains(&ed, "*git*", "git.init")); // and it names the fix
 
-    // ── 2. Start version control from INSIDE the editor (the new git-init). ──
-    ed.run("git-init");
+    // ── 2. Start version control from INSIDE the editor (the new git.init). ──
+    ed.run("git.init");
     // Prove git ACTUALLY ran and the repo now renders a real branch: wait for the
     // `git status` output to list the untracked file + the `Branch:` header in
     // *git*. Then confirm the repo on disk via the git oracle.
@@ -1029,10 +1027,10 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     }
 
     // ── 4. Stage everything with the git key `S`, then commit with `c c`. ──
-    // We're in the *git* buffer (git-init focused it), so these are real
+    // We're in the *git* buffer (git.init focused it), so these are real
     // git keypresses, not command invocations.
     try t.expectEqualStrings("git", ed.mode());
-    ed.press("S", ""); // git-stage-all → git add -A → re-gather (async)
+    ed.press("S", ""); // git.stage-all → git add -A → re-gather (async)
     // Disk oracle, drained: the file becomes staged once the async `git add`
     // the keypress scheduled actually runs.
     try t.expect(drainUntilOracle(&proj, &ed, "git diff --cached --name-only", "main.zig"));
@@ -1042,7 +1040,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // an ordinary entry in the configuration's own editing modes, not a mode git
     // owns. So the message is typed the way any other text is.
     ed.press("c", ""); // git-commit-dispatch (menu)
-    ed.press("c", ""); // git-commit → a *git-commit* draft entry
+    ed.press("c", ""); // git.commit → a *git-commit* draft entry
     try t.expectEqualStrings("*git-commit*", ed.bufferName());
     try t.expectEqualStrings("normal", ed.mode());
     ed.press("i", "");
@@ -1058,7 +1056,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.press("colon", ""); // the ex line
     ed.typeText("w");
     ed.press("Return", "");
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainUntilOracle(&proj, &ed, "git log --oneline", "initial commit"));
     proj.capture(&ed, "spine-3-committed");
 
@@ -1104,7 +1102,7 @@ test "e2e/grep: Return on a result jumps to that file at that line" {
 
     // Search for a token that lives on exactly one line of one file, so the
     // result list has a single unambiguous entry.
-    ed.runStr("grep", "target");
+    ed.runStr("grep.search", "target");
     try t.expect(drainToolContains(&ed, "*grep*", "app.js:2:"));
     try t.expectEqualStrings("grep", ed.mode()); // the results list is its own mode
 
@@ -1117,7 +1115,7 @@ test "e2e/grep: Return on a result jumps to that file at that line" {
     ed.press("Return", "");
     try t.expectEqualStrings("normal", ed.mode()); // we're editing the file now
     ed.chord("d d");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
 
     const disk = try core.file.readAlloc(gpa, "app.js");
@@ -1146,7 +1144,7 @@ test "e2e/output: Return on a `file:line` in run output jumps there" {
 
     // Run a command whose output carries a location MID-line (like a stack frame
     // or compiler note — "trace: app.js:2:5 …"), not at the start as grep does.
-    ed.runStr("run-command", "echo 'trace: app.js:2:5 boom'");
+    ed.runStr("run.command", "echo 'trace: app.js:2:5 boom'");
     try t.expect(drainToolContains(&ed, "*output*", "app.js:2:5"));
 
     // Return jumps to app.js line 2; deleting the line proves we landed there.
@@ -1154,7 +1152,7 @@ test "e2e/output: Return on a `file:line` in run output jumps there" {
     ed.press("Return", "");
     try t.expectEqualStrings("normal", ed.mode());
     ed.chord("d d");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
 
     const disk = try core.file.readAlloc(gpa, "app.js");
@@ -1189,7 +1187,7 @@ test "e2e/grep: a pattern containing a quote is searched for, not interpreted" {
         gpa.free(r2);
     }
 
-    ed.runStr("grep", "don't");
+    ed.runStr("grep.search", "don't");
     try t.expect(drainToolContains(&ed, "*grep*", "quoted.txt"));
 
     // The match is really the line with the apostrophe in it — not a partial
@@ -1225,14 +1223,14 @@ test "e2e/output: a fill lands on the first row that goes somewhere, and Return 
     }
 
     // Two preamble lines that name no location, then the one that does.
-    ed.runStr("run-command", "printf 'building...\\nlinking...\\ntrace: app.js:2:5 boom\\n'");
+    ed.runStr("run.command", "printf 'building...\\nlinking...\\ntrace: app.js:2:5 boom\\n'");
     try t.expect(drainToolContains(&ed, "*output*", "app.js:2:5"));
 
     // No navigation at all — Return straight away.
     ed.press("Return", "");
     try t.expectEqualStrings("normal", ed.mode());
     ed.chord("d d");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
 
     const disk = try core.file.readAlloc(gpa, "app.js");
@@ -1244,7 +1242,7 @@ test "e2e/output: a fill lands on the first row that goes somewhere, and Return 
 
 // ── Truncate-then-act: a path or a name must cross whole or not at all ──
 //
-// grep-visit and output-visit once copied the matched path into a fixed
+// grep.visit and run.visit-output once copied the matched path into a fixed
 // 1024-byte scratch before opening it, and the tool plugins compared a buffer
 // name through a 256-byte copy. Both caps are gone; these fixtures keep them
 // gone by working paths and names that overflow them.
@@ -1292,7 +1290,7 @@ test "e2e/regression: a >1024-byte match path opens the file it names, whole" {
 
     // grep's Return: rg reports the whole path, so the visit must open the
     // whole path — a truncated prefix names a directory that isn't a file.
-    ed.runStr("grep", "target");
+    ed.runStr("grep.search", "target");
     try t.expect(drainToolContains(&ed, "*grep*", "app.js:2:"));
     ed.press("k", "");
     ed.press("k", "");
@@ -1302,7 +1300,7 @@ test "e2e/regression: a >1024-byte match path opens the file it names, whole" {
     // Deleting the current line proves we landed on the match inside the real
     // file, and the disk read proves which file that was.
     ed.chord("d d");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     {
         const disk = try core.file.readAlloc(gpa, deep);
@@ -1314,14 +1312,14 @@ test "e2e/regression: a >1024-byte match path opens the file it names, whole" {
     // run's Return takes the same path out of a mid-line location.
     const trace = try std.fmt.allocPrint(gpa, "echo 'trace: {s}:2:5 boom'", .{deep});
     defer gpa.free(trace);
-    ed.runStr("run-command", trace);
+    ed.runStr("run.command", trace);
     try t.expect(drainToolContains(&ed, "*output*", "app.js:2:5"));
     ed.press("k", "");
     ed.press("Return", "");
     try t.expectEqualStrings("normal", ed.mode());
 
     ed.chord("d d");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     {
         const disk = try core.file.readAlloc(gpa, deep);
@@ -1359,7 +1357,7 @@ test "e2e/regression: a >256-byte buffer name reaches a plugin whole" {
         gpa.free(out);
     }
 
-    ed.runStr("open", file_name);
+    ed.runStr("file.open", file_name);
     const view_name = try gpa.dupe(u8, ed.bufferName());
     defer gpa.free(view_name);
     try t.expectEqualStrings(file_name, view_name);
@@ -1414,7 +1412,7 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     // ── 2. Search the project for a token that appears in BOTH files. ──
     // `grep` runs `rg` into *grep*; a person types the pattern. "weft" is in
     // app.js (greet("weft")) and index.html (<title>weft demo</title>).
-    ed.runStr("grep", "weft");
+    ed.runStr("grep.search", "weft");
     try t.expect(drainToolContains(&ed, "*grep*", "app.js"));
     {
         const hits = toolText(&ed, "*grep*") orelse return error.NoGrepBuffer;
@@ -1425,14 +1423,14 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     proj.shot(&ed, "web-1-grep");
 
     // ── 3. Run the code with node — real execution, real output. ──
-    ed.runStr("run-command", "node app.js");
+    ed.runStr("run.command", "node app.js");
     try t.expect(drainToolContains(&ed, "*output*", "hello weft"));
     proj.shot(&ed, "web-2-run");
     // ── 4. Browse the project through the provider-aware `open` command. ──
     // The directory opener presents retained objects in a workspace entry.
     // The same entry can be placed in a docked viewport.
     const prior_buffer = ed.buffers.active().id;
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "files:"));
     try t.expectEqualStrings("files", ed.buffers.active().tool);
     const listing = ed.buffers.active();
@@ -1477,17 +1475,17 @@ test "e2e/session: two REPLs evaluate independently and quitting one leaves the 
 
     // A shell read-loop is a persistent echo REPL that flushes each line.
     const echo_loop = "while read l; do echo \"$l\"; done";
-    ed.runStr("repl-start", echo_loop);
-    ed.runStr("repl-start", echo_loop);
+    ed.runStr("repl.start", echo_loop);
+    ed.runStr("repl.start", echo_loop);
     try t.expect(ed.buffers.findByName("*repl*") != null);
     try t.expect(ed.buffers.findByName("*repl:2*") != null);
 
     // Each REPL is addressed by its own buffer, and answers only there.
     try focusBuffer(&ed, "*repl*");
-    ed.runStr("repl-send", "one\n");
+    ed.runStr("repl.send", "one\n");
     try t.expect(drainToolContains(&ed, "*repl*", "one"));
     try focusBuffer(&ed, "*repl:2*");
-    ed.runStr("repl-send", "two\n");
+    ed.runStr("repl.send", "two\n");
     try t.expect(drainToolContains(&ed, "*repl:2*", "two"));
     {
         const first = toolText(&ed, "*repl*").?;
@@ -1497,9 +1495,9 @@ test "e2e/session: two REPLs evaluate independently and quitting one leaves the 
 
     // Quitting the focused REPL ends that child only.
     try focusBuffer(&ed, "*repl*");
-    ed.run("repl-quit");
+    ed.run("repl.quit");
     try focusBuffer(&ed, "*repl:2*");
-    ed.runStr("repl-send", "still\n");
+    ed.runStr("repl.send", "still\n");
     try t.expect(drainToolContains(&ed, "*repl:2*", "still"));
 }
 
@@ -1521,8 +1519,8 @@ test "e2e/session: two LLM asks in flight land in their own conversations" {
     // A hermetic adapter that answers slowly enough for the second ask to be
     // issued while the first is still running — real overlap, not a sequence.
     try ed.setConfig("llm", "cmd", "sh -c 'sleep 0.3; exec sed \"s/^/assistant: /\"'");
-    ed.runStr("llm-ask", "first prompt");
-    ed.runStr("llm-ask", "second prompt");
+    ed.runStr("llm.ask", "first prompt");
+    ed.runStr("llm.ask", "second prompt");
 
     try t.expect(drainToolContains(&ed, "*llm*", "assistant: first prompt"));
     try t.expect(drainToolContains(&ed, "*llm:2*", "assistant: second prompt"));
@@ -1543,7 +1541,7 @@ fn reformatTool(ed: *Editor, name: []const u8, body: []const u8) !void {
         if (!std.mem.eql(u8, b.name, name)) continue;
         const editor = b.textEditor().?;
         const end = editor.text().byteLen();
-        try core.command.renderInto(ed.gpa, &ed.buffers.status, &editor.doc, .plugin, "reformat", &.{
+        try core.command.renderInto(ed.gpa, &ed.buffers.notices, &editor.doc, .plugin, "reformat", &.{
             .{ .range = .{ .start = 0, .end = end }, .bytes = body },
         });
         return;
@@ -1567,7 +1565,7 @@ test "e2e/output: a row visits the location it captured, not the text it shows" 
         gpa.free(r);
     }
 
-    ed.runStr("run-command", "echo 'trace: app.js:2:5 boom'");
+    ed.runStr("run.command", "echo 'trace: app.js:2:5 boom'");
     try t.expect(drainToolContains(&ed, "*output*", "app.js:2:5"));
 
     // Reformat the row after the fill — the rendered text now names no file at
@@ -1584,7 +1582,7 @@ test "e2e/output: a row visits the location it captured, not the text it shows" 
     ed.press("Return", "");
     try t.expectEqualStrings("normal", ed.mode());
     ed.chord("d d");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
 
     const disk = try core.file.readAlloc(gpa, "app.js");
@@ -1606,9 +1604,9 @@ test "e2e/output: build output navigates on its own mode, not run's" {
     // build buffer is navigable whether or not `run` is loaded.
     const keys = try h.keymapSnapshot(gpa, ed.keymap);
     defer gpa.free(keys);
-    try t.expect(std.mem.indexOf(u8, keys, "build\x00Return\x00make-visit\n") != null);
-    try t.expect(std.mem.indexOf(u8, keys, "output\x00Return\x00output-visit\n") != null);
-    try t.expect(std.mem.indexOf(u8, keys, "grep\x00Return\x00grep-visit\n") != null);
+    try t.expect(std.mem.indexOf(u8, keys, "build\x00Return\x00make.visit\n") != null);
+    try t.expect(std.mem.indexOf(u8, keys, "output\x00Return\x00run.visit-output\n") != null);
+    try t.expect(std.mem.indexOf(u8, keys, "grep\x00Return\x00grep.visit\n") != null);
     try t.expect(ed.keymap.modeHasTag("build", "resting"));
     for ([_][]const u8{ "output", "build", "grep" }) |mode| {
         try t.expect(ed.keymap.resolveExactArms(mode, "space c d") == null);
@@ -1647,14 +1645,14 @@ test "e2e/project: two repositories list their own files and stage independently
     }
 
     // A file in the first repository: git opens THAT repository in `*git*`.
-    ed.runStr("open", "alpha/alpha.txt");
-    ed.run("git-status");
+    ed.runStr("file.open", "alpha/alpha.txt");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "alpha.txt"));
 
     // A file in the second: a different repository, so a second session and a
     // second instanced buffer — not a re-gather over the first one.
-    ed.runStr("open", "beta/beta.txt");
-    ed.run("git-status");
+    ed.runStr("file.open", "beta/beta.txt");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git:2*", "beta.txt"));
 
     // Neither projection knows anything about the other's working tree.
@@ -1708,7 +1706,7 @@ test "e2e/project: a stale snapshot refuses the action and refreshes instead" {
         gpa.free(out);
     }
 
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "Unstaged changes"));
 
     // ── A gather in flight makes the visible projection provisional. ──
@@ -1731,7 +1729,7 @@ test "e2e/project: a stale snapshot refuses the action and refreshes instead" {
     // ── The gate refuses staleness, not the verb: asked and answered against
     // ONE snapshot, the same discard runs. (What an armed question may do once
     // the model HAS moved is `resolve`'s rule — see the identity gates below.)
-    ed.run("git-status"); // land the cursor on the remaining unstaged file
+    ed.run("git.status"); // land the cursor on the remaining unstaged file
     try t.expect(drainLoopIdle(&ed));
     ed.press("x", "");
     try t.expectEqualStrings("pick", ed.mode());
@@ -1753,8 +1751,8 @@ fn answerYes(ed: *Editor) !void {
 /// picker's own verbs, past the safe answer, then accept.
 fn confirmDiscard(ed: *Editor) !void {
     try t.expect(ed.pick.active);
-    ed.run("pick-next");
-    ed.run("pick-accept");
+    ed.run("pick.next");
+    ed.run("pick.accept");
 }
 
 // git's row verbs are OFFERS now: `s`/`u`/`RET` in *git* name an intention,
@@ -1764,7 +1762,7 @@ fn confirmDiscard(ed: *Editor) !void {
 // editor, so typing refuses structurally, and `git` is simply its resting mode.
 //
 // git no longer publishes a table of its own. It says `provide("plugin.git.stage",
-// .{.role = "git.file.unstaged"} | …, "git-stage")` and core derives the rest —
+// .{.role = "git.file.unstaged"} | …, "git.stage")` and core derives the rest —
 // which is what lets a THIRD party put a verb on git's rows without git
 // knowing. The rows are attributed to `plugin.git` all the same
 // (`catalog.Offer.attribution`), so the order still treats two plugins' verbs
@@ -1804,7 +1802,7 @@ test "e2e/project: git's row verbs resolve through published offers, and the loc
         gpa.free(out);
     }
 
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "Unstaged changes"));
     try t.expectEqualStrings("git", ed.mode());
 
@@ -1829,8 +1827,9 @@ test "e2e/project: git's row verbs resolve through published offers, and the loc
     }
     // And the same answer a user SEES: which-key peeks the git mode and
     // paints the offer rows through that existing path — no new UI.
-    // The rendered row reads `s  plugin.git.stage -> plugin.git`.
-    try t.expect(whichKeyShows(&ed, "plugin.git.stage"));
+    // The rendered row reads `s  Stage -> plugin.git`: the intention by the
+    // label of the command that answers it here.
+    try t.expect(whichKeyShows(&ed, "Stage"));
     // The refused verb is not painted as a dimmed row with a sentence any
     // more; it is simply absent, which is what "no provider bound this row"
     // looks like. Asserted so the change is a decision, not a drift.
@@ -1855,7 +1854,7 @@ test "e2e/project: git's row verbs resolve through published offers, and the loc
     // Outside git's own entry nothing of git's is offered at all: absence is
     // nonapplicable, not a refusal (the offers are about the buffer, not
     // about a mode being active).
-    ed.run("buffer-back");
+    ed.run("buffer.back");
     try t.expect(core.intent.explain(ed.ctx, &.{"plugin.git.stage"}) == .blocked);
     switch (core.intent.explain(ed.ctx, &.{"plugin.git.stage"})) {
         .blocked => |b| try t.expectEqualStrings("not offered here", b.reason),
@@ -1910,9 +1909,9 @@ test "e2e/git: a commit draft round-trips focus, commits through the save intent
     }
 
     // The outer repository's draft.
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "outer.txt"));
-    ed.run("git-commit");
+    ed.run("git.commit");
     try t.expectEqualStrings("*git-commit*", ed.bufferName());
     // Git owns no mode for it: the entry rests in the configuration's own
     // editing modes, and text reaches it because it is ordinary text.
@@ -1934,9 +1933,9 @@ test "e2e/git: a commit draft round-trips focus, commits through the save intent
     // directory it runs in. A different repository is a different SESSION, so
     // it projects into its own `*git:2*`, and its draft is its OWN entry.
     try h.chdirTo("second");
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git:2*", "inner.txt"));
-    ed.run("git-commit");
+    ed.run("git.commit");
     try t.expectEqualStrings("*git-commit:2*", ed.bufferName());
     ed.press("i", "");
     ed.typeText("inner through its own draft");
@@ -2019,7 +2018,7 @@ test "e2e/git: a render shift under an armed discard still hits the file it name
     try loadWorkspace(&ed);
     try gitWorld(&proj, &git_base);
 
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "a.txt"));
     try t.expectEqualStrings("git", ed.mode());
 
@@ -2030,7 +2029,7 @@ test "e2e/git: a render shift under an armed discard still hits the file it name
     // Move the render out from under it: an untracked file adds a whole
     // SECTION above a.txt, so every rendered offset below it shifts.
     try gitWorld(&proj, &.{"printf 'scratch\\n' > zz_new.txt"});
-    ed.run("git-refresh");
+    ed.run("git.refresh");
     try t.expect(drainToolContains(&ed, "*git*", "zz_new.txt"));
 
     // The confirm re-resolves the identity it captured, so it discards a.txt —
@@ -2057,7 +2056,7 @@ test "e2e/git: a discard whose file left its section refuses instead of destroyi
     try loadWorkspace(&ed);
     try gitWorld(&proj, &git_base);
 
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "a.txt"));
     ed.press("x", ""); // ask, on the UNSTAGED a.txt
     try t.expectEqualStrings("pick", ed.mode());
@@ -2065,7 +2064,7 @@ test "e2e/git: a discard whose file left its section refuses instead of destroyi
     // The file hops sections underneath the prompt. Its old rendered range now
     // covers the staged section's rows; its identity is simply gone.
     try gitWorld(&proj, &.{"git add a.txt"});
-    ed.run("git-refresh");
+    ed.run("git.refresh");
     try t.expect(drainToolContains(&ed, "*git*", "Staged changes"));
 
     try confirmDiscard(&ed);
@@ -2095,7 +2094,7 @@ test "e2e/git: a hunk armed in one snapshot cannot act in the next" {
     try loadWorkspace(&ed);
     try gitWorld(&proj, &git_base);
 
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(drainToolContains(&ed, "*git*", "@@"));
     ed.press("j", ""); // off the file row, onto its hunk
     ed.press("x", ""); // ask, on the hunk
@@ -2105,7 +2104,7 @@ test "e2e/git: a hunk armed in one snapshot cannot act in the next" {
     // 0 still NAMES something — only the snapshot rule can refuse here, and it
     // must: the diff was re-read, so an ordinal from the old one is a guess.
     try gitWorld(&proj, &.{"printf 'scratch\\n' > zz_new.txt"});
-    ed.run("git-refresh");
+    ed.run("git.refresh");
     try t.expect(drainToolContains(&ed, "*git*", "zz_new.txt"));
 
     try confirmDiscard(&ed);
@@ -2201,8 +2200,8 @@ test "e2e/place: grep searches the focused file's project, not the launch direct
     }
 
     // Open a file in A. Its place comes from its own path, not from focus.
-    ed.runStr("open", "proj-a/alpha.js");
-    ed.runStr("grep", "SHARED");
+    ed.runStr("file.open", "proj-a/alpha.js");
+    ed.runStr("grep.search", "SHARED");
     try t.expect(drainToolContains(&ed, "*grep*", "alpha.js"));
     {
         const results = h.toolText(&ed, "*grep*") orelse return error.NoGrepBuffer;
@@ -2215,8 +2214,8 @@ test "e2e/place: grep searches the focused file's project, not the launch direct
     // Open a file in B and search again. The SAME `*grep*` entry is re-targeted
     // at the new place — a reused tool entry is about where it was last run,
     // not where it was created.
-    ed.runStr("open", "proj-b/beta.js");
-    ed.runStr("grep", "SHARED");
+    ed.runStr("file.open", "proj-b/beta.js");
+    ed.runStr("grep.search", "SHARED");
     try t.expect(drainToolContains(&ed, "*grep*", "beta.js"));
     {
         const results = h.toolText(&ed, "*grep*") orelse return error.NoGrepBuffer;
@@ -2260,10 +2259,10 @@ test "e2e/place: an ungranted fs capability reads the project it is in and refus
     }
 
     // Open a file in each project once, to learn what each place resolves to.
-    ed.runStr("open", "place-a/a.txt");
+    ed.runStr("file.open", "place-a/a.txt");
     const dir_a = try placeDirOf(&ed, gpa);
     defer gpa.free(dir_a);
-    ed.runStr("open", "place-b/b.txt");
+    ed.runStr("file.open", "place-b/b.txt");
     const dir_b = try placeDirOf(&ed, gpa);
     defer gpa.free(dir_b);
     try t.expect(!std.mem.eql(u8, dir_a, dir_b)); // two projects, two places
@@ -2274,23 +2273,23 @@ test "e2e/place: an ungranted fs capability reads the project it is in and refus
     defer gpa.free(b_file);
 
     // ── Acting in B (where focus is). ──
-    const in_b = try core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = b_file }});
+    const in_b = try core.command.run(ed.commands, ed.ctx, "fs-limit.read", &.{.{ .string = b_file }});
     try t.expect(std.mem.indexOf(u8, in_b.string, "beta secret") != null);
     // A place-relative name means "in this project" — which is what makes one
     // grant follow the user instead of naming a directory forever.
-    const rel_b = try core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = "b.txt" }});
+    const rel_b = try core.command.run(ed.commands, ed.ctx, "fs-limit.read", &.{.{ .string = "b.txt" }});
     try t.expect(std.mem.indexOf(u8, rel_b.string, "beta secret") != null);
     // THE GATE: the sibling project is refused. Nothing in config changed, and
     // nothing in config could have — the confinement is the dispatch's place.
-    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = a_file }}));
-    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-exists", &.{.{ .string = a_file }}));
-    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-write", &.{ .{ .string = a_file }, .{ .string = "owned" } }));
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "fs-limit.read", &.{.{ .string = a_file }}));
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "fs-limit.exists", &.{.{ .string = a_file }}));
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "fs-limit.write", &.{ .{ .string = a_file }, .{ .string = "owned" } }));
 
     // ── The same plugin, the same grant, focus moved to A: the answers swap. ──
-    ed.runStr("open", "place-a/a.txt");
-    const in_a = try core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = a_file }});
+    ed.runStr("file.open", "place-a/a.txt");
+    const in_a = try core.command.run(ed.commands, ed.ctx, "fs-limit.read", &.{.{ .string = a_file }});
     try t.expect(std.mem.indexOf(u8, in_a.string, "alpha secret") != null);
-    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = b_file }}));
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "fs-limit.read", &.{.{ .string = b_file }}));
 
     // B's bytes are untouched: the refused write above was refused, not
     // silently redirected somewhere harmless.
@@ -2321,20 +2320,20 @@ test "e2e/place: a project's environment reaches the children run in it" {
 
     // Give project A an environment and leave B without one. An overlay is
     // published FOR a place, so it follows the project rather than the process.
-    ed.runStr("open", "env-a/a.js");
+    ed.runStr("file.open", "env-a/a.js");
     const place_a = ed.session.system.buffers.active().place;
     try t.expect(!place_a.isProcess()); // the file was detected into its project
     _ = try ed.session.system.environments.publish(place_a, "e2e", "WEFT_PLACE_MARK=from-a\x00");
 
     // A child run in A sees it...
-    ed.runStr("run-command", "printf 'mark=%s' \"$WEFT_PLACE_MARK\"");
+    ed.runStr("run.command", "printf 'mark=%s' \"$WEFT_PLACE_MARK\"");
     try t.expect(drainToolContains(&ed, "*output*", "mark=from-a"));
 
     // ...and a child run in B does not: the overlay belongs to A's place, not
     // to the editor. Without per-place environments this could only ever have
     // been one global set at startup, which is why direnv could not work.
-    ed.runStr("open", "env-b/b.js");
-    ed.runStr("run-command", "printf 'mark=[%s]' \"$WEFT_PLACE_MARK\"");
+    ed.runStr("file.open", "env-b/b.js");
+    ed.runStr("run.command", "printf 'mark=[%s]' \"$WEFT_PLACE_MARK\"");
     try t.expect(drainToolContains(&ed, "*output*", "mark=[]"));
 }
 
@@ -2363,17 +2362,17 @@ test "e2e/place: a second project gets its own REPL, and neither captures the ot
     const echo_loop = "while read l; do echo \"$l\"; done";
 
     // A REPL per project, started from a file in each.
-    ed.runStr("open", "rp-a/a.js");
-    ed.runStr("repl-start", echo_loop);
-    ed.runStr("open", "rp-b/b.js");
-    ed.runStr("repl-start", echo_loop);
+    ed.runStr("file.open", "rp-a/a.js");
+    ed.runStr("repl.start", echo_loop);
+    ed.runStr("file.open", "rp-b/b.js");
+    ed.runStr("repl.start", echo_loop);
     try t.expect(ed.buffers.findByName("*repl*") != null);
     try t.expect(ed.buffers.findByName("*repl:2*") != null);
 
     // Back in project A, with B's REPL the MOST RECENT one. Before instances
     // were linked to a place, "most recent" won and this line went to B.
-    ed.runStr("open", "rp-a/a.js");
-    ed.runStr("repl-send", "from-a\n");
+    ed.runStr("file.open", "rp-a/a.js");
+    ed.runStr("repl.send", "from-a\n");
     try t.expect(drainToolContains(&ed, "*repl*", "from-a"));
     {
         const other = h.toolText(&ed, "*repl:2*") orelse return error.NoSecondRepl;
@@ -2382,8 +2381,8 @@ test "e2e/place: a second project gets its own REPL, and neither captures the ot
     }
 
     // And project B still drives its own.
-    ed.runStr("open", "rp-b/b.js");
-    ed.runStr("repl-send", "from-b\n");
+    ed.runStr("file.open", "rp-b/b.js");
+    ed.runStr("repl.send", "from-b\n");
     try t.expect(drainToolContains(&ed, "*repl:2*", "from-b"));
     {
         const first = h.toolText(&ed, "*repl*") orelse return error.NoFirstRepl;

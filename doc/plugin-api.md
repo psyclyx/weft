@@ -111,7 +111,7 @@ hands `on_command`."
 
 ### F4 — Keymaps and menus are imperative assertions, and transients are re-invented per plugin
 
-`weft.bindKey("git", "s", "git-stage")` is an assertion into a global table.
+`weft.bindKey("git", "s", "git.stage")` is an assertion into a global table.
 There is no owner, no priority, no conflict report, no way for a config to say
 "magit's `s`, but `S` means something else here" without knowing magit's
 internal command names.

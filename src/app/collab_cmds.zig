@@ -11,12 +11,13 @@ const collab = @import("collab.zig");
 const ShareCtx = collab.ShareCtx;
 const wireHubShare = collab.wireHubShare;
 const presets = @import("collab_presets.zig");
+const PeerFile = @import("peer_file.zig");
 
 // ── Peer trust + identity ───────────────────────────────────────────
 
 /// `peers` — echo/log every connected peer's fingerprint, four-word SAS,
 /// and trust grade, so a user can compare the SAS out of band and then
-/// `verify-peer <fingerprint>`. The full detail goes to the log (many
+/// `collab.verify-peer <fingerprint>`. The full detail goes to the log (many
 /// peers won't fit the status line); the echo is a one-line summary.
 pub fn peersHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = args;
@@ -96,10 +97,10 @@ pub fn verifyPeerHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     const kp: *core.known_peers.KnownPeers = @ptrCast(@alignCast(data.?));
     if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
     const fp = parseFingerprint(args[0].string) orelse
-        return ok_echo(ctx, "verify-peer: expected a fingerprint like k7q2-9fh3-...");
+        return ok_echo(ctx, "collab.verify-peer: expected a fingerprint like k7q2-9fh3-...");
     kp.verify(fp) catch |err| {
         var buf: [64]u8 = undefined;
-        return ok_echo(ctx, std.fmt.bufPrint(&buf, "verify-peer failed: {t}", .{err}) catch "verify-peer failed");
+        return ok_echo(ctx, std.fmt.bufPrint(&buf, "collab.verify-peer failed: {t}", .{err}) catch "collab.verify-peer failed");
     };
     var buf: [48]u8 = undefined;
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "verified {s}", .{&fp}) catch "verified");
@@ -109,10 +110,10 @@ pub fn forgetPeerHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     const kp: *core.known_peers.KnownPeers = @ptrCast(@alignCast(data.?));
     if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
     const fp = parseFingerprint(args[0].string) orelse
-        return ok_echo(ctx, "forget-peer: expected a fingerprint like k7q2-9fh3-...");
+        return ok_echo(ctx, "collab.forget-peer: expected a fingerprint like k7q2-9fh3-...");
     kp.forget(fp) catch |err| {
         var buf: [64]u8 = undefined;
-        return ok_echo(ctx, std.fmt.bufPrint(&buf, "forget-peer failed: {t}", .{err}) catch "forget-peer failed");
+        return ok_echo(ctx, std.fmt.bufPrint(&buf, "collab.forget-peer failed: {t}", .{err}) catch "collab.forget-peer failed");
     };
     var buf: [48]u8 = undefined;
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "forgot {s}", .{&fp}) catch "forgot");
@@ -135,7 +136,7 @@ pub fn listenHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "listening ({s} access)…", .{access.label()}) catch "listening…");
 }
 
-/// `share-presence <on|off>` — select cursor sharing, separately from
+/// `collab.share-presence <on|off>` — select cursor sharing, separately from
 /// sharing a document. The choice applies to every already-shared document
 /// and to later ones; `off` retracts the caret peers are already rendering.
 pub fn sharePresenceHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
@@ -156,7 +157,7 @@ pub fn sharePresenceHandler(ctx: *core.command.Context, data: ?*anyopaque, args:
     return ok_echo(ctx, if (on) "sharing your cursor" else "cursor hidden — peers no longer see it");
 }
 
-/// `share-fs <selection>` — select which export surfaces of the shared root
+/// `collab.share-fs <selection>` — select which export surfaces of the shared root
 /// peers hold: `hierarchy`, `bytes`, `write` (comma-separated), or a preset
 /// (`none`/`read`/`rw`). Applies to every connected peer at once and to
 /// later ones; narrowing takes effect on their next request.
@@ -193,7 +194,7 @@ pub fn fsGrantNote(grant: core.peer_fs.Grant) []const u8 {
     };
 }
 
-/// `stop-listening` — stop accepting new peers; connected peers stay.
+/// `collab.stop-listening` — stop accepting new peers; connected peers stay.
 pub fn stopListeningHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
     if (args.len != 0) return error.ArityMismatch;
@@ -223,7 +224,7 @@ pub fn disconnectHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     return ok_echo(ctx, "disconnecting…");
 }
 
-/// `realize-all` — fetch the whole partial checkout.
+/// `collab.realize-all` — fetch the whole partial checkout.
 pub fn realizeAllHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
     if (args.len != 0) return error.ArityMismatch;
@@ -232,7 +233,7 @@ pub fn realizeAllHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     return ok_echo(ctx, "fetching the whole document…");
 }
 
-/// `peer-files` opens the peer's shared tree — which is to say it runs `open`
+/// `collab.peer-files` opens the peer's shared tree — which is to say it runs `open`
 /// on the tree's designation, `weft://<fingerprint>/dir/`, and nothing else.
 /// There is one path to a peer's directory, whether a person asked for the
 /// root by this name or for `weft://<peer>/dir/src` by designation: the one
@@ -246,7 +247,7 @@ pub fn peerFilesHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []c
         return ok_echo(ctx, "the peer's shared tree has no designation yet (no handshake)");
     const text = try ctx.gpa.dupe(u8, named);
     defer ctx.gpa.free(text);
-    return core.command.run(ctx.commands, ctx, "open", &.{.{ .string = text }});
+    return core.command.run(ctx.commands, ctx, "file.open", &.{.{ .string = text }});
 }
 
 // ── Peer designations (doc/model.md §2.1) ───────────────────────────
@@ -254,9 +255,8 @@ pub fn peerFilesHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []c
 /// `open`'s route for a peer authority (`buffers_cmds.PeerOpener`): the
 /// peer's shared tree and the directories below it (`dir`), and a document it
 /// shares (`doc`, by its minted id — stable across reconnects, where the wire
-/// base is not). A peer's FILE is refused by name: a file opens as an entry
-/// once the peer shares it as a document, and there is no remote file backing
-/// for it to open as otherwise.
+/// base is not), and a file in its tree (`file`, backed by the file itself
+/// through the peer's filesystem surfaces — `openPeerFile`).
 pub fn openPeer(raw: *anyopaque, ctx: *core.command.Context, d: core.designation.Designation) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(raw));
     const fingerprint = switch (d.authority) {
@@ -271,60 +271,59 @@ pub fn openPeer(raw: *anyopaque, ctx: *core.command.Context, d: core.designation
     };
 }
 
-/// The directory `path` names in the tree peer `fingerprint` shares with us,
-/// reached from the root by names in the provider's own listings — or null
-/// (with the refusal in `why`) when it is not the peer we are connected to,
-/// or it has no such directory.
-fn peerDirectory(sc: *ShareCtx, ctx: *core.command.Context, fingerprint: []const u8, path: []const u8, why: *[]const u8) !?@import("weft_semantic").target.Located {
-    const root = sc.remote_fs_target orelse {
-        why.* = "open: that peer shares no filesystem with us";
-        return null;
-    };
-    const s = sc.session.* orelse {
+/// The registries a peer's tree is published in, or null (with the refusal
+/// in `why`) in an embedding without them.
+fn registries(ctx: *core.command.Context, why: *[]const u8) ?struct { *core.semantic.Services, *@import("weft_fs_runtime").Router } {
+    const services = ctx.semantic orelse {
         why.* = core.designation.refuse_unreachable;
         return null;
     };
-    const connected = s.peerFingerprint() orelse {
+    const router = ctx.filesystems orelse {
         why.* = core.designation.refuse_unreachable;
         return null;
     };
-    if (!std.mem.eql(u8, &connected, fingerprint)) {
-        why.* = "open: that peer is not the one we are connected to";
-        return null;
-    }
-    var at = root;
-    var names = std.mem.tokenizeScalar(u8, path, '/');
-    while (names.next()) |name| {
-        at = (try sc.remoteChild(ctx, at, name)) orelse {
-            why.* = "open: the peer has no such directory";
-            return null;
-        };
-    }
-    return at;
+    return .{ services, router };
 }
 
-/// A peer's FILE, as a read-only entry holding what the peer has there now:
-/// read once through the peer's tree, named by its peer designation, and in
-/// the peer's place — so the editor is on the peer's tree while it shows it.
-/// Read-only because there is no remote file backing to write back through;
-/// editing a peer's file together is sharing it as a document (a `doc`).
+fn peerDirectory(sc: *ShareCtx, ctx: *core.command.Context, fingerprint: []const u8, path: []const u8, why: *[]const u8) !?@import("weft_semantic").target.Located {
+    const services, const router = registries(ctx, why) orelse return null;
+    return PeerFile.directory(sc, services, router, fingerprint, path, why);
+}
+
+/// A peer's FILE, as an entry backed by the file itself (`PeerFile`): read
+/// through the peer's tree, named by its peer designation, in the peer's
+/// place — and saved back through the peer's write surface by the guarded
+/// test-and-set every remote tier shares, merging what the peer's disk did
+/// meanwhile. Where the peer granted no write surface the entry is
+/// read-only, and a refused keystroke says exactly that.
 fn openPeerFile(sc: *ShareCtx, ctx: *core.command.Context, fingerprint: []const u8, d: core.designation.Designation) anyerror!core.command.Value {
-    const dir_path = std.fs.path.dirnamePosix(d.ref) orelse "/";
+    var named: [core.designation.max_len]u8 = undefined;
+    const text = try d.bare().render(&named);
+    if (core.designation.findText(ctx.buffers, text)) |live| {
+        try ctx.buffers.switchTo(ctx.gpa, live.id, ctx.head, ctx.keymap);
+        return .{ .integer = @intCast(live.id) };
+    }
     const leaf = std.fs.path.basenamePosix(d.ref);
     if (leaf.len == 0) return .{ .string = "open: that names no file" };
     var why: []const u8 = "";
-    const parent = (try peerDirectory(sc, ctx, fingerprint, dir_path, &why)) orelse return .{ .string = why };
-    const bytes = (try sc.readRemoteFile(ctx, parent, leaf)) orelse return .{ .string = "open: the peer has no such file" };
-    defer ctx.gpa.free(bytes);
+    const services, const router = registries(ctx, &why) orelse return .{ .string = why };
+    // The directory first, so a missing one is refused by name.
+    _ = (try PeerFile.directory(sc, services, router, fingerprint, std.fs.path.dirnamePosix(d.ref) orelse "/", &why)) orelse return .{ .string = why };
+    const remote = try PeerFile.create(ctx.gpa, sc, services, router, fingerprint, d.ref);
+    const writable = PeerFile.of(remote).?.writable();
     const id = try ctx.buffers.create(ctx.gpa, leaf);
     errdefer ctx.buffers.close(ctx.gpa, id, ctx.head, ctx.keymap) catch {};
     const buf = ctx.buffers.get(id).?;
-    try buf.textEditor().?.doc.adoptContent(ctx.gpa, bytes);
-    buf.read_only = true;
-    var named: [core.designation.max_len]u8 = undefined;
-    try buf.setDesignation(ctx.gpa, try d.bare().render(&named));
-    if (sc.remotePlace()) |p| ctx.buffers.setPlace(id, p);
+    buf.textEditor().?.openRemote(ctx.gpa, remote) catch |err| switch (err) {
+        error.Failed => return .{ .string = "open: the peer has no such file" },
+        error.NotPermitted => return .{ .string = "open: the peer shares this tree without its bytes" },
+        else => |e| return e,
+    };
+    if (!writable) buf.read_only = PeerFile.refuse_no_write;
+    try buf.setDesignation(ctx.gpa, text);
+    if (try sc.remotePlace(ctx)) |p| ctx.buffers.setPlace(id, p);
     try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
+    if (buf.read_only) |reason| _ = try ok_echo(ctx, reason);
     return .{ .integer = @intCast(id) };
 }
 
@@ -337,7 +336,7 @@ fn openPeerDirectory(sc: *ShareCtx, ctx: *core.command.Context, fingerprint: []c
     const at = (try peerDirectory(sc, ctx, fingerprint, path, &why)) orelse return .{ .string = why };
     try @import("session.zig").presentDirectory(ctx, at);
     // The listing is IN the peer's tree, wherever it was opened from.
-    if (sc.remotePlace()) |p| ctx.buffers.setPlace(ctx.buffers.active_id, p);
+    if (try sc.remotePlace(ctx)) |p| ctx.buffers.setPlace(ctx.buffers.active_id, p);
     return .nil;
 }
 
@@ -563,7 +562,7 @@ fn collectOffers(sc: *ShareCtx, gpa: std.mem.Allocator, out: *std.ArrayList(Offe
     }
 }
 
-/// `open-shared` — pick over every peer's unopened announcements
+/// `collab.open-shared` — pick over every peer's unopened announcements
 /// (outbound host + all hub peers); accept opens it into a fresh buffer.
 pub fn openSharedHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
@@ -647,7 +646,7 @@ fn openOffer(sc: *ShareCtx, ctx: *core.command.Context, ref: LiveOffer, fingerpr
     }
     // A document the peer we share a tree with offers is in that tree's
     // place; any other peer's is in no place of ours.
-    if (ref.peer == null) if (sc.remotePlace()) |p| ctx.buffers.setPlace(id, p);
+    if (ref.peer == null) if (try sc.remotePlace(ctx)) |p| ctx.buffers.setPlace(id, p);
     const col = try ref.conn.openOffer(ref.index, doc, id);
     if (ref.peer) |peer| {
         // A hub peer shared a buffer to us: participate + relay it.
@@ -668,110 +667,125 @@ fn openOffer(sc: *ShareCtx, ctx: *core.command.Context, ref: LiveOffer, fingerpr
 /// last-wins) — preserving the exact order these were registered inline.
 /// `sc` and `known` are borrowed as command `data` and must outlive the run.
 pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands, sc: *ShareCtx, known: *core.known_peers.KnownPeers) !void {
-    _ = try commands.bind(gpa, "connect", .{
-        .name = "connect",
-        .summary = "Connect to a host at runtime; its document opens as a buffer.",
+    _ = try commands.bind(gpa, "collab.connect", .{
+        .name = "collab.connect",
+        .summary = "Join another person's session by its address; what they share opens as a buffer.",
         .args = &.{.{ .name = "hostport", .type = .string }},
         .handler = connectHandler,
         .data = sc,
+        .meta = .{ .label = "Join Session", .icon = "link", .prompts = true },
     });
-    _ = try commands.bind(gpa, "disconnect", .{
-        .name = "disconnect",
-        .summary = "Drop the connection; shared buffers stay as local copies.",
+    _ = try commands.bind(gpa, "collab.disconnect", .{
+        .name = "collab.disconnect",
+        .summary = "Leave the shared session, keeping local copies of the buffers you had open.",
         .args = &.{},
         .handler = disconnectHandler,
         .data = sc,
+        .meta = .{ .label = "Leave Session", .icon = "unplug" },
     });
-    _ = try commands.bind(gpa, "realize-all", .{
-        .name = "realize-all",
-        .summary = "Fetch the whole partial checkout.",
+    _ = try commands.bind(gpa, "collab.realize-all", .{
+        .name = "collab.realize-all",
+        .summary = "Download everything the other person shares, not just what you have opened.",
         .args = &.{},
         .handler = realizeAllHandler,
         .data = sc,
+        .meta = .{ .label = "Download All Shared Files", .icon = "download" },
     });
-    _ = try commands.bind(gpa, "peer-files", .{
-        .name = "peer-files",
-        .summary = "Open the connected peer's shared filesystem target.",
+    _ = try commands.bind(gpa, "collab.peer-files", .{
+        .name = "collab.peer-files",
+        .summary = "Browse the files the other person shares with you.",
         .args = &.{},
         .handler = peerFilesHandler,
         .data = sc,
+        .meta = .{ .label = "Browse Shared Files", .icon = "folder-tree" },
     });
-    _ = try commands.bind(gpa, "share", .{
-        .name = "share",
-        .summary = "Share the active buffer over the connection; an optional preset (look_together|pair|review) compiles to a grant bundle.",
+    _ = try commands.bind(gpa, "collab.share", .{
+        .name = "collab.share",
+        .summary = "Share the active buffer with the people you are connected to, optionally as a preset: look together, pair or review.",
         .args = &.{.{ .name = "preset", .type = .string, .optional = true }},
         .handler = shareHandler,
         .data = sc,
+        .meta = .{ .label = "Share Buffer", .icon = "share-2" },
     });
-    _ = try commands.bind(gpa, "share-presence", .{
-        .name = "share-presence",
-        .summary = "Share your cursor with peers (on|off); off retracts it, separate from sharing a buffer.",
+    _ = try commands.bind(gpa, "collab.share-presence", .{
+        .name = "collab.share-presence",
+        .summary = "Show or hide your cursor to the people you are connected to, separately from sharing a buffer.",
         .args = &.{.{ .name = "state", .type = .string }},
         .handler = sharePresenceHandler,
         .data = sc,
+        .meta = .{ .label = "Share Cursor", .icon = "eye", .prompts = true },
     });
-    _ = try commands.bind(gpa, "share-fs", .{
-        .name = "share-fs",
-        .summary = "Select which shared-root surfaces peers hold: hierarchy|bytes|write (comma-separated) or none|read|rw.",
+    _ = try commands.bind(gpa, "collab.share-fs", .{
+        .name = "collab.share-fs",
+        .summary = "Choose what others may do with your shared files: see the tree, read contents, or write.",
         .args = &.{.{ .name = "surfaces", .type = .string }},
         .handler = shareFsHandler,
         .data = sc,
+        .meta = .{ .label = "Share Files", .icon = "folder-open", .prompts = true },
     });
-    _ = try commands.bind(gpa, "open-shared", .{
-        .name = "open-shared",
-        .summary = "Pick one of the peer's shared buffers and open it.",
+    _ = try commands.bind(gpa, "collab.open-shared", .{
+        .name = "collab.open-shared",
+        .summary = "Pick one of the buffers the other person shares and open it.",
         .args = &.{},
         .handler = openSharedHandler,
         .data = sc,
+        .meta = .{ .label = "Open Shared Buffer", .icon = "file-text", .prompts = true },
     });
-    _ = try commands.bind(gpa, "listen", .{
-        .name = "listen",
-        .summary = "Host on a port at an access grade (view|edit|own); peers connect and share buffers.",
+    _ = try commands.bind(gpa, "collab.listen", .{
+        .name = "collab.listen",
+        .summary = "Host a session on a port so others can join, viewing, editing or owning what you share.",
         .args = &.{ .{ .name = "port", .type = .string }, .{ .name = "access", .type = .string } },
         .handler = listenHandler,
         .data = sc,
+        .meta = .{ .label = "Host Session", .icon = "users", .prompts = true },
     });
-    _ = try commands.bind(gpa, "stop-listening", .{
-        .name = "stop-listening",
-        .summary = "Stop accepting new peers (connected peers stay).",
+    _ = try commands.bind(gpa, "collab.stop-listening", .{
+        .name = "collab.stop-listening",
+        .summary = "Stop letting new people join your session; those already connected stay.",
         .args = &.{},
         .handler = stopListeningHandler,
         .data = sc,
+        .meta = .{ .label = "Stop Hosting", .icon = "stop" },
     });
-    _ = try commands.bind(gpa, "verify-peer", .{
-        .name = "verify-peer",
-        .summary = "Mark a peer fingerprint verified (after comparing its SAS out of band).",
+    _ = try commands.bind(gpa, "collab.verify-peer", .{
+        .name = "collab.verify-peer",
+        .summary = "Trust a person's fingerprint after you have compared their safety words with them directly.",
         .args = &.{.{ .name = "fingerprint", .type = .string }},
         .handler = verifyPeerHandler,
         .data = known,
+        .meta = .{ .label = "Verify Peer", .icon = "shield-check", .prompts = true },
     });
-    _ = try commands.bind(gpa, "forget-peer", .{
-        .name = "forget-peer",
-        .summary = "Revoke trust in a peer fingerprint (removes it from known_peers).",
+    _ = try commands.bind(gpa, "collab.forget-peer", .{
+        .name = "collab.forget-peer",
+        .summary = "Stop trusting a person's fingerprint, removing it from your known peers.",
         .args = &.{.{ .name = "fingerprint", .type = .string }},
         .handler = forgetPeerHandler,
         .data = known,
+        .meta = .{ .label = "Forget Peer", .prompts = true },
     });
-    _ = try commands.bind(gpa, "peers", .{
-        .name = "peers",
-        .summary = "List connected peers with fingerprint, SAS words, and trust.",
+    _ = try commands.bind(gpa, "collab.peers", .{
+        .name = "collab.peers",
+        .summary = "List the people connected to you, with their fingerprints, safety words and trust.",
         .args = &.{},
         .handler = peersHandler,
         .data = sc,
+        .meta = .{ .label = "Show Peers", .icon = "users" },
     });
-    _ = try commands.bind(gpa, "cancel", .{
-        .name = "cancel",
-        .summary = "Abort a pending/in-flight connect and drop queued host intents.",
+    _ = try commands.bind(gpa, "collab.cancel", .{
+        .name = "collab.cancel",
+        .summary = "Stop a connection attempt still in progress.",
         .args = &.{},
         .handler = cancelHandler,
         .data = sc,
+        .meta = .{ .label = "Cancel Connecting" },
     });
-    _ = try commands.bind(gpa, "grant", .{
-        .name = "grant",
-        .summary = "Set a connected peer's grade by fingerprint (view|edit|own).",
+    _ = try commands.bind(gpa, "collab.grant", .{
+        .name = "collab.grant",
+        .summary = "Change what a connected person may do: view, edit or own.",
         .args = &.{ .{ .name = "fingerprint", .type = .string }, .{ .name = "grade", .type = .string } },
         .handler = grantHandler,
         .data = sc,
+        .meta = .{ .label = "Set Peer Access", .prompts = true },
     });
 }
 

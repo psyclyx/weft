@@ -239,7 +239,7 @@ test "e2e/snapshot-frames: a pane that changed entry never draws the last entry'
     var namer: Namer = .{ .ed = ed };
     try namer.register();
 
-    ed.runStr("open", "a.txt");
+    ed.runStr("file.open", "a.txt");
     const a = ed.buffers.active().id;
     ed.application.damage();
     _ = try wake(ed);
@@ -250,7 +250,7 @@ test "e2e/snapshot-frames: a pane that changed entry never draws the last entry'
     // and draws none, rather than a.txt's.
     // (Opened without the harness's own wake, so the frame below is b's first.)
     var typed: [std.fs.max_path_bytes]u8 = undefined;
-    _ = try core.command.run(ed.commands, ed.ctx, "open", &.{.{ .string = Editor.asTyped("b.txt", &typed) }});
+    _ = try core.command.run(ed.commands, ed.ctx, "file.open", &.{.{ .string = Editor.asTyped("b.txt", &typed) }});
     const b = ed.buffers.active().id;
     try t.expect(a != b);
     ed.application.noteInput();

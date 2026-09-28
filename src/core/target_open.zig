@@ -144,7 +144,7 @@ pub fn openRelative(
     };
 }
 
-/// What `target-open-focused` does with the nearest typed link on the focus
+/// What `target.open` does with the nearest typed link on the focus
 /// path, spelled once for the tests below.
 fn openFocusedLink(services: *Services, head: *Head) !Result {
     const located = (try services.focusedTarget(head)).?;

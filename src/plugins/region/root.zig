@@ -1,4 +1,4 @@
-//! region — embedded-region marking, a `.wasm` plugin. `mark-region` claims
+//! region — embedded-region marking, a `.wasm` plugin. `region.mark` claims
 //! the current line as a subbuffer tagged with a language fact — the substrate an
 //! html-with-embedded-js / markdown-code-fence plugin uses to give a range
 //! its own grammar. Exercises the subbuffer handle across the membrane: claim
@@ -8,10 +8,11 @@ const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
     .{
-        .name = "mark-region",
+        .name = "region.mark",
         .call = weft.thunk(markRegion),
         .params = "[language]",
-        .summary = "mark this line as a region of another language (default text)",
+        .summary = "Mark this line as a region of another language, text by default.",
+        .label = "Mark Language Region",
         .arity = .one,
     },
 };

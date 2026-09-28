@@ -165,7 +165,7 @@ pub fn pathBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32
         results[0] = -1;
         return;
     };
-    const path = ed.backingPath() orelse {
+    const path = ed.localPath() orelse {
         results[0] = -1;
         return;
     };
@@ -413,7 +413,7 @@ pub fn hRangeRetain(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
 }
 
 /// Run a command passing a live range (by handle) as its single arg — how
-/// vim hands a motion's range to an operator (`op.delete`, …).
+/// vim hands a motion's range to an operator (`operators.delete`, …).
 pub fn hRunRangeArg(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
@@ -496,8 +496,9 @@ fn word(raw: i32) u32 {
 /// host to allocate gigabytes. Far above any editing use.
 const max_selections: u32 = 1 << 16;
 
-/// Words per extent in the record: kind, anchor, head.
-const extent_words = 3;
+/// Words per extent in the record: kind, anchor, head, flags (bit 0:
+/// inclusive — `selection.Extent`).
+const extent_words = 4;
 
 /// `selections_get(out_ptr, cap) -> count`: write the primary index and up to
 /// `cap` extents; return the full count (a `cap` of 0 writes nothing — the
@@ -519,6 +520,7 @@ pub fn hSelectionsGet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
         words[at] = @intFromEnum(x.kind);
         words[at + 1] = @intCast(@min(x.anchor, std.math.maxInt(u32)));
         words[at + 2] = @intCast(@min(x.head, std.math.maxInt(u32)));
+        words[at + 3] = @intFromBool(x.inclusive);
     }
     const bytes = std.mem.sliceAsBytes(words);
     _ = caller.writeMemory(word(args[0]), bytes.len, bytes) catch {};
@@ -546,6 +548,7 @@ pub fn hSelectionsSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
             .kind = std.enums.fromInt(selection.Kind, kind) orelse return,
             .anchor = std.mem.readInt(u32, raw[at + 4 ..][0..4], .little),
             .head = std.mem.readInt(u32, raw[at + 8 ..][0..4], .little),
+            .inclusive = std.mem.readInt(u32, raw[at + 12 ..][0..4], .little) & 1 != 0,
         };
     }
     if (selection.write(p.activeCtx(), p.gpa, extents, primary) catch false) results[0] = 0;

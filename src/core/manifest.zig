@@ -137,6 +137,10 @@ pub const GroupDecl = struct { mode: []u8, prefix: []u8, name: []u8 };
 pub const MenuDecl = struct { name: []u8 };
 pub const ActionDecl = struct { name: []u8 };
 pub const SemanticActionDecl = struct { name: []u8 };
+/// `weft.command(id, {label, summary, menu, …})`: how a command is presented
+/// at the config tier (doc/chrome.md §1.2), in the shared text form
+/// (`weft_membrane.presentation`) — plain data, hashed and compared as bytes.
+pub const DescribeDecl = struct { name: []u8, meta: []u8 };
 /// `weft.provide(action, when, cmd, prio | opts)`. The predicate is held in
 /// its WIRE form (`facts.encode`) — owned bytes, so the decl is plain data a
 /// manifest hash reads and a reload compares, and applying it decodes through
@@ -395,6 +399,7 @@ pub const Manifest = struct {
     menus: std.ArrayList(MenuDecl) = .empty,
     actions: std.ArrayList(ActionDecl) = .empty,
     semantic_actions: std.ArrayList(SemanticActionDecl) = .empty,
+    describes: std.ArrayList(DescribeDecl) = .empty,
     provides: std.ArrayList(ProvideDecl) = .empty,
     values: std.ArrayList(ValueDecl) = .empty,
     runs: std.ArrayList(RunDecl) = .empty,
@@ -439,6 +444,11 @@ pub const Manifest = struct {
         self.actions.deinit(gpa);
         for (self.semantic_actions.items) |d| gpa.free(d.name);
         self.semantic_actions.deinit(gpa);
+        for (self.describes.items) |d| {
+            gpa.free(d.name);
+            gpa.free(d.meta);
+        }
+        self.describes.deinit(gpa);
         for (self.provides.items) |d| {
             gpa.free(d.action);
             gpa.free(d.predicate);
@@ -536,6 +546,15 @@ pub const Manifest = struct {
     pub fn addSemanticAction(self: *Manifest, name: []const u8) !void {
         try self.semantic_actions.append(self.gpa, .{ .name = try self.gpa.dupe(u8, name) });
     }
+
+    /// Describe how command `name` is presented (`meta` in the shared text
+    /// form). Applied into the context's `presentations` at this manifest's
+    /// owner, where it wins field by field over what the command declared.
+    pub fn addDescribe(self: *Manifest, name: []const u8, meta: []const u8) !void {
+        const owned_name = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(owned_name);
+        try self.describes.append(self.gpa, .{ .name = owned_name, .meta = try self.gpa.dupe(u8, meta) });
+    }
     pub fn addProvide(
         self: *Manifest,
         action: []const u8,
@@ -627,7 +646,8 @@ pub const Manifest = struct {
             .attrs = attrs,
             .extent = switch (extent) {
                 .fraction => |f| .{ .fraction = std.math.clamp(f, 0.05, 0.95) },
-                .rows => |n| .{ .rows = @max(n, 1) },
+                // No body rows only for a viewport with a status line to be.
+                .rows => |n| .{ .rows = if (attrs.status_line) n else @max(n, 1) },
             },
             .hidden = hidden,
         });
@@ -695,6 +715,11 @@ pub const Manifest = struct {
         for (self.actions.items) |d| hStr(h, d.name);
         hLen(h, self.semantic_actions.items.len);
         for (self.semantic_actions.items) |d| hStr(h, d.name);
+        hLen(h, self.describes.items.len);
+        for (self.describes.items) |d| {
+            hStr(h, d.name);
+            hStr(h, d.meta);
+        }
         hLen(h, self.provides.items.len);
         for (self.provides.items) |d| {
             hStr(h, d.action);
@@ -830,7 +855,9 @@ pub const Manifest = struct {
         // `wasm_host/plugin.zig`'s `mintGrantHandles` must find this row
         // ALREADY live when a plugin's `describe()` handshake runs.
         try reconcileGrants(gpa, null, self, actx);
-        try self.loadPlugins(actx);
+        var loaded: std.StringHashMapUnmanaged(void) = .empty;
+        defer loaded.deinit(gpa);
+        try self.loadPluginsOnce(actx, &loaded);
         try self.runCommands(actx);
     }
 
@@ -853,6 +880,28 @@ pub const Manifest = struct {
         }
     }
 
+    /// How many `weft.set`s in this manifest AND its imports name an owner
+    /// that is neither a plugin the whole tree loads nor a core namespace —
+    /// exactly the ones `applyDecls` refuses. The owner check is against the
+    /// TREE's plugin set, so a fragment's value for a plugin its includer
+    /// loads is owned wherever the two sit in the text. A config gate asks
+    /// this of an evaluated manifest without applying it.
+    pub fn unownedValues(self: *const Manifest, gpa: Allocator) !usize {
+        var known: std.StringHashMapUnmanaged(void) = .empty;
+        defer known.deinit(gpa);
+        try self.populateKnownPlugins(gpa, &known);
+        return self.countUnowned(&known);
+    }
+
+    fn countUnowned(self: *const Manifest, known: *const std.StringHashMapUnmanaged(void)) usize {
+        var n: usize = 0;
+        for (self.imports.items) |imp| n += imp.countUnowned(known);
+        for (self.values.items) |d| {
+            if (!ownerIsKnown(d.owner, known)) n += 1;
+        }
+        return n;
+    }
+
     fn collectPluginNames(self: *const Manifest, gpa: Allocator, out: *std.ArrayList([]const u8)) !void {
         for (self.imports.items) |imp| try imp.collectPluginNames(gpa, out);
         for (self.plugins.items) |d| try out.append(gpa, d.name);
@@ -866,7 +915,7 @@ pub const Manifest = struct {
     }
 
     /// A length-framed identity for add-only run reconciliation. Arguments are
-    /// part of identity: changing `grammar-add`'s package or symbol must run the
+    /// part of identity: changing `syntax.add-grammar`'s package or symbol must run the
     /// new invocation even though its command name is unchanged.
     fn runKey(gpa: Allocator, d: RunDecl) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
@@ -910,7 +959,9 @@ pub const Manifest = struct {
         for (self.groups.items) |d|
             actx.ctx.keymap.setGroupName(gpa, d.mode, d.prefix, d.name, prio, self.owner) catch {};
         for (self.menus.items) |d| applyMenu(actx.ctx, gpa, d.name, prio);
-        for (self.actions.items) |d| command.registerAction(gpa, actx.ctx.commands, actx.ctx.actions, d.name, .pick) catch {};
+        for (self.actions.items) |d| command.registerAction(gpa, actx.ctx.commands, actx.ctx.actions, d.name, .pick, command.action_summary, .{}) catch {};
+        if (actx.ctx.presentations) |table| for (self.describes.items) |d|
+            table.put(gpa, d.name, d.meta, self.owner, .config) catch {};
         if (actx.ctx.semantic) |services| for (self.semantic_actions.items) |d|
             builtins.registerSemanticAction(gpa, actx.ctx.commands, services, d.name) catch {};
         for (self.provides.items) |d| {
@@ -932,8 +983,11 @@ pub const Manifest = struct {
             if (!ownerIsKnown(d.owner, known)) {
                 // No silent third result (design rule): stderr AND the
                 // user-visible echo line, same channel `echoProvideRefused`
-                // uses — a GUI user never sees a terminal (nit a).
-                std.log.warn("config: weft.set(\"{s}\", \"{s}\", ...) — '{s}' is not a loaded plugin or a declared value namespace; dropped", .{ d.owner, d.key, d.owner });
+                // uses — a GUI user never sees a terminal (nit a). At ERROR
+                // level: a value nobody owns is a broken config, and the test
+                // runner fails any test that logs one, so no gate can boot a
+                // config that drops a value and still pass.
+                std.log.err("config: weft.set(\"{s}\", \"{s}\", ...) — '{s}' is not a loaded plugin or a declared value namespace; dropped", .{ d.owner, d.key, d.owner });
                 echoValueDropped(actx.ctx, gpa, d.owner, d.key);
                 continue;
             }
@@ -970,8 +1024,7 @@ pub const Manifest = struct {
             };
         }
         for (self.echoes.items) |d| {
-            actx.ctx.head.echo.clearRetainingCapacity();
-            actx.ctx.head.echo.appendSlice(gpa, d.message) catch {};
+            actx.ctx.head.echo.say(gpa, d.message) catch {};
         }
         for (self.logs.items) |d| std.log.info("config: {s}", .{d.message});
         // D2's `weft.slot` (§2.2 form 3): unlike `status_segments`, no opaque
@@ -1000,6 +1053,7 @@ pub const Manifest = struct {
                 registry.declareWith(gpa, d.name, d.attrs, d.extent, .{ .hidden = d.hidden }) catch {};
             for (self.presents.items) |d| registry.present(gpa, d.viewport, d.presentation()) catch |e|
                 std.log.warn("config: weft.present(\"{s}\", ...) — {t}", .{ d.viewport, e });
+            if (actx.ctx.context) |context| registry.publishShown(context);
         } else if (self.viewports.items.len > 0 or self.presents.items.len > 0) {
             std.log.warn("config: viewport declarations dropped — this embedding composes no workspace", .{});
         }
@@ -1015,17 +1069,6 @@ pub const Manifest = struct {
             } else {
                 std.log.warn("config: weft.statusSegment('{s}') declared but no UI-mesh binder is wired for this apply; dropped", .{d.text});
             }
-        }
-    }
-
-    fn loadPlugins(self: *const Manifest, actx: *ApplyCtx) !void {
-        for (self.imports.items) |imp| try imp.loadPlugins(actx);
-        for (self.plugins.items) |d| {
-            switch (pluginTrust(d.name)) {
-                .bundled => {},
-                .path_form => std.log.info("config: plugin '{s}' loaded from OUTSIDE the bundled-plugin trust root — grants unverified (W4: approval prompt belongs here)", .{d.name}),
-            }
-            if (actx.loader) |ld| ld.load(ld.ctx, d.name);
         }
     }
 
@@ -1106,7 +1149,7 @@ pub const Manifest = struct {
                 if (!found) std.log.warn("config: reload — plugin '{s}' removed from config but unload isn't supported yet; restart to fully remove it", .{n});
             }
         }
-        try new.loadPluginsDiffed(actx, &old_plugins);
+        try new.loadPluginsOnce(actx, &old_plugins);
 
         var old_runs: std.StringHashMapUnmanaged(void) = .empty;
         defer old_runs.deinit(gpa);
@@ -1120,10 +1163,17 @@ pub const Manifest = struct {
         try new.runCommandsDiffed(actx, &old_runs);
     }
 
-    fn loadPluginsDiffed(self: *const Manifest, actx: *ApplyCtx, old_plugins: *const std.StringHashMapUnmanaged(void)) !void {
-        for (self.imports.items) |imp| try imp.loadPluginsDiffed(actx, old_plugins);
+    /// Load every plugin the manifest and its imports name, ONCE each:
+    /// `loaded` holds the names already loaded (by a previous apply, on a
+    /// reload — reload isn't wired — or earlier in this walk) and gains each
+    /// one loaded here. A fragment and the config that imports it both
+    /// naming `offers` used to load it twice: two instances, every command
+    /// registered twice, each shadowing the other.
+    fn loadPluginsOnce(self: *const Manifest, actx: *ApplyCtx, loaded: *std.StringHashMapUnmanaged(void)) !void {
+        for (self.imports.items) |imp| try imp.loadPluginsOnce(actx, loaded);
         for (self.plugins.items) |d| {
-            if (old_plugins.contains(d.name)) continue; // already loaded — reload isn't wired
+            if (loaded.contains(d.name)) continue;
+            try loaded.put(actx.ctx.gpa, d.name, {});
             switch (pluginTrust(d.name)) {
                 .bundled => {},
                 .path_form => std.log.info("config: plugin '{s}' loaded from OUTSIDE the bundled-plugin trust root — grants unverified (W4: approval prompt belongs here)", .{d.name}),
@@ -1198,7 +1248,7 @@ pub const Manifest = struct {
     /// `wasm_host/plugin.zig`'s `mintGrantHandles`/composition check — the
     /// ONLY place a plugin's OWN `grant_handles[i]` gets (re)pointed at a
     /// row — never runs again for it. The freshly-minted, narrower row
-    /// exists in the table, live and correct for `grants-show`/future
+    /// exists in the table, live and correct for `grants.show`/future
     /// principals, but the ALREADY-RUNNING plugin keeps possessing its
     /// original, BROADER describe()-boolean handle (minted at ITS load,
     /// before this grant existed) until a fresh load re-runs
@@ -1418,6 +1468,7 @@ pub const Manifest = struct {
         // literal string-prefix pair a `startsWith` teardown would
         // wrongly conflate (nit R-b).
         if (self.provides.items.len > 0) actx.ctx.actions.unregisterByOwner(self.owner);
+        if (self.describes.items.len > 0) if (actx.ctx.presentations) |table| table.dropOwner(gpa, self.owner);
         // `weft.statusSegment` bindings share the SAME Container `actions`
         // adapts onto (task #19's shared-Container fold-in) — unbind them
         // by the identical owner-exact convention `provides` uses just
@@ -1470,8 +1521,8 @@ fn applyMenu(ctx: *command.Context, gpa: Allocator, name: []const u8, prio: i32)
     _ = prio;
     // Declaring a menu is a FACT about the mode — which-key lists it, and it
     // inherits the `menu-nav` layer. What keys a menu answers is not core's
-    // opinion: this used to also bind Escape/C-g to `menu-escape` and F1 to
-    // `which-key-now`, the last of which is a command core does not own and
+    // opinion: this used to also bind Escape/C-g to `mode.leave-menu` and F1 to
+    // `which-key.show`, the last of which is a command core does not own and
     // cannot know exists — a plugin's name, spelled in core, per menu. Those
     // three live in `config/defaults.js` on the `menu-nav` layer now, declared
     // once for every menu instead of copied into each.
@@ -1484,8 +1535,7 @@ fn applyMenu(ctx: *command.Context, gpa: Allocator, name: []const u8, prio: i32)
 fn echoProvideRefused(ctx: *command.Context, gpa: Allocator, action: []const u8) void {
     const msg = std.fmt.allocPrint(gpa, "provide: '{s}' is a race action — register a capability provider instead", .{action}) catch return;
     defer gpa.free(msg);
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(gpa, msg) catch {};
+    ctx.head.echo.say(gpa, msg) catch {};
 }
 
 /// Surface a dropped `weft.set` to the config author (nit a: the closed-
@@ -1493,8 +1543,7 @@ fn echoProvideRefused(ctx: *command.Context, gpa: Allocator, action: []const u8)
 fn echoValueDropped(ctx: *command.Context, gpa: Allocator, owner: []const u8, key: []const u8) void {
     const msg = std.fmt.allocPrint(gpa, "config: weft.set(\"{s}\", \"{s}\", ...) dropped — '{s}' is not a loaded plugin or a declared value namespace", .{ owner, key, owner }) catch return;
     defer gpa.free(msg);
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(gpa, msg) catch {};
+    ctx.head.echo.say(gpa, msg) catch {};
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -1505,20 +1554,20 @@ test "manifest: staging + hash — two identical manifests hash identically" {
     const gpa = t.allocator;
     const a = try Manifest.create(gpa, "config", .config);
     defer a.destroy();
-    try a.addBind("normal", "j", &.{"cursor-down"});
+    try a.addBind("normal", "j", &.{"cursor.down"});
     try a.addValue("palette", "accent", "#8ec07c");
     try a.addPlugin("vim");
 
     const b = try Manifest.create(gpa, "config", .config);
     defer b.destroy();
-    try b.addBind("normal", "j", &.{"cursor-down"});
+    try b.addBind("normal", "j", &.{"cursor.down"});
     try b.addValue("palette", "accent", "#8ec07c");
     try b.addPlugin("vim");
 
     try t.expectEqual(a.hash(), b.hash());
 
     // A changed manifest hashes differently.
-    try b.addBind("normal", "k", &.{"cursor-up"});
+    try b.addBind("normal", "k", &.{"cursor.up"});
     try t.expect(a.hash() != b.hash());
 }
 
@@ -1531,11 +1580,11 @@ test "manifest: argument-bearing runs are owned and hash-sensitive" {
     };
     const a = try Manifest.create(gpa, "config", .config);
     defer a.destroy();
-    try a.addRun("grammar-add", &args);
+    try a.addRun("syntax.add-grammar", &args);
 
     const b = try Manifest.create(gpa, "config", .config);
     defer b.destroy();
-    try b.addRun("grammar-add", &args);
+    try b.addRun("syntax.add-grammar", &args);
     try t.expectEqual(a.hash(), b.hash());
     try t.expectEqualStrings("/tmp/grammar", a.runs.items[0].args[1].value);
 
@@ -1544,7 +1593,7 @@ test "manifest: argument-bearing runs are owned and hash-sensitive" {
         .{ .string = "/tmp/grammar" },
         .{ .string = "other_symbol" },
     };
-    try b.addRun("grammar-add", &changed);
+    try b.addRun("syntax.add-grammar", &changed);
     try t.expect(a.hash() != b.hash());
 }
 

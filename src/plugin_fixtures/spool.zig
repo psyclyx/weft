@@ -15,8 +15,8 @@ const weft = @import("weft");
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
-    .{ .name = "spool-ok", .handler = ok },
-    .{ .name = "spool-fail", .handler = fail },
+    .{ .name = "spool.ok", .handler = ok },
+    .{ .name = "spool.fail", .handler = fail },
 };
 
 fn describe() callconv(.c) void {

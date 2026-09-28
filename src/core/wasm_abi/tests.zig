@@ -288,7 +288,7 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
     try t.expectEqual(@as(usize, 0), child_listing.value.entries.len);
     try t.expectEqual(@as(usize, 1), provider.derive_calls);
 
-    const closed = try command.run(&env.commands, &env.ctx, "fixture-close-child-directory", &.{});
+    const closed = try command.run(&env.commands, &env.ctx, "semantic-fs-fixture.close-child-directory", &.{});
     try t.expectEqual(command.Value{ .integer = 1 }, closed);
     try t.expectEqual(@as(usize, 0), first.semantic_directories.items.len);
     try t.expect(semantic.targets.get(first_child.ref) == null);
@@ -610,17 +610,17 @@ test "wasm plugin: init registers a command that dispatches back into the guest"
 
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    const plugin = try loadPlugin(&engine, &ctx, "wasm.plugin", @embedFile("guest_plugin_wasm"), .{});
+    const plugin = try loadPlugin(&engine, &ctx, "fixture", @embedFile("guest_plugin_wasm"), .{});
     defer plugin.deinit();
 
-    // The guest's init() registered "wasm-mark" through the host.
-    try t.expect(commands.resolve("wasm-mark") != null);
+    // The guest's init() registered "fixture.mark" through the host.
+    try t.expect(commands.resolve("fixture.mark") != null);
 
     // Running it dispatches back into the guest, which edits via the host
     // gate — authored as the plugin's peer, across the membrane.
     try buffers.active().textEditor().?.insertText(gpa, "xy");
     buffers.active().textEditor().?.placeCursor(1);
-    _ = try command.run(&commands, &ctx, "wasm-mark", &.{});
+    _ = try command.run(&commands, &ctx, "fixture.mark", &.{});
     const s = try buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("x[wasm]y", s);
@@ -643,14 +643,14 @@ test "wasm plugin: the edit plugin's duplicate-line lands through the membrane" 
     defer plugin.deinit();
 
     // Both commands declared in describe() bound through the handshake.
-    try t.expect(env.commands.resolve("duplicate-line") != null);
-    try t.expect(env.commands.resolve("upcase-line") != null);
+    try t.expect(env.commands.resolve("edit.duplicate-line") != null);
+    try t.expect(env.commands.resolve("edit.upcase-line") != null);
 
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "hello\nworld");
     ed.placeCursor(2); // inside the first line
 
-    _ = try command.run(&env.commands, &env.ctx, "duplicate-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "edit.duplicate-line", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     // Same result the in-process edit.zig produces: the line copied below.
@@ -695,7 +695,7 @@ test "which-key: on_menu builds a corner surface from the current menu's binding
     try env.keymap.tagMode(gpa, "leader", "menu");
     try env.keymap.tagMode(gpa, "leader-file", "menu");
     try env.keymap.bind(gpa, "leader", "f", "leader-file", Keymap.prio_plugin, "test");
-    try env.keymap.bind(gpa, "leader", "g", "git-status", Keymap.prio_plugin, "test");
+    try env.keymap.bind(gpa, "leader", "g", "git.status", Keymap.prio_plugin, "test");
     try env.head.setModeRaw(gpa, "leader");
 
     // Core fires on_menu(open) at the frame boundary; the guest reads the
@@ -709,7 +709,7 @@ test "which-key: on_menu builds a corner surface from the current menu's binding
     try t.expectEqual(surface_mod.Role.accent, plugin.surface.rows.items[0].spans.items[0].role);
     try t.expectEqualStrings("leader-file", plugin.surface.rows.items[0].spans.items[1].text);
     try t.expectEqual(surface_mod.Role.group, plugin.surface.rows.items[0].spans.items[1].role); // a submenu
-    try t.expectEqual(surface_mod.Role.leaf, plugin.surface.rows.items[1].spans.items[1].role); // git-status: leaf
+    try t.expectEqual(surface_mod.Role.leaf, plugin.surface.rows.items[1].spans.items[1].role); // git.status: leaf
 
     // Leaving the menu closes the surface.
     wasm_host.notifyMenu(plugin, false);
@@ -743,8 +743,8 @@ test "files wasm launcher: delegates to the ordinary open command with the place
 
     var open_probe = OpenCommandProbe{ .gpa = gpa };
     defer open_probe.deinit();
-    _ = try env.commands.bind(gpa, "open", .{
-        .name = "open",
+    _ = try env.commands.bind(gpa, "file.open", .{
+        .name = "file.open",
         .summary = "Open a target.",
         .args = &.{.{ .name = "target", .type = .string }},
         .handler = OpenCommandProbe.handle,
@@ -758,9 +758,9 @@ test "files wasm launcher: delegates to the ordinary open command with the place
     // authority, text buffer, mode, or filesystem implementation.
     const plugin = try loadPlugin(&engine, &env.ctx, "files", @embedFile("guest_files_wasm"), .{});
     defer plugin.deinit();
-    try t.expect(env.commands.resolve("files") != null);
+    try t.expect(env.commands.resolve("files.browse") != null);
 
-    _ = try command.run(&env.commands, &env.ctx, "files", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "files.browse", &.{});
     try t.expectEqual(@as(usize, 1), open_probe.calls);
 
     var cwd_buf: [4096]u8 = undefined;
@@ -786,24 +786,24 @@ test "helix: a second modal editor loads in its OWN mode namespace" {
     // helix.init sets its OWN initial mode and binds in its OWN namespace —
     // nothing here assumes vim's "normal". If core privileged vim, this breaks.
     try t.expectEqualStrings("helix-normal", env.head.currentMode());
-    try t.expectEqualStrings("hx-insert", env.keymap.lookup(env.head.currentMode(), "i").?);
+    try t.expectEqualStrings("helix.insert", env.keymap.lookup(env.head.currentMode(), "i").?);
     // A motion leads with its navigation intention (a listing answers it) and
-    // falls back to helix's own selecting motion (`hx/n/…`); select mode binds
-    // the extending twin (`hx/x/…`) of the same key.
+    // falls back to helix's own selecting motion (`helix.move-…`); select mode binds
+    // the extending twin (`helix.extend-…`) of the same key.
     const left = env.keymap.lookupArms(env.head.currentMode(), "h").?;
     try t.expectEqualStrings("std.navigation.left", left[0]);
-    try t.expectEqualStrings("hx/n/left", left[1]);
+    try t.expectEqualStrings("helix.move-left", left[1]);
     const word = env.keymap.lookupArms(env.head.currentMode(), "w").?;
     try t.expectEqualStrings("std.navigation.word-next", word[0]);
-    try t.expectEqualStrings("hx/n/word-next", word[1]);
-    try t.expectEqualStrings("hx/x/word-next", env.keymap.lookupArms("helix-select", "w").?[1]);
+    try t.expectEqualStrings("helix.move-word-next", word[1]);
+    try t.expectEqualStrings("helix.extend-word-next", env.keymap.lookupArms("helix-select", "w").?[1]);
     // No operator-pending mode: a verb acts on the selection. `Z` is the one
     // sticky menu; the leader is a key SEQUENCE — no `helix-leader` mode:
-    // `space` opens a chord and `space g` completes to git-status.
+    // `space` opens a chord and `space g` completes to git.status.
     try t.expect(!env.keymap.modeHasTag("helix-leader", "menu"));
     try t.expect(env.keymap.modeHasTag("helix-view", "menu"));
     try t.expect((try env.head.feed(gpa, &env.keymap, "space")) == .pending);
-    try t.expectEqualStrings("git-status", (try env.head.feed(gpa, &env.keymap, "g")).run[0]);
+    try t.expectEqualStrings("git.status", (try env.head.feed(gpa, &env.keymap, "g")).run[0]);
 }
 
 test "emacs: a modeless editor loads; motion/kill chords, C-x is a chord not a mode" {
@@ -819,19 +819,19 @@ test "emacs: a modeless editor loads; motion/kill chords, C-x is a chord not a m
 
     // ONE resting mode; no modal posture. Its editing chords are bound directly.
     try t.expectEqualStrings("emacs", env.head.currentMode());
-    try t.expectEqualStrings("cursor-right", env.keymap.lookup(env.head.currentMode(), "C-f").?);
-    try t.expectEqualStrings("cursor-left", env.keymap.lookup(env.head.currentMode(), "C-b").?);
-    try t.expectEqualStrings("beginning-of-line", env.keymap.lookup(env.head.currentMode(), "C-a").?);
-    try t.expectEqualStrings("kill-line", env.keymap.lookup(env.head.currentMode(), "C-k").?);
+    try t.expectEqualStrings("cursor.right", env.keymap.lookup(env.head.currentMode(), "C-f").?);
+    try t.expectEqualStrings("cursor.left", env.keymap.lookup(env.head.currentMode(), "C-b").?);
+    try t.expectEqualStrings("emacs.line-start", env.keymap.lookup(env.head.currentMode(), "C-a").?);
+    try t.expectEqualStrings("emacs.kill-line", env.keymap.lookup(env.head.currentMode(), "C-k").?);
     // Kill/copy/yank lead with the standard transfer words and keep the
     // region commands as their fallback arms.
     const yank_arms = env.keymap.resolveExactArms(env.head.currentMode(), "C-y").?;
     try t.expectEqualStrings("std.transfer.paste", yank_arms[0]);
-    try t.expectEqualStrings("yank", yank_arms[1]);
+    try t.expectEqualStrings("emacs.yank", yank_arms[1]);
     // Word motion drives the shared `motions` plugin (like vim/helix).
-    try t.expectEqualStrings("forward-word", env.keymap.lookup(env.head.currentMode(), "M-f").?);
+    try t.expectEqualStrings("emacs.word-next", env.keymap.lookup(env.head.currentMode(), "M-f").?);
     // M-< normalized to M-less at bind time.
-    try t.expectEqualStrings("beginning-of-buffer", env.keymap.lookup(env.head.currentMode(), "M-less").?);
+    try t.expectEqualStrings("emacs.doc-start", env.keymap.lookup(env.head.currentMode(), "M-less").?);
     // `emacs` is NOT a menu mode — the C-x/C-c trees are key sequences (config).
     try t.expect(!env.keymap.modeHasTag("emacs", "menu"));
 }
@@ -848,25 +848,25 @@ test "vim ex: `:` opens a command line; :N gotos, :%s substitutes, unknown falls
     defer plugin.deinit();
 
     // `:` is now the ex command line (the palette moved to SPC :), and `ex` is a
-    // text-input mode routing keystrokes to `ex-type`.
-    try t.expectEqualStrings("vim-ex", env.keymap.lookup(env.head.currentMode(), "colon").?);
+    // text-input mode routing keystrokes to `vim.ex-type`.
+    try t.expectEqualStrings("vim.ex", env.keymap.lookup(env.head.currentMode(), "colon").?);
 
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "l1\nl2\nl3\nl4\nl5");
     ed.placeCursor(0);
 
     // `:3` — open the command line, type "3", Enter → cursor at the start of L3.
-    _ = try command.run(&env.commands, &env.ctx, "vim-ex", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex", &.{});
     try t.expectEqualStrings("ex", env.head.currentMode());
-    _ = try command.run(&env.commands, &env.ctx, "ex-type", &.{.{ .string = "3" }});
-    _ = try command.run(&env.commands, &env.ctx, "ex-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex-type", &.{.{ .string = "3" }});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex-accept", &.{});
     try t.expectEqualStrings("normal", env.head.currentMode()); // back in normal
     try t.expectEqual(@as(usize, 6), ed.cursorOffset());
 
     // `:%s/l/X/g` — a whole-file literal substitute, one user edit.
-    _ = try command.run(&env.commands, &env.ctx, "vim-ex", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "ex-type", &.{.{ .string = "%s/l/X/g" }});
-    _ = try command.run(&env.commands, &env.ctx, "ex-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex-type", &.{.{ .string = "%s/l/X/g" }});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex-accept", &.{});
     {
         const s = try ed.text().toOwnedSlice(gpa);
         defer gpa.free(s);
@@ -875,11 +875,11 @@ test "vim ex: `:` opens a command line; :N gotos, :%s substitutes, unknown falls
 
     // Composition: an unknown `:name` falls through to the registry and, when no
     // such command exists, reports it (vim's E492) rather than silently no-op.
-    env.head.echo.clearRetainingCapacity();
-    _ = try command.run(&env.commands, &env.ctx, "vim-ex", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "ex-type", &.{.{ .string = "definitely-not-a-command" }});
-    _ = try command.run(&env.commands, &env.ctx, "ex-accept", &.{});
-    try t.expect(std.mem.indexOf(u8, env.head.echo.items, "not an editor command") != null);
+    try env.head.echo.say(gpa, "");
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex-type", &.{.{ .string = "definitely-not-a-command" }});
+    _ = try command.run(&env.commands, &env.ctx, "vim.ex-accept", &.{});
+    try t.expect(std.mem.indexOf(u8, env.head.echo.text(), "not an editor command") != null);
 }
 
 test "wasm plugin: upcase-line edits in place across the membrane" {
@@ -896,7 +896,7 @@ test "wasm plugin: upcase-line edits in place across the membrane" {
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "abc\ndef");
     ed.placeCursor(5); // inside "def"
-    _ = try command.run(&env.commands, &env.ctx, "upcase-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "edit.upcase-line", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("abc\nDEF", s);
@@ -940,7 +940,7 @@ test "wasm plugin: a denied effect traps rather than returning a fake result" {
     // denied call (a regression back to the old silent -1), it would set its
     // result string to "did not trap" instead — so a bug here fails loud
     // either way.
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "go", &.{}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "sneaky.go", &.{}));
 }
 
 test "wasm plugin: a handle the guest never got is refused, not fatal to the host" {
@@ -968,8 +968,8 @@ test "wasm plugin: a handle the guest never got is refused, not fatal to the hos
     // A normal return IS the assertion — a regression panics the test binary
     // rather than failing it, so the guest also echoes on the way out to
     // prove it ran the whole gauntlet instead of trapping partway.
-    _ = try command.run(&env.commands, &env.ctx, "hostile-handles", &.{});
-    try t.expectEqualStrings("survived", env.head.echo.items);
+    _ = try command.run(&env.commands, &env.ctx, "hostile-handle.run", &.{});
+    try t.expectEqualStrings("survived", env.head.echo.text());
 
     // Nothing was opened, so nothing can have been closed: a bogus handle
     // must never have found a slot to null.
@@ -1004,7 +1004,7 @@ test "wasm plugin: a background entry's head-gated import traps (task #19 item 4
     // guest call unwinds right there, so the echo never runs either.
     try t.expectError(error.Trap, contract.callOptionalExport("on_poll", plugin, .{}));
     try t.expectEqualStrings("start", env.head.currentMode()); // untouched
-    try t.expectEqual(@as(usize, 0), env.head.echo.items.len); // untouched
+    try t.expectEqual(@as(usize, 0), env.head.echo.text().len); // untouched
 }
 
 test "wasm plugin: the SAME head-gated import works from a dispatching entry, and a nested wl_run keeps dispatch status (task #19 item 4)" {
@@ -1019,21 +1019,21 @@ test "wasm plugin: the SAME head-gated import works from a dispatching entry, an
     const plugin = try loadPlugin(&engine, &env.ctx, "headtest", @embedFile("guest_headtest_wasm"), .{});
     defer plugin.deinit();
 
-    // `head-poke` (on_command — DISPATCHING): the identical `weft.setMode`/
+    // `head.poke` (on_command — DISPATCHING): the identical `weft.setMode`/
     // `weft.echo` pair `on_poll` traps on above now succeeds.
-    _ = try command.run(&env.commands, &env.ctx, "head-poke", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "headtest.poke", &.{});
     try t.expectEqualStrings("poked", env.head.currentMode());
-    try t.expectEqualStrings("poked", env.head.echo.items);
+    try t.expectEqualStrings("poked", env.head.echo.text());
 
-    // `head-relay` (on_command -> wl_run("head-poke") -> on_command, nested)
+    // `head.relay` (on_command -> wl_run("headtest.poke") -> on_command, nested)
     // THEN a second `weft.echo` write after the nested call returns. Both the
     // nested call's writes and the post-nesting write must succeed — proving
     // `in_dispatch` (like `active_ctx`) is saved/restored around the nested
     // dispatch (still true before and after), not bare-set-and-lost the
     // instant the inner call returns.
-    _ = try command.run(&env.commands, &env.ctx, "head-relay", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "headtest.relay", &.{});
     try t.expectEqualStrings("poked", env.head.currentMode()); // set by the nested head-poke
-    try t.expectEqualStrings("after-relay", env.head.echo.items); // written AFTER the nesting, still succeeds
+    try t.expectEqualStrings("after-relay", env.head.echo.text()); // written AFTER the nesting, still succeeds
 }
 
 test "wasm plugin: nested same-plugin dispatch preserves its caller's live ranges" {
@@ -1048,7 +1048,7 @@ test "wasm plugin: nested same-plugin dispatch preserves its caller's live range
     defer plugin.deinit();
 
     try env.buffers.active().textEditor().?.insertText(gpa, "abc");
-    const result = try command.run(&env.commands, &env.ctx, "head-range-relay", &.{});
+    const result = try command.run(&env.commands, &env.ctx, "headtest.range-relay", &.{});
     try t.expect(result == .range);
     const resolved = result.range.resolve(&env.buffers.active().textEditor().?.doc) orelse return error.TestUnexpectedResult;
     try t.expectEqual(@as(usize, 1), resolved.start);
@@ -1133,10 +1133,10 @@ test "wasm plugin: hot-reload — teardown unbinds, re-instantiation is clean" {
     // must unbind and the store drop with no residue.
     {
         const v1 = try loadPlugin(&engine, &env.ctx, "edit", @embedFile("guest_edit_wasm"), .{});
-        _ = try command.run(&env.commands, &env.ctx, "duplicate-line", &.{});
+        _ = try command.run(&env.commands, &env.ctx, "edit.duplicate-line", &.{});
         v1.deinit();
         // After teardown the command is gone — nothing dangles behind it.
-        try t.expect(env.commands.resolve("duplicate-line") == null);
+        try t.expect(env.commands.resolve("edit.duplicate-line") == null);
     }
 
     // Re-instantiate from scratch (a fresh store, no shared mutable state):
@@ -1144,9 +1144,9 @@ test "wasm plugin: hot-reload — teardown unbinds, re-instantiation is clean" {
     {
         const v2 = try loadPlugin(&engine, &env.ctx, "edit", @embedFile("guest_edit_wasm"), .{});
         defer v2.deinit();
-        try t.expect(env.commands.resolve("duplicate-line") != null);
+        try t.expect(env.commands.resolve("edit.duplicate-line") != null);
         ed.placeCursor(0);
-        _ = try command.run(&env.commands, &env.ctx, "duplicate-line", &.{});
+        _ = try command.run(&env.commands, &env.ctx, "edit.duplicate-line", &.{});
     }
     // Two duplications of "x" across two independent instances: "x\nx\nx".
     const s = try ed.text().toOwnedSlice(gpa);
@@ -1311,7 +1311,7 @@ test "D2: one guest CONSUMES another guest's novel slot — typed, contextual, w
     defer gpa.free(live_version);
     try t.expect(live_version.len > 0);
 
-    const answer = try command.run(&env.commands, &env.ctx, "badge-read", &.{});
+    const answer = try command.run(&env.commands, &env.ctx, "badge-consumer.read", &.{});
     // provider | text | count | the version the HOST stamped. The consumer
     // never chose that version and never saw the provider's claimed one.
     const expected = try std.fmt.allocPrint(gpa, "badge|3 failing|3|{s}", .{live_version});
@@ -1326,7 +1326,7 @@ test "D2: one guest CONSUMES another guest's novel slot — typed, contextual, w
     defer env2.deinit(gpa);
     const lonely = try loadPlugin(&engine, &env2.ctx, "badge_consumer", @embedFile("guest_badge_consumer_wasm"), .{});
     defer lonely.deinit();
-    const none = try command.run(&env2.commands, &env2.ctx, "badge-read", &.{});
+    const none = try command.run(&env2.commands, &env2.ctx, "badge-consumer.read", &.{});
     try t.expectEqualStrings("no-provider", none.string);
 }
 
@@ -1338,7 +1338,7 @@ test "wasm plugin: demo-config composes commands + binds a key (config surface)"
 
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    // Load the edit plugin (provides duplicate-line/upcase-line) then the
+    // Load the edit plugin (provides edit.duplicate-line/upcase-line) then the
     // config that composes them — the same layering as std + user config.
     const edit = try loadPlugin(&engine, &env.ctx, "edit", @embedFile("guest_edit_wasm"), .{});
     defer edit.deinit();
@@ -1347,12 +1347,12 @@ test "wasm plugin: demo-config composes commands + binds a key (config surface)"
 
     // init() bound C-d → dup-up through the config surface.
     try env.head.setModeRaw(gpa, "default");
-    try t.expectEqualStrings("dup-up", env.keymap.lookup(env.head.currentMode(), "C-d").?);
+    try t.expectEqualStrings("demo-config.dup-up", env.keymap.lookup(env.head.currentMode(), "C-d").?);
 
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "ab");
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "dup-up", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "demo-config.dup-up", &.{});
     // dup-up ran duplicate-line ("ab\nab") then upcase-line on the current
     // line (cursor still at 0 → the first line) across the membrane.
     const s = try ed.text().toOwnedSlice(gpa);
@@ -1375,7 +1375,7 @@ test "wasm plugin: project command args/result + kv cross the membrane" {
 
     // `project` declares NO filesystem capability. Its one use of `fs_read`
     // was a VCS-marker climb duplicating the root the host already detects at
-    // open time; `project-root` reads that place instead (doc/place.md §4.2).
+    // open time; `project.show-root` reads that place instead (doc/place.md §4.2).
     // Asserted here so a regrant of either fs capability is loud.
     try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
     try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
@@ -1383,12 +1383,12 @@ test "wasm plugin: project command args/result + kv cross the membrane" {
     // Seed the recent list host-side (namespaced to the plugin); the guest
     // reads it back through kv and returns it as a string result.
     try store.put(gpa, "project", "recent", "a.zig\nb.zig");
-    const r = try command.run(&env.commands, &env.ctx, "project-recent", &.{});
+    const r = try command.run(&env.commands, &env.ctx, "project.recent", &.{});
     try t.expectEqualStrings("a.zig\nb.zig", r.string);
 
     // The scratch buffer has no backing path → remember returns -1 (the
     // integer result crosses the membrane).
-    const r2 = try command.run(&env.commands, &env.ctx, "project-remember", &.{});
+    const r2 = try command.run(&env.commands, &env.ctx, "project.remember", &.{});
     try t.expectEqual(command.Value{ .integer = -1 }, r2);
 }
 
@@ -1400,13 +1400,13 @@ test "wasm plugin: palette status echoes the active buffer (introspection)" {
 
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    const plugin = try loadPlugin(&engine, &env.ctx, "std", @embedFile("guest_palette_wasm"), .{});
+    const plugin = try loadPlugin(&engine, &env.ctx, "palette", @embedFile("guest_palette_wasm"), .{});
     defer plugin.deinit();
 
     // status walks the buffers (bufferCount/bufferAt) and echoes the active
     // one's name — the whole introspection surface across the membrane.
-    _ = try command.run(&env.commands, &env.ctx, "status", &.{});
-    try t.expectEqualStrings(env.buffers.active().name, env.head.echo.items);
+    _ = try command.run(&env.commands, &env.ctx, "palette.show-status", &.{});
+    try t.expectEqualStrings(env.buffers.active().name, env.head.echo.text());
 }
 
 test "wasm plugin: palette opens a command pick; accept dispatches back and runs the choice" {
@@ -1419,19 +1419,19 @@ test "wasm plugin: palette opens a command pick; accept dispatches back and runs
 
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    const plugin = try loadPlugin(&engine, &env.ctx, "std", @embedFile("guest_palette_wasm"), .{});
+    const plugin = try loadPlugin(&engine, &env.ctx, "palette", @embedFile("guest_palette_wasm"), .{});
     defer plugin.deinit();
 
-    // pick-commands builds a pick over the whole registry and opens it.
-    _ = try command.run(&env.commands, &env.ctx, "pick-commands", &.{});
+    // palette.open builds a pick over the whole registry and opens it.
+    _ = try command.run(&env.commands, &env.ctx, "palette.open", &.{});
     try t.expect(env.head.pick.active);
 
     // Narrow to "status" and accept: the accept crosses back into the guest's
     // on_pick_accept, which runs the chosen command — which echoes the buffer.
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "status" }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "status" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(!env.head.pick.active); // accept closed the pick
-    try t.expectEqualStrings(env.buffers.active().name, env.head.echo.items);
+    try t.expectEqualStrings(env.buffers.active().name, env.head.echo.text());
 }
 
 test "wasm plugins: consult-line combines anchored row identity with exact match evidence" {
@@ -1454,11 +1454,11 @@ test "wasm plugins: consult-line combines anchored row identity with exact match
     // evidence lands after its indentation. Move the document after the pick
     // has captured candidates: the row's CRDT anchors advance with the merge,
     // while immutable picker evidence stays presentation-only.
-    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "consult.line", &.{});
     try t.expect(env.head.pick.active);
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "ccc" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "ccc" }});
     try ed.doc.insert(gpa, 0, "prefix\n");
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(!env.head.pick.active);
     try t.expectEqual(@as(usize, 15), ed.cursorOffset()); // exact "ccc", not shifted line start 11
 
@@ -1466,22 +1466,22 @@ test "wasm plugins: consult-line combines anchored row identity with exact match
     // anchored range. Acceptance fails closed: it must not jump to the row or
     // EOF which happened to inherit the old byte coordinate.
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "ccc" }});
+    _ = try command.run(&env.commands, &env.ctx, "consult.line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "ccc" }});
     try ed.doc.delete(gpa, .{ .start = 11, .end = 18 });
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(!env.head.pick.active);
     try t.expectEqual(@as(usize, 0), ed.cursorOffset());
 
     // Reopening the same tool while its picker is live cancels the old
     // interaction before replacing its retained target table. The old
     // cancellation callback must not release the new picker's anchors.
-    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "aaa" }});
-    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "consult.line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "aaa" }});
+    _ = try command.run(&env.commands, &env.ctx, "consult.line", &.{});
     try t.expect(env.head.pick.active);
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "aaa" }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "aaa" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(!env.head.pick.active);
     try t.expectEqual(@as(usize, 7), ed.cursorOffset());
 
@@ -1489,10 +1489,10 @@ test "wasm plugins: consult-line combines anchored row identity with exact match
     // endpoint. Full-row evidence still detects it and acceptance fails
     // closed rather than treating anchors alone as proof of unchanged text.
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "aaa" }});
+    _ = try command.run(&env.commands, &env.ctx, "consult.line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "aaa" }});
     try ed.doc.replaceAll(gpa, &.{.{ .range = .{ .start = 7, .end = 10 }, .bytes = "AAA" }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(!env.head.pick.active);
     try t.expectEqual(@as(usize, 0), ed.cursorOffset());
 }
@@ -1516,7 +1516,7 @@ test "wasm plugins: consult-line verifies content beyond its display scratch" {
     try ed.insertText(gpa, line);
     ed.placeCursor(0);
 
-    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "consult.line", &.{});
     try t.expect(env.head.pick.active);
     // Change bytes after the 64-KiB candidate/display window without changing
     // the row length or its anchor endpoints.
@@ -1524,7 +1524,7 @@ test "wasm plugins: consult-line verifies content beyond its display scratch" {
         .range = .{ .start = 68 * 1024, .end = 68 * 1024 + 1 },
         .bytes = "b",
     }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expect(!env.head.pick.active);
     try t.expectEqual(@as(usize, 0), ed.cursorOffset());
 }
@@ -1559,10 +1559,10 @@ test "wasm plugins: consult-imenu picks a definition and jumps to it" {
     defer plugin.deinit();
 
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "consult-imenu", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "consult.imenu", &.{});
     try t.expect(env.head.pick.active);
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "bar" }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "bar" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     try t.expectEqual(std.mem.indexOf(u8, src, "fn bar").?, ed.cursorOffset());
 }
 
@@ -1571,7 +1571,7 @@ test "wasm plugins: buf-pick switches to the accepted buffer by its identity" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer-switch
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer.switch
     try @import("../pick.zig").install(gpa, &env.commands, &env.keymap);
 
     // Two more buffers beyond the initial scratch (ids 1 and 2).
@@ -1583,7 +1583,7 @@ test "wasm plugins: buf-pick switches to the accepted buffer by its identity" {
     const plugin = try loadPlugin(&engine, &env.ctx, "buffers", @embedFile("guest_buffers_wasm"), .{});
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "buf-pick", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "buffer.pick", &.{});
     try t.expect(env.head.pick.active);
     // The active buffer is intentionally the least convenient fallback: it
     // stays available at the end while the other buffers keep their stable
@@ -1593,13 +1593,13 @@ test "wasm plugins: buf-pick switches to the accepted buffer by its identity" {
     try t.expectEqualStrings("alpha", env.head.pick.items.items[0]);
     try t.expectEqualStrings("beta", env.head.pick.items.items[1]);
     try t.expectEqualStrings("*scratch*", env.head.pick.items.items[2]);
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "beta" }});
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "beta" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     // The accepted row resolved to beta's id → it is now the active buffer.
     try t.expectEqualStrings("beta", env.buffers.active().name);
 }
 
-test "wasm plugin: structural node-kind/delete-node degrade honestly with no grammar" {
+test "wasm plugin: ts node-kind and structural delete-node degrade honestly with no grammar" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -1610,12 +1610,14 @@ test "wasm plugin: structural node-kind/delete-node degrade honestly with no gra
     // No syntax service wired → nodeAt reports "no node" across the membrane.
     const plugin = try loadPlugin(&engine, &env.ctx, "structural", @embedFile("guest_structural_wasm"), .{});
     defer plugin.deinit();
+    const ts = try loadPlugin(&engine, &env.ctx, "ts", @embedFile("guest_ts_wasm"), .{});
+    defer ts.deinit();
 
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "foo");
-    const r1 = try command.run(&env.commands, &env.ctx, "node-kind", &.{});
+    const r1 = try command.run(&env.commands, &env.ctx, "ts.node-kind", &.{});
     try t.expect(r1 == .nil); // no grammar → nil
-    const r2 = try command.run(&env.commands, &env.ctx, "delete-node", &.{});
+    const r2 = try command.run(&env.commands, &env.ctx, "structural.delete-node", &.{});
     try t.expectEqual(command.Value{ .integer = 0 }, r2);
     try t.expect(ed.text().byteLen() == 3); // nothing deleted
 }
@@ -1654,15 +1656,15 @@ test "wasm plugin: ts expands selection to the enclosing node + runs a query" {
     // Cursor on "42": select-node selects the literal; expand grows to a
     // strictly larger enclosing node (design §6.2, via native syntax reads).
     ed.placeCursor(std.mem.indexOf(u8, src, "42").?);
-    _ = try command.run(&env.commands, &env.ctx, "ts-select-node", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "ts.select-node", &.{});
     const leaf = ed.selectedRange().?;
-    _ = try command.run(&env.commands, &env.ctx, "ts-expand-selection", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "ts.expand-selection", &.{});
     const parent = ed.selectedRange().?;
     try t.expect(parent.end - parent.start > leaf.end - leaf.start);
 
     // A query over the buffer materializes captures across the membrane: the
     // identifier "x" is found (>= 1 capture).
-    const n = try command.run(&env.commands, &env.ctx, "ts-query", &.{.{ .string = "(identifier) @i" }});
+    const n = try command.run(&env.commands, &env.ctx, "ts.query", &.{.{ .string = "(identifier) @i" }});
     try t.expect(n == .integer and n.integer >= 1);
 }
 
@@ -1700,9 +1702,9 @@ test "wasm plugins: a tree text object (a-function) an operator deletes (daf)" {
     // Cursor inside the function; a-function selects the whole function node,
     // the operator deletes it — a tree object composed with the SAME operator.
     ed.placeCursor(std.mem.indexOf(u8, src, "foo").?);
-    const rv = try command.run(&env.commands, &env.ctx, "textobj.a-function", &.{});
+    const rv = try command.run(&env.commands, &env.ctx, "textobjects.around-function", &.{});
     try t.expect(rv == .range);
-    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    _ = try command.run(&env.commands, &env.ctx, "operators.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expect(std.mem.indexOf(u8, s, "foo") == null); // the function is gone
@@ -1726,7 +1728,7 @@ test "wasm plugin: region claims a subbuffer + attaches a fact across the membra
     try ed.insertText(gpa, "line one\nline two");
     ed.placeCursor(2); // inside the first line ("line one" — 8 bytes)
 
-    const r = try command.run(&env.commands, &env.ctx, "mark-region", &.{.{ .string = "js" }});
+    const r = try command.run(&env.commands, &env.ctx, "region.mark", &.{.{ .string = "js" }});
     try t.expectEqual(command.Value{ .integer = 8 }, r);
     // The claimed subbuffer (handle 0) carries the language fact the guest set.
     try t.expectEqualStrings("js", plugin.subs.items[0].fact("language").?);
@@ -1749,7 +1751,7 @@ test "wasm plugin: shell insert-shell runs a command off-thread and inserts at i
     try ed.insertText(gpa, "X");
     ed.placeCursor(1); // capture the insert point at offset 1
 
-    _ = try command.run(&env.commands, &env.ctx, "insert-shell", &.{.{ .string = "printf hi" }});
+    _ = try command.run(&env.commands, &env.ctx, "shell.insert-output", &.{.{ .string = "printf hi" }});
 
     // Concurrently insert at the head: the deferred insert's identity anchor
     // must resolve to 3 before "hi" lands.
@@ -1784,7 +1786,7 @@ test "wasm plugin: shell insert is a no-op when the async service is absent" {
 
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "Z");
-    _ = try command.run(&env.commands, &env.ctx, "insert-shell", &.{.{ .string = "printf hi" }});
+    _ = try command.run(&env.commands, &env.ctx, "shell.insert-output", &.{.{ .string = "printf hi" }});
     try t.expect(ed.text().byteLen() == 1); // nothing inserted
 }
 
@@ -1793,7 +1795,7 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer-create
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer.create
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
@@ -1818,12 +1820,12 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     // Phase 2b/2c: the transient verbs are declared + registered (menu modes are
     // keymap state, but each terminal action is a real command).
     for ([_][]const u8{
-        "git-amend",            "git-fixup",         "git-cherry-pick", "git-revert",
-        "git-reset-hard",       "git-branch-create", "git-stash-pop",   "git-push-do",
-        "git-fetch-toggle-all", "git-rebase-save",   "git-commit-save",
+        "git.amend",            "git.fixup",         "git.cherry-pick", "git.revert",
+        "git.reset-hard",       "git.branch-create", "git.stash-pop",   "git.push-do",
+        "git.fetch-toggle-all", "git.rebase-save",   "git.commit-save",
     }) |name| try t.expect(env.commands.find(name) != null);
 
-    _ = try command.run(&env.commands, &env.ctx, "git-status", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "git.status", &.{});
     // The git model buffer was created + focused synchronously (before output).
     const buf = blk: {
         var it = env.buffers.iterator();
@@ -1871,7 +1873,7 @@ test "wasm plugin: run-command runs a shell command into a tool buffer (async)" 
     defer plugin.deinit();
 
     // A deterministic command (echo) — proves the proc→buffer path end to end.
-    _ = try command.run(&env.commands, &env.ctx, "run-command", &.{.{ .string = "echo weft-ok" }});
+    _ = try command.run(&env.commands, &env.ctx, "run.command", &.{.{ .string = "echo weft-ok" }});
     const buf = blk: {
         var it = env.buffers.iterator();
         while (it.next()) |b| if (std.mem.eql(u8, b.name, "*output*")) break :blk b;
@@ -1913,7 +1915,7 @@ test "wasm plugin: fmt filters a range through a command (async, in-place tmp)" 
     const before = ed.doc.commitCount();
     // Filter the whole buffer through sed (in /usr/bin — no nix PATH needed):
     // rewrite the temp file in place, then the result replaces the range.
-    _ = try command.run(&env.commands, &env.ctx, "filter", &.{.{ .string = "sed -i s/foo/bar/g {}" }});
+    _ = try command.run(&env.commands, &env.ctx, "fmt.filter", &.{.{ .string = "sed -i s/foo/bar/g {}" }});
     var rounds: usize = 0;
     while (rounds < 20_000_000 and ed.doc.commitCount() == before) : (rounds += 1) {
         _ = loop.tick();
@@ -1934,7 +1936,7 @@ test "wasm plugin: repl runs a persistent process and streams its output back" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer-create
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer.create
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
@@ -1946,14 +1948,14 @@ test "wasm plugin: repl runs a persistent process and streams its output back" {
 
     // A shell read-loop is a persistent echo REPL whose `echo` flushes
     // immediately (unlike `cat`, which block-buffers stdout on a pipe).
-    _ = try command.run(&env.commands, &env.ctx, "repl-start", &.{.{ .string = "while read l; do echo \"$l\"; done" }});
+    _ = try command.run(&env.commands, &env.ctx, "repl.start", &.{.{ .string = "while read l; do echo \"$l\"; done" }});
     const buf = blk: {
         var it = env.buffers.iterator();
         while (it.next()) |b| if (std.mem.eql(u8, b.name, "*repl*")) break :blk b;
         break :blk null;
     };
     try t.expect(buf != null);
-    _ = try command.run(&env.commands, &env.ctx, "repl-send", &.{.{ .string = "ping" }});
+    _ = try command.run(&env.commands, &env.ctx, "repl.send", &.{.{ .string = "ping" }});
 
     // Drive the frame drain until cat's echo streams into *repl* (bounded — a
     // timeout fails the assert rather than hanging).
@@ -1972,7 +1974,7 @@ test "wasm plugin: console-send runs the current line and appends output" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer-create
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer.create
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
@@ -1981,11 +1983,11 @@ test "wasm plugin: console-send runs the current line and appends output" {
     const plugin = try loadPlugin(&engine, &env.ctx, "console", @embedFile("guest_console_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "console-open", &.{}); // focus *console*
+    _ = try command.run(&env.commands, &env.ctx, "console.open", &.{}); // focus *console*
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "echo con-ok"); // type a command line
     const before = ed.doc.commitCount();
-    _ = try command.run(&env.commands, &env.ctx, "console-send", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "console.send", &.{});
     var rounds: usize = 0;
     while (rounds < 20_000_000 and ed.doc.commitCount() == before) : (rounds += 1) {
         _ = loop.tick();
@@ -2014,21 +2016,21 @@ test "wasm plugin: vim wires the modal keymap and runs motions/operators as .was
     // init() booted into normal and wired the whole keymap through the config
     // surface — motions, operators, insert entries — all across the membrane.
     try t.expectEqualStrings("normal", env.head.currentMode());
-    try t.expectEqualStrings("vim-insert", env.keymap.lookup(env.head.currentMode(), "i").?);
-    try t.expectEqualStrings("enter-op-delete", env.keymap.lookup(env.head.currentMode(), "d").?);
+    try t.expectEqualStrings("vim.insert", env.keymap.lookup(env.head.currentMode(), "i").?);
+    try t.expectEqualStrings("vim.delete", env.keymap.lookup(env.head.currentMode(), "d").?);
 
-    // Mode switches: i → insert, Escape (vim-normal) → normal.
-    _ = try command.run(&env.commands, &env.ctx, "vim-insert", &.{});
+    // Mode switches: i → insert, Escape (vim.normal) → normal.
+    _ = try command.run(&env.commands, &env.ctx, "vim.insert", &.{});
     try t.expectEqualStrings("insert", env.head.currentMode());
-    _ = try command.run(&env.commands, &env.ctx, "vim-normal", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.normal", &.{});
     try t.expectEqualStrings("normal", env.head.currentMode());
 
-    // yank-line + paste duplicates the current line (through the core register).
+    // vim.yank-line + paste duplicates the current line (through the core register).
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "hello");
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "yank-line", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "paste", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.yank-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.paste", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("hello\nhello", s);
@@ -2060,8 +2062,8 @@ test "wasm plugin: vim yank/paste ferries a subbuffer id through the register (d
     // yy then p: the id must ride the CORE register onto the pasted line — a
     // move — not vanish into a delete+create. The whole thesis, end to end
     // across the wasm membrane: yankRange snapshots it, pasteAt re-stamps it.
-    _ = try command.run(&env.commands, &env.ctx, "yank-line", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "paste", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.yank-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "vim.paste", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("row-a\nrow-a", s);
@@ -2088,12 +2090,12 @@ test "wasm plugins: a motion returns a range an operator awaits + applies (dw)" 
 
     // The motion returns a borrowed pair of document-owned live anchors —
     // never a bare offset. Cursor is one end (0), the target the other (4).
-    const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
+    const rv = try command.run(&env.commands, &env.ctx, "motions.word-next", &.{});
     try t.expect(rv == .range);
 
     // The operator awaits that range (as its arg) and applies the gated edit —
     // authored as the operators plugin's peer, not the user.
-    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    _ = try command.run(&env.commands, &env.ctx, "operators.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("bar", s);
@@ -2118,7 +2120,7 @@ test "wasm plugins: an awaited live range follows an intervening edit" {
     ed.placeCursor(0);
 
     // Compute a word-forward range [0,4) as document-owned live anchors.
-    const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
+    const rv = try command.run(&env.commands, &env.ctx, "motions.word-next", &.{});
     try t.expect(rv == .range);
 
     // A concurrent edit lands BEFORE the operator applies: insert "XX" at 0.
@@ -2126,7 +2128,7 @@ test "wasm plugins: an awaited live range follows an intervening edit" {
     ed.placeCursor(0);
     try ed.insertText(gpa, "XX");
 
-    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    _ = try command.run(&env.commands, &env.ctx, "operators.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("XXbar", s); // "foo " deleted at its anchored site
@@ -2152,10 +2154,10 @@ test "wasm plugins: vim composes motions + operators — dw through the keymap" 
     ed.placeCursor(0);
 
     // `d` enters operator-pending; the `w` binding there is vim's op wrapper,
-    // which runs motion.word-fwd and hands its range to op.delete.
-    _ = try command.run(&env.commands, &env.ctx, "enter-op-delete", &.{});
+    // which runs motions.word-next and hands its range to operators.delete.
+    _ = try command.run(&env.commands, &env.ctx, "vim.delete", &.{});
     try t.expectEqualStrings("op-pending", env.head.currentMode());
-    try t.expectEqualStrings("vim/o/motion.word-fwd", env.keymap.lookup(env.head.currentMode(), "w").?);
+    try t.expectEqualStrings("vim.operate-to-word-next", env.keymap.lookup(env.head.currentMode(), "w").?);
     _ = try command.run(&env.commands, &env.ctx, env.keymap.lookup(env.head.currentMode(), "w").?, &.{});
     try t.expectEqualStrings("normal", env.head.currentMode());
 
@@ -2183,9 +2185,9 @@ test "wasm plugins: a text object returns a range an operator applies (di\")" {
 
     // inner-quote-double yields the span between the quotes ("hi"); the operator
     // deletes it — the range is absolute (the construct), not cursor-relative.
-    const rv = try command.run(&env.commands, &env.ctx, "textobj.inner-quote-double", &.{});
+    const rv = try command.run(&env.commands, &env.ctx, "textobjects.inner-quote-double", &.{});
     try t.expect(rv == .range);
-    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    _ = try command.run(&env.commands, &env.ctx, "operators.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("say \"\" ok", s);
@@ -2210,10 +2212,10 @@ test "wasm plugins: vim di( through the keymap (operator + text object)" {
     try ed.insertText(gpa, "f(a, b)");
     ed.placeCursor(4); // inside the parens
 
-    // di( : d → op-pending, i → op-to (inner), ( → the paren object.
-    _ = try command.run(&env.commands, &env.ctx, "enter-op-delete", &.{});
+    // di( : d → op-pending, i → op-inner, ( → the paren object.
+    _ = try command.run(&env.commands, &env.ctx, "vim.delete", &.{});
     _ = try command.run(&env.commands, &env.ctx, env.keymap.lookup(env.head.currentMode(), "i").?, &.{});
-    try t.expectEqualStrings("op-to", env.head.currentMode());
+    try t.expectEqualStrings("op-inner", env.head.currentMode());
     _ = try command.run(&env.commands, &env.ctx, env.keymap.lookup(env.head.currentMode(), "parenleft").?, &.{});
     try t.expectEqualStrings("normal", env.head.currentMode());
 
@@ -2241,20 +2243,20 @@ test "wasm plugins: a view-grade peer's op.delete refuses (zero permission code)
     ed.doc.my_grant = .view; // the document is read-only for us
 
     // The motion (read-only) still computes a range — reads are never gated.
-    const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
+    const rv = try command.run(&env.commands, &env.ctx, "motions.word-next", &.{});
     try t.expect(rv == .range);
     // But the operator's edit dies at the gate: the buffer is unchanged, and no
     // ghost commit was authored.
     const before = ed.doc.commitCount();
-    env.head.echo.clearRetainingCapacity();
-    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    try env.head.echo.say(gpa, "");
+    _ = try command.run(&env.commands, &env.ctx, "operators.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("foo bar", s);
     try t.expectEqual(before, ed.doc.commitCount());
     // The guest door is silent, so the refusal is only honest because the ONE
     // edit door echoed it — same feedback a builtin's refusal gets.
-    try t.expectEqualStrings("read-only: view access", env.head.echo.items);
+    try t.expectEqualStrings("read-only: view access", env.head.echo.text());
 }
 
 test "wasm plugins: a read-only buffer refuses a guest edit and says so" {
@@ -2273,15 +2275,15 @@ test "wasm plugins: a read-only buffer refuses a guest edit and says so" {
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "foo bar");
     ed.placeCursor(0);
-    env.buffers.active().read_only = true;
+    env.buffers.active().read_only = @import("../Buffers.zig").produced;
 
-    const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
-    env.head.echo.clearRetainingCapacity();
-    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    const rv = try command.run(&env.commands, &env.ctx, "motions.word-next", &.{});
+    try env.head.echo.say(gpa, "");
+    _ = try command.run(&env.commands, &env.ctx, "operators.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("foo bar", s);
-    try t.expectEqualStrings("read-only buffer", env.head.echo.items);
+    try t.expectEqualStrings("read-only buffer", env.head.echo.text());
 }
 
 test "wasm plugin: comment toggles a line comment, preserving indent" {
@@ -2297,13 +2299,13 @@ test "wasm plugin: comment toggles a line comment, preserving indent" {
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "  hi");
     ed.placeCursor(4);
-    _ = try command.run(&env.commands, &env.ctx, "comment-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "comment.toggle-line", &.{});
     {
         const s = try ed.text().toOwnedSlice(gpa);
         defer gpa.free(s);
         try t.expectEqualStrings("  // hi", s);
     }
-    _ = try command.run(&env.commands, &env.ctx, "comment-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "comment.toggle-line", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("  hi", s);
@@ -2322,7 +2324,7 @@ test "wasm plugin: whitespace trims trailing spaces on the line" {
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "hi   \nok");
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "trim-trailing-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "whitespace.trim-line", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("hi\nok", s);
@@ -2341,7 +2343,7 @@ test "wasm plugin: numbers increments the integer under the cursor" {
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "x 41 y");
     ed.placeCursor(2); // on the '4'
-    _ = try command.run(&env.commands, &env.ctx, "increment-number", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "numbers.increment", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("x 42 y", s);
@@ -2360,7 +2362,7 @@ test "wasm plugin: autopair inserts a matched pair around the cursor" {
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "ab");
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "pair-paren", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "autopair.open-paren", &.{});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("()ab", s);
@@ -2372,7 +2374,7 @@ test "wasm plugin: notes capture appends via fs and open opens the real file, no
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer-create, open
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer.create, open
 
     const tmp = "weft-notes-test.md"; // cwd-relative; cleaned up below
     file.deleteFile(gpa, tmp);
@@ -2387,9 +2389,9 @@ test "wasm plugin: notes capture appends via fs and open opens the real file, no
     try t.expect(plugin.perms[wasm_host.perm_fs_read] and plugin.perms[wasm_host.perm_fs_write]);
 
     // Two captures append to the file; open opens the note target itself.
-    _ = try command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "todo x" }, .{ .string = tmp } });
-    _ = try command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "todo y" }, .{ .string = tmp } });
-    _ = try command.run(&env.commands, &env.ctx, "notes-open", &.{.{ .string = tmp }});
+    _ = try command.run(&env.commands, &env.ctx, "notes.capture", &.{ .{ .string = "todo x" }, .{ .string = tmp } });
+    _ = try command.run(&env.commands, &env.ctx, "notes.capture", &.{ .{ .string = "todo y" }, .{ .string = tmp } });
+    _ = try command.run(&env.commands, &env.ctx, "notes.open", &.{.{ .string = tmp }});
 
     // No scratch "*notes*" buffer — the opened buffer is path-backed.
     const scratch = blk: {
@@ -2443,7 +2445,7 @@ test "wasm plugin: W4 slice 1 GATE — revoking fs from a RUNNING plugin traps i
 
     // Live and working, exactly like the ungated test — the migration is
     // behavior-identical for a granted plugin.
-    _ = try command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "before" }, .{ .string = tmp } });
+    _ = try command.run(&env.commands, &env.ctx, "notes.capture", &.{ .{ .string = "before" }, .{ .string = tmp } });
 
     // Revoke fs_write from the RUNNING plugin — no reload, no re-describe,
     // no new load at all: the SAME `*WasmPlugin` the first capture already
@@ -2457,7 +2459,7 @@ test "wasm plugin: W4 slice 1 GATE — revoking fs from a RUNNING plugin traps i
 
     // The VERY NEXT fs.write-backed call traps — command.run surfaces it as
     // error.Trap (the membrane's one deny path), never a normal return.
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "after" }, .{ .string = tmp } }));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "notes.capture", &.{ .{ .string = "after" }, .{ .string = tmp } }));
 }
 
 test "wasm plugin: modes reacts to the activation event by language, without touching the head (task #19 item 4)" {
@@ -2480,13 +2482,13 @@ test "wasm plugin: modes reacts to the activation event by language, without tou
     // structural guarantee this task adds: a BACKGROUND entry never touches
     // `env.head.echo`, for any of these activations — not a crash, not a
     // trap-then-silently-recover, just never reached at all.
-    try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
+    try t.expectEqual(@as(usize, 0), env.head.echo.text().len);
     wasm_host.notifyActivate(plugin, "src/main.py");
-    try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
+    try t.expectEqual(@as(usize, 0), env.head.echo.text().len);
     wasm_host.notifyActivate(plugin, "build.zig");
-    try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
+    try t.expectEqual(@as(usize, 0), env.head.echo.text().len);
     wasm_host.notifyActivate(plugin, "LICENSE"); // unrecognized extension: still a no-op
-    try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
+    try t.expectEqual(@as(usize, 0), env.head.echo.text().len);
 }
 
 test "wasm plugin: snippets-expand inserts a template body from an fs file" {
@@ -2507,7 +2509,7 @@ test "wasm plugin: snippets-expand inserts a template body from an fs file" {
 
     const ed = env.buffers.active().textEditor().?;
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "snippets-expand", &.{ .{ .string = "fn" }, .{ .string = tmp } });
+    _ = try command.run(&env.commands, &env.ctx, "snippets.expand", &.{ .{ .string = "fn" }, .{ .string = tmp } });
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("fn foo() {\n}", s); // literal \n expanded to a newline
@@ -2612,17 +2614,17 @@ test "wasm plugin: an fs_root-limited grant confines fs through a REAL guest —
 
     // In-root write, then read, succeed — across the membrane, through the
     // REAL split semantic bodies + the semantic-confined RootedFs backstop.
-    const wr = try command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = in_path }, .{ .string = "hi from guest" } });
+    const wr = try command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = in_path }, .{ .string = "hi from guest" } });
     try t.expectEqual(command.Value{ .integer = 1 }, wr);
-    const rr = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = in_path }});
+    const rr = try command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = in_path }});
     try t.expectEqualStrings("hi from guest", rr.string);
 
     // Out-of-root: the guest's call traps outright — never a fake "<absent>"
     // it could keep running past (the same trap-on-deny discipline
     // `deny.zig`'s test proves for a missing perm; this is the identical
     // property for a POSSESSED-but-out-of-bounds path).
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = "totally/unrelated/path.txt" }}));
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = "totally/unrelated/path.txt" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = "totally/unrelated/path.txt" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = "totally/unrelated/path.txt" }}));
 
     // Traversal: lexically prefixed by the root (passes the fast lexical
     // gate) but escapes it via `..` — the KERNEL gate (RootedFs,
@@ -2630,8 +2632,8 @@ test "wasm plugin: an fs_root-limited grant confines fs through a REAL guest —
     // exactly the same way: a trap, not a silent allow.
     var esc_path_buf: [300]u8 = undefined;
     const esc_path = try std.fmt.bufPrint(&esc_path_buf, "{s}/../../etc/passwd", .{root});
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = esc_path }}));
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = esc_path }, .{ .string = "x" } }));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = esc_path }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = esc_path }, .{ .string = "x" } }));
 }
 
 // ── doc/place.md §4.1: an ABSENT limit means the PLACE, not the machine ──
@@ -2679,30 +2681,30 @@ test "wasm plugin: a declared-but-ungranted fs capability is confined to the DIS
     // byte-identical to what a cwd-relative path always meant.
     try t.expectEqual(
         command.Value{ .integer = 1 },
-        try command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = rel }, .{ .string = "in place" } }),
+        try command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = rel }, .{ .string = "in place" } }),
     );
-    const got = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = rel }});
+    const got = try command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = rel }});
     try t.expectEqualStrings("in place", got.string);
     try t.expectEqual(
         command.Value{ .integer = @intFromEnum(file.Kind.file) },
-        try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = rel }}),
+        try command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = rel }}),
     );
 
     // INSIDE the place, spelled ABSOLUTELY — the same file, still allowed. A
     // place confinement is about WHERE, not about how the guest spelled it.
-    const got_abs = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = abs }});
+    const got_abs = try command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = abs }});
     try t.expectEqualStrings("in place", got_abs.string);
 
     // OUTSIDE the place: refused. Not a `<absent>` the guest could keep
     // running past — a trap, the same discipline `.fs_root` already has.
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = "/etc/hostname" }}));
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = "/etc" }}));
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = "/tmp/weft-place-escape.txt" }, .{ .string = "x" } }));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = "/etc/hostname" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = "/etc" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = "/tmp/weft-place-escape.txt" }, .{ .string = "x" } }));
     // And a climb out of it, relative or absolute, is refused too.
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = "../etc/hostname" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = "../etc/hostname" }}));
     const climb = try std.fmt.allocPrint(gpa, "{s}/../../etc/hostname", .{here});
     defer gpa.free(climb);
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = climb }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = climb }}));
 
     // THE ESCAPE HATCH, and it is a sentence someone had to write:
     // `weft.grant("fs_limit", "fs_read", { root: "/" })`. Applied to the SAME
@@ -2712,13 +2714,13 @@ test "wasm plugin: a declared-but-ungranted fs capability is confined to the DIS
     try t.expectEqual(grants_mod.Limit.none, table.limitFor(plugin.grant_handles[wasm_host.perm_fs_read]));
     try t.expectEqual(
         command.Value{ .integer = @intFromEnum(file.Kind.dir) },
-        try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = "/etc" }}),
+        try command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = "/etc" }}),
     );
-    const outside = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = "/etc/hostname" }});
+    const outside = try command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = "/etc/hostname" }});
     try t.expect(outside.string.len > 0 or std.mem.eql(u8, outside.string, "<absent>"));
     // fs_WRITE was not widened, so it is still confined — the two capabilities
     // are separate rows and a widening of one is not a widening of both.
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = "/tmp/weft-place-escape.txt" }, .{ .string = "x" } }));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = "/tmp/weft-place-escape.txt" }, .{ .string = "x" } }));
 }
 
 // ── doc/place.md §4.1: bucket 1 is carved out UNCONDITIONALLY ────────────
@@ -2775,17 +2777,17 @@ test "wasm plugin: no grant, however broad, reaches the editor's own machinery (
     defer gpa.free(content_path);
     try t.expectEqual(
         command.Value{ .integer = 1 },
-        try command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = content_path }, .{ .string = "ordinary" } }),
+        try command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = content_path }, .{ .string = "ordinary" } }),
     );
-    const ord = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = content_path }});
+    const ord = try command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = content_path }});
     try t.expectEqualStrings("ordinary", ord.string);
     try t.expectEqual(
         command.Value{ .integer = @intFromEnum(file.Kind.dir) },
-        try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = "/etc" }}),
+        try command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = "/etc" }}),
     );
     // A mundane miss is a 0, NOT a trap — the answer every refusal below has
     // to stay distinguishable from.
-    const absent = try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = "/definitely-not-here-xyzzy" }});
+    const absent = try command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = "/definitely-not-here-xyzzy" }});
     try t.expectEqual(command.Value{ .integer = @intFromEnum(file.Kind.none) }, absent);
 
     // 1. The wasm module cache (`wasm.Engine.cacheDir`). Read, probe, and
@@ -2796,15 +2798,15 @@ test "wasm plugin: no grant, however broad, reaches the editor's own machinery (
         defer gpa.free(dir);
         const inside = try std.fmt.allocPrint(gpa, "{s}/deadbeef.cwasm", .{dir});
         defer gpa.free(inside);
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = dir }}));
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = inside }}));
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = inside }}));
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = inside }, .{ .string = "x" } }));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = dir }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = inside }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = inside }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = inside }, .{ .string = "x" } }));
         // The `..` spelling doesn't walk in either — the comparison is on the
         // normalized path, not the string the guest typed.
         const traversal = try std.fmt.allocPrint(gpa, "{s}/sub/../deadbeef.cwasm", .{dir});
         defer gpa.free(traversal);
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = traversal }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = traversal }}));
     }
 
     // 2. The plugin kv store (`kv_file.stateDir`) — one plugin's private
@@ -2812,11 +2814,11 @@ test "wasm plugin: no grant, however broad, reaches the editor's own machinery (
     {
         const dir = @import("../kv_file.zig").stateDir(gpa).?;
         defer gpa.free(dir);
-        const blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, @import("../kv_file.zig").store_file });
+        const blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, @import("../kv_file.zig").plugins_file });
         defer gpa.free(blob);
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = blob }}));
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = blob }}));
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = blob }, .{ .string = "x" } }));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = blob }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = blob }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = blob }, .{ .string = "x" } }));
     }
 
     // 3/4. The two keystores. READ and PROBE only, deliberately: unlike the
@@ -2829,13 +2831,13 @@ test "wasm plugin: no grant, however broad, reaches the editor's own machinery (
     const machinery = @import("../machinery.zig");
     var pbuf: [512]u8 = undefined;
     if (@import("../identity.zig").configPath(&pbuf, machinery.Posix{})) |p| {
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = p }}));
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = p }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = p }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = p }}));
     }
     var kbuf: [512]u8 = undefined;
     if (@import("../known_peers.zig").configPath(&kbuf, machinery.Posix{})) |p| {
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = p }}));
-        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = p }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = p }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = p }}));
     }
 }
 
@@ -2882,18 +2884,18 @@ test "wasm plugin: a symlink cannot walk into the machinery a plugin may not nam
     if (std.os.linux.errno(std.os.linux.symlinkat(targetz.ptr, std.os.linux.AT.FDCWD, linkz.ptr)) != .SUCCESS)
         return error.SkipZigTest;
 
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = linkz }}));
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = linkz }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = linkz }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = linkz }}));
     const through = try std.fmt.allocPrint(gpa, "{s}/deadbeef.cwasm", .{linkz});
     defer gpa.free(through);
-    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = through }, .{ .string = "x" } }));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.write", &.{ .{ .string = through }, .{ .string = "x" } }));
 
     // The same tmp directory, NOT through the link, is ordinary content the
     // unconfined grant still reaches — the symlink is what was refused, not
     // the neighbourhood.
     try t.expectEqual(
         command.Value{ .integer = @intFromEnum(file.Kind.dir) },
-        try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = dir }}),
+        try command.run(&env.commands, &env.ctx, "fs-limit.exists", &.{.{ .string = dir }}),
     );
 }
 
@@ -3062,12 +3064,12 @@ test "wasm plugin: a proc fill lands in the entry it captured, not the focused o
     const plugin = try loadPlugin(&engine, &env.ctx, "run", @embedFile("guest_run_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "run-command", &.{.{ .string = "echo captured" }});
+    _ = try command.run(&env.commands, &env.ctx, "run.command", &.{.{ .string = "echo captured" }});
     const out = namedBuffer(&env.buffers, "*output*") orelse return error.TestExpectedEqual;
 
     // Focus moves on while the command is still running — the ordinary case
     // the old "deliver to whoever is active" routing got wrong.
-    _ = try command.run(&env.commands, &env.ctx, "buffer-create", &.{.{ .string = "*elsewhere*" }});
+    _ = try command.run(&env.commands, &env.ctx, "buffer.create", &.{.{ .string = "*elsewhere*" }});
     const elsewhere = env.buffers.active();
     try t.expectEqualStrings("*elsewhere*", elsewhere.name);
 
@@ -3094,11 +3096,11 @@ test "wasm plugin: a proc fill whose entry closed is dropped, never redirected" 
     const plugin = try loadPlugin(&engine, &env.ctx, "run", @embedFile("guest_run_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "run-command", &.{.{ .string = "echo vanished" }});
+    _ = try command.run(&env.commands, &env.ctx, "run.command", &.{.{ .string = "echo vanished" }});
     try t.expect(namedBuffer(&env.buffers, "*output*") != null);
 
     // Close it while the command runs: the captured generation is now dead.
-    _ = try command.run(&env.commands, &env.ctx, "buffer-close", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "buffer.close-unmodified", &.{});
     try t.expect(namedBuffer(&env.buffers, "*output*") == null);
 
     drainJobs(&loop);
@@ -3129,9 +3131,9 @@ test "wasm plugin: on_fill_token paints the entry its fill captured, off-focus" 
     const plugin = try loadPlugin(&engine, &env.ctx, "git", @embedFile("guest_git_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "git-status", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "git.status", &.{});
     const model = namedBuffer(&env.buffers, "*git*") orelse return error.TestExpectedEqual;
-    _ = try command.run(&env.commands, &env.ctx, "buffer-create", &.{.{ .string = "*elsewhere*" }});
+    _ = try command.run(&env.commands, &env.ctx, "buffer.create", &.{.{ .string = "*elsewhere*" }});
 
     drainJobs(&loop);
 
@@ -3181,7 +3183,7 @@ test "wasm plugin: wl_proc_spool feeds the child a host-named temp, with no fs p
     try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
     try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
 
-    _ = try command.run(&env.commands, &env.ctx, "spool-ok", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "spool.ok", &.{});
     drainJobs(&loop);
     const ok_buf = namedBuffer(&env.buffers, "*spool*") orelse return error.TestExpectedEqual;
     const ok_out = try ok_buf.textEditor().?.text().toOwnedSlice(gpa);
@@ -3201,7 +3203,7 @@ test "wasm plugin: wl_proc_spool feeds the child a host-named temp, with no fs p
     // Same on the FAILURE path, which is where the old in-plugin temps used to
     // survive: git's `rm -f` rode on the command it was appended to, so an
     // apply or commit that died took the cleanup with it.
-    _ = try command.run(&env.commands, &env.ctx, "spool-fail", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "spool.fail", &.{});
     drainJobs(&loop);
     const fail_buf = namedBuffer(&env.buffers, "*spool-fail*") orelse return error.TestExpectedEqual;
     const fail_out = try fail_buf.textEditor().?.text().toOwnedSlice(gpa);
@@ -3239,7 +3241,7 @@ test "wasm plugin: a projection encloses, folds by key, and keeps the cursor on 
     // authority, and this guest declares none.
     for (plugin.perms) |granted| try t.expect(!granted);
 
-    _ = try command.run(&env.commands, &env.ctx, "proj-build", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.build", &.{});
     const buf = namedBuffer(&env.buffers, "*proj*") orelse return error.TestExpectedEqual;
     {
         const text = try buf.textEditor().?.text().toOwnedSlice(gpa);
@@ -3267,7 +3269,7 @@ test "wasm plugin: a projection encloses, folds by key, and keeps the cursor on 
     try editor.setMark(gpa);
     editor.placeCursor(new_end);
 
-    _ = try command.run(&env.commands, &env.ctx, "proj-report", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.report", &.{});
     {
         const line = try execReport(&env, gpa, "*proj-report*");
         defer gpa.free(line);
@@ -3283,8 +3285,8 @@ test "wasm plugin: a projection encloses, folds by key, and keeps the cursor on 
     // the cursor are keyed, so both survive an insertion that moved every
     // offset below it — the case a positional memory gets wrong.
     editor.placeCursor(std.mem.indexOf(u8, text, "  b.zig").?);
-    _ = try command.run(&env.commands, &env.ctx, "proj-fold-b", &.{});
-    _ = try command.run(&env.commands, &env.ctx, "proj-rebuild", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.fold-b", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.rebuild", &.{});
     {
         const after = try buf.textEditor().?.text().toOwnedSlice(gpa);
         defer gpa.free(after);
@@ -3293,7 +3295,7 @@ test "wasm plugin: a projection encloses, folds by key, and keeps the cursor on 
         // was, and found by name rather than by where it used to be.
         try t.expectEqual(std.mem.indexOf(u8, after, "  b.zig").?, buf.textEditor().?.cursorOffset());
     }
-    _ = try command.run(&env.commands, &env.ctx, "proj-report", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.report", &.{});
     {
         const line = try execReport(&env, gpa, "*proj-report*");
         defer gpa.free(line);
@@ -3338,7 +3340,7 @@ test "wasm plugin: a third party puts a verb on rows it did not produce" {
         .owner = "third-party",
     });
 
-    _ = try command.run(&env.commands, &env.ctx, "proj-build", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.build", &.{});
     const buf = namedBuffer(&env.buffers, "*proj*") orelse return error.TestExpectedEqual;
     const editor = buf.textEditor().?;
     const text = try editor.text().toOwnedSlice(gpa);
@@ -3509,7 +3511,7 @@ test "wasm plugin: wl_exec crosses status and stderr, and an argv argument is on
 
     // The two streams arrive APART. Under the fill doors this needed `2>&1`,
     // after which nothing could tell them back apart.
-    _ = try command.run(&env.commands, &env.ctx, "exec-ok", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "exec-gate.ok", &.{});
     drainJobs(&loop);
     {
         const line = try execReport(&env, gpa, "*exec-ok*");
@@ -3520,7 +3522,7 @@ test "wasm plugin: wl_exec crosses status and stderr, and an argv argument is on
     }
 
     // A non-zero exit crosses as a NUMBER. Nothing in the output says 7.
-    _ = try command.run(&env.commands, &env.ctx, "exec-fail", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "exec-gate.fail", &.{});
     drainJobs(&loop);
     {
         const line = try execReport(&env, gpa, "*exec-fail*");
@@ -3534,7 +3536,7 @@ test "wasm plugin: wl_exec crosses status and stderr, and an argv argument is on
     // `$`, backticks, a pipe, and both kinds of quote reaches the child WHOLE —
     // there is no shell between the guest and the argv, so there is nothing for
     // a hand-written `'{s}'` to fail to escape.
-    _ = try command.run(&env.commands, &env.ctx, "exec-argv", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "exec-gate.argv", &.{});
     drainJobs(&loop);
     {
         const line = try execReport(&env, gpa, "*exec-argv*");
@@ -3543,7 +3545,7 @@ test "wasm plugin: wl_exec crosses status and stderr, and an argv argument is on
     }
 
     // A continuation carries its own value. The token stays the SDK's.
-    _ = try command.run(&env.commands, &env.ctx, "exec-ctx", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "exec-gate.ctx", &.{});
     drainJobs(&loop);
     {
         const line = try execReport(&env, gpa, "*exec-ctx*");
@@ -3568,7 +3570,7 @@ test "wasm plugin: wl_exec keeps the spool contract — a real file, no fs perm,
     defer plugin.deinit();
     try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
 
-    _ = try command.run(&env.commands, &env.ctx, "exec-spool", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "exec-gate.spool", &.{});
     drainJobs(&loop);
     const line = try execReport(&env, gpa, "*exec-spool*");
     defer gpa.free(line);
@@ -3630,8 +3632,8 @@ test "wasm plugin: a second net-open takes its own buffer, not the first's" {
     const plugin = try loadPlugin(&engine, &env.ctx, "net", @embedFile("guest_net_wasm"), .{});
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "net-open", &.{.{ .string = "example.com:80" }});
-    _ = try command.run(&env.commands, &env.ctx, "net-open", &.{.{ .string = "example.org:80" }});
+    _ = try command.run(&env.commands, &env.ctx, "net.open", &.{.{ .string = "example.com:80" }});
+    _ = try command.run(&env.commands, &env.ctx, "net.open", &.{.{ .string = "example.org:80" }});
 
     try t.expect(env.buffers.findByName("*net*") != null);
     try t.expect(env.buffers.findByName("*net:2*") != null);
@@ -3649,8 +3651,8 @@ test "wasm plugin: a second http-get takes its own response buffer" {
     const plugin = try loadPlugin(&engine, &env.ctx, "http", @embedFile("guest_http_wasm"), .{});
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "http-get", &.{.{ .string = "http://example.com/a" }});
-    _ = try command.run(&env.commands, &env.ctx, "http-get", &.{.{ .string = "http://example.org/b" }});
+    _ = try command.run(&env.commands, &env.ctx, "http.get", &.{.{ .string = "http://example.com/a" }});
+    _ = try command.run(&env.commands, &env.ctx, "http.get", &.{.{ .string = "http://example.org/b" }});
 
     try t.expect(env.buffers.findByName("*http*") != null);
     try t.expect(env.buffers.findByName("*http:2*") != null);
@@ -3690,7 +3692,7 @@ test "wasm plugin: twelve REPLs run at once, and the first one still answers for
     for (1..count + 1) |n| {
         var cmd_buf: [96]u8 = undefined;
         const cmd = try std.fmt.bufPrint(&cmd_buf, "while read l; do echo \"r{d} $l\"; done", .{n});
-        _ = try command.run(&env.commands, &env.ctx, "repl-start", &.{.{ .string = cmd }});
+        _ = try command.run(&env.commands, &env.ctx, "repl.start", &.{.{ .string = cmd }});
     }
 
     // Every one of them is live at once, in its own buffer.
@@ -3705,7 +3707,7 @@ test "wasm plugin: twelve REPLs run at once, and the first one still answers for
     // instance at all.
     const first = env.buffers.findByName("*repl*") orelse return error.TestExpectedEqual;
     try env.buffers.switchTo(gpa, first, &env.head, &env.keymap);
-    _ = try command.run(&env.commands, &env.ctx, "repl-send", &.{.{ .string = "ping" }});
+    _ = try command.run(&env.commands, &env.ctx, "repl.send", &.{.{ .string = "ping" }});
 
     const buf = env.buffers.get(first) orelse return error.TestExpectedEqual;
     var rounds: usize = 0;
@@ -3743,9 +3745,9 @@ test "wasm plugins: buf-pick refuses a buffer closed mid-pick, slot reuse and al
     const plugin = try loadPlugin(&engine, &env.ctx, "buffers", @embedFile("guest_buffers_wasm"), .{});
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "buf-pick", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "buffer.pick", &.{});
     try t.expect(env.head.pick.active);
-    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "beta" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick.input", &.{.{ .string = "beta" }});
 
     // beta closes while the picker is open, and a new buffer takes its SLOT.
     try env.buffers.close(gpa, beta, &env.head, &env.keymap);
@@ -3753,7 +3755,7 @@ test "wasm plugins: buf-pick refuses a buffer closed mid-pick, slot reuse and al
     try t.expectEqual(beta, gamma); // the same id, a different buffer
 
     const before = env.buffers.active().id;
-    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick.accept", &.{});
     // Refused: the accept did not land on gamma, and did not move at all.
     try t.expectEqual(before, env.buffers.active().id);
     try t.expect(!std.mem.eql(u8, env.buffers.active().name, "gamma"));
@@ -3789,7 +3791,7 @@ test "annotations: a third-party guest decorates a REFERENCED entry it does not 
     const plugin = try loadPlugin(&engine, &env.ctx, "marks", @embedFile("guest_marks_wasm"), .{});
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "marks-on", &.{.{ .string = "todo.zig" }});
+    _ = try command.run(&env.commands, &env.ctx, "marks.on", &.{.{ .string = "todo.zig" }});
 
     // It painted: a named, provider-owned annotation feed over an entry the
     // guest never opened, holding one span per keyword.
@@ -3824,12 +3826,12 @@ test "annotations: a third-party guest decorates a REFERENCED entry it does not 
 
     // Republishing restamps against the new revision; the marks come back at
     // the moved offsets.
-    _ = try command.run(&env.commands, &env.ctx, "marks-on", &.{.{ .string = "todo.zig" }});
+    _ = try command.run(&env.commands, &env.ctx, "marks.on", &.{.{ .string = "todo.zig" }});
     try t.expectEqual(@as(usize, 2), marks.spanCount());
     try t.expectEqual(@as(usize, 14), marks.resolvedSpan(0).start);
 
     // Removing the decorator removes its paint and nothing else.
-    _ = try command.run(&env.commands, &env.ctx, "marks-off", &.{.{ .string = "todo.zig" }});
+    _ = try command.run(&env.commands, &env.ctx, "marks.off", &.{.{ .string = "todo.zig" }});
     try t.expect(env.caps.layers.find(&ed.doc, "marks") == null);
     try t.expectEqual(@as(usize, 1), env.caps.layers.find(&ed.doc, "diagnostics").?.spanCount());
 }
@@ -3890,7 +3892,7 @@ test "wasm plugin: direnv holds the env capability, and nothing wider" {
     try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
     try t.expect(!plugin.perms[wasm_host.perm_net]);
 
-    for ([_][]const u8{ "direnv-status", "direnv-allow", "direnv-reload", "direnv-apply" }) |name| {
+    for ([_][]const u8{ "direnv.status", "direnv.allow", "direnv.reload", "direnv.apply" }) |name| {
         try t.expect(env.commands.find(name) != null);
     }
 }
@@ -3903,9 +3905,8 @@ test "marginalia: a real guest annotates real pick rows, through the whole membr
     //
     // The `command` category is the one that exercises the most in one pass:
     // slot bind over the membrane, `wl_payload_read`, a schema decode INSIDE
-    // the guest, `wl_mode_names`/`wl_binding_table` (which exist only because
-    // "which key runs this" was unanswerable), `wl_payload_push`, core's
-    // decode, and the render column.
+    // the guest, `wl_keys_for` ("which key runs this, here", doc/chrome.md
+    // §1.3), `wl_payload_push`, core's decode, and the render column.
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -3917,19 +3918,28 @@ test "marginalia: a real guest annotates real pick rows, through the whole membr
     const plugin = try loadPlugin(&engine, &env.ctx, "marginalia", @embedFile("guest_marginalia_wasm"), .{});
     defer plugin.deinit();
 
-    // A keymap the annotator can reverse-index. `git-status` is bound behind
-    // a chord, which is exactly the case an indexed binding door could not
-    // have answered as one row.
-    try env.keymap.bind(gpa, "normal", "space g s", "git-status", 0, "test");
-    try env.keymap.bind(gpa, "normal", "d", "delete-line", 0, "test");
+    // Two commands, and keys that run them: `git.status` behind a chord. The
+    // annotator asks the host which key runs a row's command HERE
+    // (`wl_keys_for`), and a key runs only what is registered — dispatch walks
+    // past an arm nothing answers, and so does the answer.
+    const Nop = struct {
+        fn run(_: *command.Context, _: struct {}) anyerror!command.Value {
+            return .nil;
+        }
+    };
+    _ = try env.commands.bind(gpa, "git.status", command.define("git.status", "Show the repository's status.", Nop.run));
+    _ = try env.commands.bind(gpa, "edit.delete-line", command.define("edit.delete-line", "Delete the line.", Nop.run));
+    try env.keymap.bind(gpa, "normal", "space g s", "git.status", 0, "test");
+    try env.keymap.bind(gpa, "normal", "d", "edit.delete-line", 0, "test");
+    try env.head.setModeRaw(gpa, "normal");
 
     const Sink = struct {
         fn accept(_: *command.Context, _: ?*anyopaque, _: pick_mod.Outcome) anyerror!void {}
     };
     try env.head.pick.openWith(&env.ctx, "command", &.{
-        .{ .text = "git-status", .doc = "Show the repo status." },
-        .{ .text = "delete-line", .doc = "" },
-        .{ .text = "unbound-command", .doc = "" },
+        .{ .text = "git.status", .doc = "Show the repo status." },
+        .{ .text = "edit.delete-line", .doc = "" },
+        .{ .text = "unbound.command", .doc = "" },
     }, .{ .handler = Sink.accept }, .{ .category = "command" });
 
     // The round happens on the tick — the same one that will cover rows a
@@ -3973,7 +3983,7 @@ test "wasm plugin: an EDITABLE projection row is read back by key, in the order 
     const plugin = try loadPlugin(&engine, &env.ctx, "projection_gate", @embedFile("guest_projection_wasm"), .{});
     defer plugin.deinit();
 
-    _ = try command.run(&env.commands, &env.ctx, "proj-plan", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.plan", &.{});
     const buf = namedBuffer(&env.buffers, "*plan*") orelse return error.TestExpectedEqual;
     const editor = buf.textEditor().?;
 
@@ -3981,7 +3991,7 @@ test "wasm plugin: an EDITABLE projection row is read back by key, in the order 
     // were published as. The `# reorder me` comment is not editable and does
     // not appear — a row a producer did not offer for editing is not one it is
     // asked about.
-    _ = try command.run(&env.commands, &env.ctx, "proj-plan-report", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.plan-report", &.{});
     {
         const line = try execReport(&env, gpa, "*plan-report*");
         defer gpa.free(line);
@@ -4004,7 +4014,7 @@ test "wasm plugin: an EDITABLE projection row is read back by key, in the order 
         defer gpa.free(doc_text);
         std.debug.print("PLANDOC=[{s}]\n", .{doc_text});
     }
-    _ = try command.run(&env.commands, &env.ctx, "proj-plan-report", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.plan-report", &.{});
     {
         const line = try execReport(&env, gpa, "*plan-report*");
         defer gpa.free(line);
@@ -4023,7 +4033,7 @@ test "wasm plugin: an EDITABLE projection row is read back by key, in the order 
         const at = std.mem.indexOf(u8, text, "pick aaa first").?;
         try env.ctx.edit(.{ .start = at, .end = at + "pick aaa first".len }, "");
     }
-    _ = try command.run(&env.commands, &env.ctx, "proj-plan-report", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "projection-gate.plan-report", &.{});
     {
         const line = try execReport(&env, gpa, "*plan-report*");
         defer gpa.free(line);
@@ -4057,8 +4067,8 @@ test "wasm plugin: multiple selections — get/set record, per-selection motion+
     ed.placeCursor(0); // a motion: seals the typing's undo unit
 
     // add/remove/collapse are SDK compositions over the get/set record.
-    try t.expectEqual(command.Value{ .integer = 2 }, try command.run(&env.commands, &env.ctx, "ms-add", &.{ .{ .integer = 4 }, .{ .integer = 4 } }));
-    try t.expectEqual(command.Value{ .integer = 3 }, try command.run(&env.commands, &env.ctx, "ms-add", &.{ .{ .integer = 8 }, .{ .integer = 8 } }));
+    try t.expectEqual(command.Value{ .integer = 2 }, try command.run(&env.commands, &env.ctx, "multisel.add", &.{ .{ .integer = 4 }, .{ .integer = 4 } }));
+    try t.expectEqual(command.Value{ .integer = 3 }, try command.run(&env.commands, &env.ctx, "multisel.add", &.{ .{ .integer = 8 }, .{ .integer = 8 } }));
     try t.expectEqual(@as(usize, 3), ed.selectionCount());
     // The last added is primary, and the cursor view reads it.
     try t.expectEqual(@as(usize, 2), ed.primary);
@@ -4067,7 +4077,7 @@ test "wasm plugin: multiple selections — get/set record, per-selection motion+
     // Motion once per selection, operator once per range: every word's first
     // letter upcased — and the operator's own jump (a barrier) did not split
     // the unit.
-    _ = try command.run(&env.commands, &env.ctx, "ms-upcase-each", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.upcase-each", &.{});
     try expectDoc(gpa, ed, "Abc Def Ghi");
     try t.expect(try ed.undo(gpa, .user_driven));
     try expectDoc(gpa, ed, "abc def ghi");
@@ -4077,9 +4087,9 @@ test "wasm plugin: multiple selections — get/set record, per-selection motion+
 
     // remove(1) keeps the primary on the same selection; collapse keeps it alone.
     const primary_at = ed.cursorOffset();
-    try t.expectEqual(command.Value{ .integer = 2 }, try command.run(&env.commands, &env.ctx, "ms-remove", &.{.{ .integer = 1 }}));
+    try t.expectEqual(command.Value{ .integer = 2 }, try command.run(&env.commands, &env.ctx, "multisel.remove", &.{.{ .integer = 1 }}));
     try t.expectEqual(primary_at, ed.cursorOffset());
-    try t.expectEqual(command.Value{ .integer = 1 }, try command.run(&env.commands, &env.ctx, "ms-collapse", &.{}));
+    try t.expectEqual(command.Value{ .integer = 1 }, try command.run(&env.commands, &env.ctx, "multisel.collapse", &.{}));
     try t.expectEqual(primary_at, ed.cursorOffset());
 }
 
@@ -4127,12 +4137,12 @@ test "wasm plugin: an undo unit a guest leaves open ends with its dispatch, and 
 
     // Nothing open in this dispatch: the close is refused, not taken from
     // anyone else's bracket.
-    try t.expectEqual(command.Value{ .integer = -1 }, try command.run(&env.commands, &env.ctx, "ms-unit-close", &.{}));
+    try t.expectEqual(command.Value{ .integer = -1 }, try command.run(&env.commands, &env.ctx, "multisel.unit-close", &.{}));
 
     // The guest opens a unit and returns without closing it. The unit ended
     // with the dispatch, so barriers work again: the typing after a motion is
     // its own undo unit, not folded into the guest's.
-    _ = try command.run(&env.commands, &env.ctx, "ms-unit-leak", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.unit-leak", &.{});
     try expectDoc(gpa, ed, "Xabc");
     try t.expectEqual(@as(u32, 0), ed.history.held);
     ed.placeCursor(4);
@@ -4159,18 +4169,18 @@ test "wasm plugin: multiple selections — a per-selection yank distributes acro
     try ed.insertText(gpa, "one two|");
     // Two selections over the two words, then yank one value each.
     try ed.setSelections(gpa, &.{ .{ .anchor = 0, .head = 3 }, .{ .anchor = 4, .head = 7 } }, 0);
-    _ = try command.run(&env.commands, &env.ctx, "ms-yank", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.yank", &.{});
     try t.expectEqual(@as(usize, 2), reg.get(0).?.valueCount());
     try t.expectEqualStrings("one\ntwo", reg.get(0).?.slice());
 
     // Two carets → each gets its own value (counts match).
     try ed.setSelections(gpa, &.{ .{ .anchor = 3, .head = 3 }, .{ .anchor = 8, .head = 8 } }, 0);
-    _ = try command.run(&env.commands, &env.ctx, "ms-paste", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.paste", &.{});
     try expectDoc(gpa, ed, "oneone two|two");
 
     // One caret → the joined text (counts differ; nothing yanked is dropped).
     try ed.setSelections(gpa, &.{.{ .anchor = 0, .head = 0 }}, 0);
-    _ = try command.run(&env.commands, &env.ctx, "ms-paste", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.paste", &.{});
     try expectDoc(gpa, ed, "one\ntwooneone two|two");
 }
 
@@ -4190,16 +4200,16 @@ test "wasm plugin: a command that declares no mapping is refused on several sele
     try ed.insertText(gpa, "abc");
     // One selection is the degenerate case: an undeclared command runs.
     ed.placeCursor(0);
-    _ = try command.run(&env.commands, &env.ctx, "ms-undeclared", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.undeclared", &.{});
     try expectDoc(gpa, ed, "?abc");
 
     // Two: it would act on one of them, so it does not run at all — and the
     // door a person reaches it through says why.
     try ed.setSelections(gpa, &.{ .{ .anchor = 1, .head = 1 }, .{ .anchor = 3, .head = 3 } }, 0);
-    try t.expectError(error.UndeclaredMapping, command.run(&env.commands, &env.ctx, "ms-undeclared", &.{}));
+    try t.expectError(error.UndeclaredMapping, command.run(&env.commands, &env.ctx, "multisel.undeclared", &.{}));
     try expectDoc(gpa, ed, "?abc");
-    command.invoke(&env.commands, &env.ctx, "ms-undeclared", &.{});
-    try t.expectEqualStrings("ms-undeclared: acts on one selection; several are selected", env.head.echo.items);
+    command.invoke(&env.commands, &env.ctx, "multisel.undeclared", &.{});
+    try t.expectEqualStrings("multisel.undeclared: acts on one selection; several are selected", env.head.echo.text());
     try expectDoc(gpa, ed, "?abc");
     // Both selections survive the refusal.
     try t.expectEqual(@as(usize, 2), ed.selectionCount());
@@ -4221,26 +4231,26 @@ test "wasm plugin: a mapping's epilogue runs exactly once — when runs merge ex
     try ed.insertText(gpa, "one two\nthree\n");
     const Count = struct {
         fn of(e: *Env) !i64 {
-            return (try command.run(&e.commands, &e.ctx, "ms-epilogues", &.{})).integer;
+            return (try command.run(&e.commands, &e.ctx, "multisel.epilogues", &.{})).integer;
         }
     };
-    // Each read runs the epilogue once itself (ms-epilogues is a command).
+    // Each read runs the epilogue once itself (ms.epilogues is a command).
     const start = try Count.of(&env);
 
     // Two carets on one line: the first run selects the line, merging the
     // other caret into it, so fewer runs happen than were scheduled.
     try ed.setSelections(gpa, &.{ .{ .anchor = 1, .head = 1 }, .{ .anchor = 5, .head = 5 } }, 0);
-    _ = try command.run(&env.commands, &env.ctx, "ms-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.line", &.{});
     try t.expectEqual(@as(usize, 1), ed.selectionCount());
     try t.expectEqual(start + 2, try Count.of(&env));
 
     // Two carets, neither with a target: no run at all, one epilogue.
     try ed.setSelections(gpa, &.{ .{ .anchor = 1, .head = 1 }, .{ .anchor = 10, .head = 10 } }, 0);
-    _ = try command.run(&env.commands, &env.ctx, "ms-op-none", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.op-none", &.{});
     try t.expectEqual(start + 4, try Count.of(&env));
 
     // Two carets on two lines: two runs, still one epilogue.
-    _ = try command.run(&env.commands, &env.ctx, "ms-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "multisel.line", &.{});
     try t.expectEqual(start + 6, try Count.of(&env));
 }
 
@@ -4259,7 +4269,7 @@ test "context: a wasm plugin publishes at a scope, a predicate reads it, and unl
 
     const S = struct {
         fn set(e: *Env, key: []const u8, value: []const u8, scope: []const u8) ![]const u8 {
-            const v = try command.run(&e.commands, &e.ctx, "ow-context-set", &.{ .{ .string = key }, .{ .string = value }, .{ .string = scope } });
+            const v = try command.run(&e.commands, &e.ctx, "offerwatch.context-set", &.{ .{ .string = key }, .{ .string = value }, .{ .string = scope } });
             return v.string;
         }
     };
@@ -4321,9 +4331,9 @@ test "designation: a kind is its producer's by name or by manifest — a plugin 
     // At run time a foreign claim is refused (-3), and the plugin stays.
     const ow = try loadPlugin(&engine, &env.ctx, "offerwatch", @embedFile("guest_offerwatch_wasm"), .{});
     defer ow.deinit();
-    const claim = try command.run(&env.commands, &env.ctx, "ow-claim", &.{ .{ .string = "stranger" }, .{ .string = "ow-probe" } });
+    const claim = try command.run(&env.commands, &env.ctx, "offerwatch.claim", &.{ .{ .string = "stranger" }, .{ .string = "offerwatch.probe" } });
     try t.expectEqualStrings("refused", claim.string);
-    const own = try command.run(&env.commands, &env.ctx, "ow-claim", &.{ .{ .string = "offerwatch.probe" }, .{ .string = "ow-probe" } });
+    const own = try command.run(&env.commands, &env.ctx, "offerwatch.claim", &.{ .{ .string = "offerwatch.probe" }, .{ .string = "offerwatch.probe" } });
     try t.expectEqualStrings("ok", own.string);
     grep.deinit();
 }

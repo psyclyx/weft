@@ -3,7 +3,7 @@
 //! Two doors in this editor take a command from a person: the palette (pick a
 //! name) and the `:` line (type a name and some arguments). Both used to lose
 //! on the same rock. The palette ran EVERY command with zero arguments, so
-//! `listen`, `connect`, `grant`, `share-fs` — every command that takes
+//! `listen`, `connect`, `grant`, `collab.share-fs` — every command that takes
 //! something — refused on arity into a discarded error and looked, from the
 //! outside, exactly like a command that does nothing. The `:` line could pass
 //! arguments but not ask for them, so `:listen` with the port left off did the
@@ -37,18 +37,21 @@ const prompt = @import("weft_prompt");
 /// instead of assembled and then rejected at the membrane.
 ///
 /// Two is not a buffer size. `app/providers.zig`'s census gate rests on no
-/// guest passing three arguments to a command, because `grammar-add` takes
+/// guest passing three arguments to a command, because `syntax.add-grammar` takes
 /// three and opens a caller-named directory with them. Every command a person
-/// invokes interactively fits; `grammar-add` is config's to call, from the
+/// invokes interactively fits; `syntax.add-grammar` is config's to call, from the
 /// trusted plane, and is meant to stay there.
 pub const max_args = 2;
 const NAME_CAP = 128;
 const ARG_CAP = 512;
 
 pub const Config = struct {
-    /// The prompt mode this invoker asks in, and the prefix of the five
-    /// command names it registers. One per instantiation.
+    /// The prefix of the five command names its prompt registers, in the id
+    /// grammar (`palette.arg`); the prompt's mode derives from it
+    /// (`weft_prompt`'s `Config.name`). One per instantiation.
     name: []const u8,
+    /// The prompt's keymap mode, when it is not the one `name` spells.
+    mode: ?[]const u8 = null,
     /// Where the argument prompt returns to. Null — right for a service — is
     /// "the entry's own resting mode"; a grammar that owns a mode names it.
     /// See `weft_prompt`'s `Config.resting` for why that distinction matters.
@@ -76,6 +79,10 @@ pub fn Invoker(comptime cfg: Config) type {
         var need: usize = 0;
         var takes: usize = 0;
         var asking: bool = cfg.ask;
+        // Where the assembled call runs: null is the focused context (the
+        // palette's, the `:` line's); a menubar names the primary one. Held
+        // with the call, since the asking happens across prompts.
+        var where: ?weft.OfferContext = null;
 
         var label_buf: [NAME_CAP + 64]u8 = undefined;
         var hint_buf: [256]u8 = undefined;
@@ -88,17 +95,21 @@ pub fn Invoker(comptime cfg: Config) type {
         // (~a tenth of a millisecond against a full registry, an order of
         // magnitude under a frame). The head token stops changing the moment a
         // space is typed, and this cache makes every keystroke after that one
-        // free — which is the half where a hint is doing the most work.
+        // free — which is the half where a hint is doing the most work. A
+        // short name is a reading of the WHOLE registry (only one command has
+        // it), so the cache is of one registry revision: a command loaded
+        // or unloaded since makes it ask again.
         var cached_name: [NAME_CAP]u8 = undefined;
         var cached_len: usize = 0;
         var cached_index: usize = 0;
-        var cached_valid: bool = false;
+        var cached_revision: ?u32 = null;
 
         /// The argument prompt. Its accept stores one argument and either asks
         /// for the next or runs — so a two-argument command is two questions,
         /// not a syntax to get right in one line.
         pub const ask_line = prompt.Prompt(.{
             .name = cfg.name,
+            .mode = cfg.mode,
             .resting = cfg.resting,
             .capacity = ARG_CAP,
             // Wrapped rather than referenced directly: `onArg` reopens this
@@ -136,9 +147,22 @@ pub fn Invoker(comptime cfg: Config) type {
 
         /// Invoke a whole typed line: `name arg…`. The arguments are split
         /// against what the command DECLARES, so the last one absorbs the rest
-        /// of the line (`:llm-ask write me a poem` is one argument, `:grant fp
+        /// of the line (`:llm.ask write me a poem` is one argument, `:grant fp
         /// edit` is two) instead of against a fixed guess.
         pub fn invokeLine(text: []const u8) void {
+            invokeLineAt(null, text);
+        }
+
+        /// `invokeLine`, run — once every argument is had — in a chosen
+        /// context: a menubar row acts on the editor it describes
+        /// (doc/chrome.md §2.3) even when what it asked for was typed while
+        /// the sidebar had the keys.
+        pub fn invokeLineIn(in: weft.OfferContext, text: []const u8) void {
+            invokeLineAt(in, text);
+        }
+
+        fn invokeLineAt(in: ?weft.OfferContext, text: []const u8) void {
+            where = in;
             const trimmed = trim(text);
             if (trimmed.len == 0) return;
             var i: usize = 0;
@@ -150,6 +174,7 @@ pub fn Invoker(comptime cfg: Config) type {
         /// accepted row. Identical to `line` with an empty tail; spelled
         /// separately because that is what the caller means.
         pub fn invokeName(cmd: []const u8) void {
+            where = null;
             begin(cmd, "");
         }
 
@@ -163,7 +188,15 @@ pub fn Invoker(comptime cfg: Config) type {
             while (i < trimmed.len and !isSpace(trimmed[i])) i += 1;
             const head = trimmed[0..i];
             if (head.len == 0) return "";
-            const idx = resolve(head) orelse return "";
+            // A completion that found several names shows them until the
+            // line changes.
+            if (note_len > 0 and std.mem.eql(u8, text, noted_line[0..noted_len])) return note_buf[0..note_len];
+            // Labels are left to Enter and Tab: reading every command's
+            // presentation is a scan too wide for every keystroke.
+            const idx = switch (resolveTyped(head, false)) {
+                .one => |found| found,
+                else => return "",
+            };
             const arity = weft.commandArity(idx) orelse return "";
             if (arity == 0) return "";
             // What is left to say, which is the useful half: an argument
@@ -219,14 +252,23 @@ pub fn Invoker(comptime cfg: Config) type {
         // ── The machine ─────────────────────────────────────────────────
 
         fn begin(cmd: []const u8, tail: []const u8) void {
-            name_len = @min(cmd.len, name_buf.len);
-            @memcpy(name_buf[0..name_len], cmd[0..name_len]);
             filled = 0;
-
-            const idx = resolve(name_buf[0..name_len]) orelse {
-                echoFmt("not an editor command: {s}", .{name_buf[0..name_len]});
-                return;
+            const idx = switch (resolveTyped(cmd, true)) {
+                .one => |i| i,
+                .none => {
+                    echoFmt("not an editor command: {s}", .{cmd});
+                    return;
+                },
+                // Two commands answer to it: say which, rather than guess.
+                .many => {
+                    echoFmt("{s}: which one? {s}", .{ cmd, candidates() });
+                    return;
+                },
             };
+            // The call is made, and asked about, by the command's own id.
+            const id = weft.commandName(idx) orelse return;
+            name_len = @min(id.len, name_buf.len);
+            @memcpy(name_buf[0..name_len], id[0..name_len]);
             const arity = weft.commandArity(idx) orelse 0;
             if (arity > max_args) {
                 // Wider than a plugin may call (see `max_args`). Say so here,
@@ -304,11 +346,13 @@ pub fn Invoker(comptime cfg: Config) type {
 
         /// Hand the assembled call to the one door that runs AND reports
         /// (`command.invoke`, host side) — so a refusal or an answer lands on
-        /// the echo line rather than in a dropped return value.
+        /// the echo line rather than in a dropped return value — in the
+        /// context the call was begun for.
         fn fire() void {
             var argv: [max_args][]const u8 = undefined;
             for (0..filled) |i| argv[i] = arg_bufs[i][0..arg_lens[i]];
-            weft.runArgs(name_buf[0..name_len], argv[0..filled]);
+            const in = where orelse return weft.runArgs(name_buf[0..name_len], argv[0..filled]);
+            _ = weft.runArgsIn(in, name_buf[0..name_len], argv[0..filled]);
         }
 
         /// Keep one argument, or refuse it out loud. Truncating silently is
@@ -326,22 +370,141 @@ pub fn Invoker(comptime cfg: Config) type {
             return true;
         }
 
-        /// This command's index in the registry, or null. Cached on the name,
-        /// because the `:` line resolves once per keystroke.
+        /// What a typed name resolves to.
+        const Found = union(enum) { none, one: usize, many };
+
+        /// Resolve what a person typed to ONE command, the way the `:` line
+        /// reads it (doc/chrome.md §1.1): an id exactly (`collab.listen`);
+        /// else the id whose part after a `.` is exactly what was typed
+        /// (`listen`), when only one is; else — `labels` — the command whose
+        /// label it is, case and `…` aside, spaces as `-` (`split-editor-right`
+        /// for "Split Editor Right"). Two answers at one step are `many`,
+        /// named in `candidates()`: the line lists them rather than guess.
+        /// Short names are not aliases — nothing is registered twice; this
+        /// is only how a typed word is read. Commands marked `internal` are
+        /// never offered by a short name or a label.
+        fn resolveTyped(typed: []const u8, labels: bool) Found {
+            if (typed.len == 0) return .none;
+            if (resolve(typed)) |i| return .{ .one = i };
+            const by_suffix = scan(typed, .suffix);
+            if (by_suffix != .none or !labels) return by_suffix;
+            return scan(typed, .label);
+        }
+
+        const Match = enum { suffix, label, prefix };
+
+        var cand_buf: [200]u8 = undefined;
+        var cand_len: usize = 0;
+
+        /// The names the last `scan` found, for an echo.
+        fn candidates() []const u8 {
+            return cand_buf[0..cand_len];
+        }
+
+        /// Every non-internal command `typed` names by `how`; `prefix` is
+        /// completion's reading (any of the three forms begins with it).
+        fn scan(typed: []const u8, how: Match) Found {
+            cand_len = 0;
+            var found: Found = .none;
+            const n = weft.commandCount();
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                const cn = weft.commandName(i) orelse continue;
+                const hit = switch (how) {
+                    .suffix => afterDotIs(cn, typed),
+                    .label, .prefix => true,
+                };
+                if (!hit) continue;
+                const meta = weft.commandMeta(cn) orelse continue;
+                if (meta.internal) continue;
+                const named = switch (how) {
+                    .suffix => true,
+                    .label => labelIs(meta.label, typed, false),
+                    .prefix => std.mem.startsWith(u8, cn, typed) or afterDotStarts(cn, typed) or labelIs(meta.label, typed, true),
+                };
+                if (!named) continue;
+                noteCandidate(cn);
+                found = switch (found) {
+                    .none => .{ .one = i },
+                    else => .many,
+                };
+            }
+            if (found == .one and how != .prefix) remember(typed, found.one);
+            return found;
+        }
+
+        fn noteCandidate(cn: []const u8) void {
+            if (cand_len > 0) put(&cand_buf, &cand_len, ", ");
+            if (cand_len + cn.len + 1 > cand_buf.len) {
+                if (!std.mem.endsWith(u8, cand_buf[0..cand_len], "…")) put(&cand_buf, &cand_len, "…");
+                return;
+            }
+            put(&cand_buf, &cand_len, cn);
+        }
+
+        /// This command's index in the registry, or null. Cached on the name
+        /// and the registry's revision, because the `:` line resolves once
+        /// per keystroke.
         fn resolve(cmd: []const u8) ?usize {
-            if (cached_valid and cached_len == cmd.len and
+            if (cached_revision == weft.commandRevision() and cached_len == cmd.len and
                 std.mem.eql(u8, cached_name[0..cached_len], cmd)) return cached_index;
             const n = weft.commandCount();
             var i: usize = 0;
             while (i < n) : (i += 1) {
                 const cn = weft.commandName(i) orelse continue;
                 if (!std.mem.eql(u8, cn, cmd)) continue;
-                cached_len = @min(cmd.len, cached_name.len);
-                @memcpy(cached_name[0..cached_len], cmd[0..cached_len]);
-                cached_index = i;
-                cached_valid = true;
+                remember(cmd, i);
                 return i;
             }
+            return null;
+        }
+
+        /// Cache what `typed` resolved to (exactly, or by a short name).
+        fn remember(typed: []const u8, i: usize) void {
+            if (typed.len > cached_name.len) return;
+            cached_len = typed.len;
+            @memcpy(cached_name[0..cached_len], typed);
+            cached_index = i;
+            cached_revision = weft.commandRevision();
+        }
+
+        var note_buf: [256]u8 = undefined;
+        var note_len: usize = 0;
+        var noted_line: [NAME_CAP]u8 = undefined;
+        var noted_len: usize = 0;
+
+        /// Tab on the `:` line: complete the command name being typed to the
+        /// one command it can mean — read as Enter reads it, else by what
+        /// its id, its part after a `.`, or its label begins with. Null when
+        /// there is nothing to complete to; several candidates are shown
+        /// trailing the line (`hint`) instead.
+        pub fn complete(text: []const u8) ?[]const u8 {
+            note_len = 0;
+            const head = trimLeft(text);
+            if (head.len == 0 or head.len > NAME_CAP) return null;
+            for (head) |c| if (isSpace(c)) return null; // arguments: nothing to complete
+            const idx = switch (resolveTyped(head, true)) {
+                .one => |i| i,
+                .many => return listCandidates(text),
+                .none => switch (scan(head, .prefix)) {
+                    .one => |i| i,
+                    .many => return listCandidates(text),
+                    .none => return null,
+                },
+            };
+            const id = weft.commandName(idx) orelse return null;
+            var w: usize = 0;
+            put(&label_buf, &w, id);
+            if ((weft.commandArity(idx) orelse 0) > 0) put(&label_buf, &w, " ");
+            return label_buf[0..w];
+        }
+
+        fn listCandidates(text: []const u8) ?[]const u8 {
+            put(&note_buf, &note_len, "  {");
+            put(&note_buf, &note_len, candidates());
+            put(&note_buf, &note_len, "}");
+            noted_len = @min(text.len, noted_line.len);
+            @memcpy(noted_line[0..noted_len], text[0..noted_len]);
             return null;
         }
 
@@ -377,6 +540,33 @@ fn put(buf: []u8, at: *usize, s: []const u8) void {
 }
 fn isSpace(c: u8) bool {
     return c == ' ' or c == '\t';
+}
+
+/// Whether some part of id `cn` after a `.` is exactly `typed`
+/// (`collab.listen` for `listen`, `std.navigation.word-prev` for
+/// `word-prev` or `navigation.word-prev`).
+fn afterDotIs(cn: []const u8, typed: []const u8) bool {
+    return cn.len > typed.len and std.mem.endsWith(u8, cn, typed) and cn[cn.len - typed.len - 1] == '.';
+}
+
+/// Whether the part of id `cn` after its namespace begins with `typed`.
+fn afterDotStarts(cn: []const u8, typed: []const u8) bool {
+    const dot = std.mem.indexOfScalar(u8, cn, '.') orelse return false;
+    return std.mem.startsWith(u8, cn[dot + 1 ..], typed);
+}
+
+/// Whether `label` reads as `typed` (or, `prefix`, begins with it): case
+/// aside, a trailing `…` or `...` dropped, a space matched by `-` or a space.
+fn labelIs(label: []const u8, typed: []const u8, prefix: bool) bool {
+    var l = label;
+    if (std.mem.endsWith(u8, l, "…")) l = l[0 .. l.len - "…".len];
+    if (std.mem.endsWith(u8, l, "...")) l = l[0 .. l.len - 3];
+    if (l.len == 0 or typed.len > l.len or (!prefix and typed.len != l.len)) return false;
+    for (typed, l[0..typed.len]) |a, b| {
+        const same = std.ascii.toLower(a) == std.ascii.toLower(b) or (b == ' ' and (a == '-' or a == ' '));
+        if (!same) return false;
+    }
+    return true;
 }
 fn trimLeft(s: []const u8) []const u8 {
     var i: usize = 0;

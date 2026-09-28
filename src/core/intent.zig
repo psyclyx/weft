@@ -69,6 +69,13 @@ pub const Handle = struct {
 
 pub const InvokeFn = *const fn (data: ?*anyopaque, ctx: *command.Context, payload: u32) anyerror!void;
 
+/// The command (or action) an endpoint RUNS, when it runs a named one — what
+/// "which key runs `file.save` here" (`keys_for.zig`) and "what is this offer
+/// called" (`presentations.zig`) read. Null for an endpoint that runs no named
+/// command (a scene node's own action). Trace text for a key hint, never
+/// authority: the effect door still decides what runs.
+pub const CommandOfFn = *const fn (data: ?*anyopaque, ctx: *command.Context, payload: u32) ?[]const u8;
+
 pub const Error = error{ StaleEndpoint, StaleDecision };
 
 /// Token → invoke fn + generation.
@@ -77,6 +84,7 @@ pub const Invokers = struct {
         /// Borrowed (a literal at every call site); trace text only.
         name: []const u8,
         invoke: ?InvokeFn,
+        command_of: ?CommandOfFn = null,
         data: ?*anyopaque,
         generation: u16,
     };
@@ -93,15 +101,26 @@ pub const Invokers = struct {
         gpa: Allocator,
         name: []const u8,
         run: InvokeFn,
+        command_of: ?CommandOfFn,
         data: ?*anyopaque,
     ) Allocator.Error!Handle {
         for (self.slots.items, 0..) |*s, i| {
             if (s.invoke != null) continue;
-            s.* = .{ .name = name, .invoke = run, .data = data, .generation = s.generation };
+            s.* = .{ .name = name, .invoke = run, .command_of = command_of, .data = data, .generation = s.generation };
             return .{ .slot = @intCast(i), .generation = s.generation };
         }
-        try self.slots.append(gpa, .{ .name = name, .invoke = run, .data = data, .generation = 1 });
+        try self.slots.append(gpa, .{ .name = name, .invoke = run, .command_of = command_of, .data = data, .generation = 1 });
         return .{ .slot = @intCast(self.slots.items.len - 1), .generation = 1 };
+    }
+
+    /// The command a live token's endpoint runs (`CommandOfFn`), or null.
+    pub fn commandOf(self: *const Invokers, ctx: *command.Context, raw: catalog_mod.EndpointToken) ?[]const u8 {
+        const e = Endpoint.of(raw);
+        if (e.slot >= self.slots.items.len) return null;
+        const s = self.slots.items[e.slot];
+        if (s.generation != e.generation or s.invoke == null) return null;
+        const f = s.command_of orelse return null;
+        return f(s.data, ctx, e.payload);
     }
 
     /// Retire an invoker: every token it minted is refused from here on, and
@@ -158,19 +177,35 @@ const CoreOffer = struct {
         /// Not disabled: a git listing has nothing durable, which is
         /// nonapplicable (§9.3), so a key's next arm must get its turn.
         persists,
+        /// ABSENT unless the row's command — an action's name — has an
+        /// eligible provider here (`Shape.provided`), which the row runs.
+        provided,
     };
 };
 
 const core_offers = [_]CoreOffer{
-    .{ .intention = "std.history.undo", .command = "undo", .gate = .undo },
-    .{ .intention = "std.history.redo", .command = "redo", .gate = .redo },
+    .{ .intention = "std.history.undo", .command = "edit.undo", .gate = .undo },
+    .{ .intention = "std.history.redo", .command = "edit.redo", .gate = .redo },
     // Not a text verb: WHAT is durable is the `save` providers' call (a files
     // listing applies its draft), so the gate is theirs and holding text is
     // not a precondition.
-    .{ .intention = "std.persistence.save", .command = "save", .needs_text = false, .gate = .persists },
-    .{ .intention = "std.editing.insert-line-break", .command = "insert-newline" },
-    .{ .intention = "std.input.break-out", .command = "posture-break-out", .needs_text = false },
+    .{ .intention = "std.persistence.save", .command = "file.save", .needs_text = false, .gate = .persists },
+    .{ .intention = "std.editing.insert-line-break", .command = "edit.insert-newline" },
+    .{ .intention = "std.input.break-out", .command = "mode.break-out", .needs_text = false },
+    // Transfer over TEXT is the grammar's to mean — a caret copies its line in
+    // one, a register takes it in another — so core offers the standard words
+    // only where a grammar provides the matching action here, and runs it: a
+    // context menu over text then leads with Cut, Copy, Paste, and a key bound
+    // to the word runs what the grammar's own arm would. A grammar that
+    // provides none leaves its keys' text arms exactly as they were.
+    .{ .intention = "std.transfer.delete-to-register", .command = "selection.cut", .gate = .provided },
+    .{ .intention = "std.transfer.yank", .command = "selection.copy", .gate = .provided },
+    .{ .intention = "std.transfer.paste", .command = "selection.paste-after", .gate = .provided },
 };
+
+comptime {
+    if (core_offers.len > 8) @compileError("Shape.provided holds one bit per core row");
+}
 
 /// The facts about the focused ENTRY core's table is computed from. A value,
 /// so "did it change" is one comparison and an unchanged entry republishes
@@ -180,9 +215,12 @@ pub const Shape = struct {
     can_undo: bool = true,
     can_redo: bool = true,
     /// Some provider of the `save` action is eligible here. Decided by the
-    /// providers' own predicates (core's `save-file` excludes tool
+    /// providers' own predicates (core's `file.write` excludes tool
     /// projections by locality) — never by naming a tool.
     persists: bool = true,
+    /// Which `.provided` rows, by index in `core_offers`, have an eligible
+    /// provider of their action here. None where no action plane is attached.
+    provided: u8 = 0,
 };
 
 /// A text-needing core offer on an editor-less entry gets `disabled` rather
@@ -202,13 +240,14 @@ const nothing_to_redo: catalog_mod.Availability = .{ .disabled = .{
 } };
 
 /// A core row's availability for `shape`, or null when the row is absent.
-fn coreAvailability(offer: CoreOffer, shape: Shape) ?catalog_mod.Availability {
+fn coreAvailability(offer: CoreOffer, row: usize, shape: Shape) ?catalog_mod.Availability {
     if (offer.gate == .persists and !shape.persists) return null;
+    if (offer.gate == .provided and shape.provided & (@as(u8, 1) << @intCast(row)) == 0) return null;
     if (offer.needs_text and !shape.has_text) return no_text;
     return switch (offer.gate) {
         .undo => if (shape.can_undo) .enabled else nothing_to_undo,
         .redo => if (shape.can_redo) .enabled else nothing_to_redo,
-        .none, .persists => .enabled,
+        .none, .persists, .provided => .enabled,
     };
 }
 
@@ -216,6 +255,13 @@ fn invokeCore(data: ?*anyopaque, ctx: *command.Context, payload: u32) anyerror!v
     _ = data;
     if (payload >= core_offers.len) return Error.StaleEndpoint;
     _ = try command.run(ctx.commands, ctx, core_offers[payload].command, &.{});
+}
+
+fn coreCommandOf(data: ?*anyopaque, ctx: *command.Context, payload: u32) ?[]const u8 {
+    _ = data;
+    _ = ctx;
+    if (payload >= core_offers.len) return null;
+    return core_offers[payload].command;
 }
 
 // ── The plane ────────────────────────────────────────────────────────
@@ -246,6 +292,13 @@ pub const Plane = struct {
     /// `provide` to the plane a keystroke actually reads.
     derived: *action_offers.Publisher = undefined,
     derived_attached: bool = false,
+    /// How many times the plane was synced to a context (`snapshotAt`). A
+    /// frame never asks (doc/model.md §2.7): what it shows of the plane was
+    /// asked before it was built, so a build leaves this where it was.
+    syncs: u64 = 0,
+    /// Which key runs what, per context (`Where`) — the reverse of the keymap
+    /// as this plane's snapshots resolve it, held until either moves.
+    keys: [@typeInfo(Where).@"enum".fields.len]@import("keys_for.zig").Index = @splat(.{}),
 
     /// Wire the DERIVED publisher, once `Actions` exists. Separate from `init`
     /// because the two are constructed in the other order and neither can be
@@ -266,7 +319,7 @@ pub const Plane = struct {
         // resolves without a first-use allocation on the keystroke path.
         for (intentions.std_intentions) |i| _ = try self.catalog.intention(i.name);
         self.provider = try self.catalog.provider("core.editing");
-        self.handle = try self.invokers.register(gpa, "core.editing", invokeCore, null);
+        self.handle = try self.invokers.register(gpa, "core.editing", invokeCore, coreCommandOf, null);
         try self.publishCore();
         self.views = try .init(gpa, self);
     }
@@ -277,6 +330,7 @@ pub const Plane = struct {
             gpa.destroy(self.derived);
             self.derived_attached = false;
         }
+        for (&self.keys) |*index| index.deinit();
         self.invokers.deinit(gpa);
         self.catalog.deinit();
         self.* = undefined;
@@ -288,9 +342,10 @@ pub const Plane = struct {
         self: *Plane,
         services: *const semantic.Services,
         focus: *const Head.SceneSelection,
+        mode: []const u8,
         here: ?view_offers.Here,
     ) Allocator.Error!void {
-        _ = try self.views.refresh(&self.catalog, services, focus, here);
+        _ = try self.views.refresh(&self.catalog, services, focus, mode, here);
     }
 
     /// What point is on, when the scope's entry is a text PROJECTION and its
@@ -337,18 +392,23 @@ pub const Plane = struct {
     /// whether anything here is durable.
     fn shapeOf(self: *Plane, scope: Scope) Shape {
         const persists = if (self.derived_attached)
-            self.derived.actions.resolveFacts("save", factsIn(scope)) != null
+            self.derived.actions.resolveFacts("file.save", factsIn(scope)) != null
         else
             true;
+        var provided: u8 = 0;
+        if (self.derived_attached) for (core_offers, 0..) |offer, row| {
+            if (offer.gate == .provided and self.derived.actions.resolveFacts(offer.command, factsIn(scope)) != null)
+                provided |= @as(u8, 1) << @intCast(row);
+        };
         const ed = scope.entry.textEditor() orelse
-            return .{ .has_text = false, .can_undo = false, .can_redo = false, .persists = persists };
-        return .{ .can_undo = ed.canUndo(), .can_redo = ed.canRedo(), .persists = persists };
+            return .{ .has_text = false, .can_undo = false, .can_redo = false, .persists = persists, .provided = provided };
+        return .{ .can_undo = ed.canUndo(), .can_redo = ed.canRedo(), .persists = persists, .provided = provided };
     }
 
     fn publishCore(self: *Plane) Allocator.Error!void {
         var n: usize = 0;
         for (core_offers, 0..) |offer, i| {
-            const availability = coreAvailability(offer, self.shape) orelse continue;
+            const availability = coreAvailability(offer, i, self.shape) orelse continue;
             self.rows[n] = .{
                 // Interned at `init`, so a lookup: this path cannot fail on a name.
                 .intention = self.catalog.findIntention(offer.intention).?,
@@ -399,9 +459,10 @@ pub const Plane = struct {
     /// the sidebar republishes them back. Both are signature comparisons
     /// when nothing moved, and the two contexts keep separate cache keys.
     pub fn snapshotAt(self: *Plane, ctx: *command.Context, where: Where) ?*const catalog_mod.Snapshot {
+        self.syncs +%= 1;
         const scope = scopeOf(ctx, where);
         self.syncShape(self.shapeOf(scope)) catch {};
-        if (ctx.semantic) |services| self.syncFocus(services, scope.focus, hereIn(ctx, scope)) catch {};
+        if (ctx.semantic) |services| self.syncFocus(services, scope.focus, scope.mode, hereIn(ctx, scope)) catch {};
         // The third built-in provider, synced HERE rather than on the dispatch
         // path, because "what would this key do" and "what does this key do"
         // must read the same table. Hung off `dispatchSpec` first, and the
@@ -513,7 +574,44 @@ pub const Plane = struct {
         return ctx.buffers.withEntry(ctx.gpa, scope.entry_id, ctx.head, ctx.keymap, invokeNamed, .{ self, ctx, name, buf }) catch |err|
             refused(buf, "{s}: could not reach the primary entry: {t}", .{ name, err });
     }
+
+    /// `invokeNamedAt`, where a name that is no intention but a registered
+    /// COMMAND (an action's trampoline included) runs as that command, with
+    /// no arguments, in the chosen context — what a menubar item does to the
+    /// editor it describes. The command reports its own refusal (`command.
+    /// invoke`), so a refused one is still `invoked`: it was asked.
+    pub fn invokeAt(
+        self: *Plane,
+        ctx: *command.Context,
+        where: Where,
+        name: []const u8,
+        buf: []u8,
+    ) Invocation {
+        switch (self.invokeNamedAt(ctx, where, name, buf)) {
+            .unknown => {},
+            else => |done| return done,
+        }
+        return runAt(ctx, where, name, &.{}, buf);
+    }
 };
+
+/// Run the registered COMMAND `name` with `args` in a chosen context — the
+/// one road a chosen context's command takes, with arguments or none: a
+/// menubar's File › Save and its Save As… `<path>` alike act on the editor
+/// the menu describes while the sidebar holds the keys. The command reports
+/// its own refusal (`command.invoke`), so a refused one is still `invoked`;
+/// `unknown` when no command has that name.
+pub fn runAt(ctx: *command.Context, where: Where, name: []const u8, args: []const command.Value, buf: []u8) Invocation {
+    if (ctx.commands.resolve(name) == null) return .unknown;
+    const scope = scopeOf(ctx, where);
+    if (scope.live) {
+        command.invoke(ctx.commands, ctx, name, args);
+        return .invoked;
+    }
+    ctx.buffers.withEntry(ctx.gpa, scope.entry_id, ctx.head, ctx.keymap, command.invoke, .{ ctx.commands, ctx, name, args }) catch |err|
+        return refused(buf, "{s}: could not reach the primary entry: {t}", .{ name, err });
+    return .invoked;
+}
 
 /// What `invokeNamed` did. `unknown` is not a refusal: the name is no
 /// intention at all, so the caller's other vocabulary (commands) still owns it.
@@ -572,8 +670,8 @@ pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.S
         .lang = Actions.langOfName(entry.name),
         .tool = entry.tool,
         .role = entry.focusedRole(),
-        .locality = localityOf(entry),
-        .posture = @tagName(entry.posture(focus.field != null)),
+        .locality = entry.locality(),
+        .posture = @tagName(entry.posture(focus.edit != null)),
         .pane = pane,
         .context = open,
     };
@@ -583,7 +681,7 @@ pub fn entryFacts(entry: *Buffers.Buffer, mode: []const u8, focus: *const Head.S
 /// head left it, else where its posture rests (an entry never visited).
 pub fn restingModeOf(buffers: *const Buffers, entry: *Buffers.Buffer) []const u8 {
     if (entry.mode.len > 0) return entry.mode;
-    return buffers.restingModeFor(entry.posture(entry.scene_selection.field != null));
+    return buffers.restingModeFor(entry.posture(entry.scene_selection.edit != null));
 }
 
 // ── Chosen contexts ──────────────────────────────────────────────────
@@ -657,15 +755,29 @@ pub fn primaryScopeOf(ctx: *command.Context) ?Scope {
     };
 }
 
-/// How to present `c`: what its provider declared, completed from the
-/// intention table (a std intention's label, its package as the group, its
-/// table position as the order) and, for anything else, from its name. A UI
-/// therefore always has a label and a group, and "missing placement metadata
-/// never hides an action" (§11.3) holds by construction.
-pub fn presentation(cat: *const Catalog, c: catalog_mod.Candidate) catalog_mod.Affordance {
+/// How to present `c`: what its provider declared; then what the COMMAND the
+/// offer runs says about itself (doc/chrome.md §1.2 — an offer's presentation
+/// defaults from its command's), read through its invoker when `ctx` is
+/// given; then the intention table (a std intention's label, its package as
+/// the group, its table position as the order) and, for anything else, its
+/// name. A UI therefore always has a label and a group, and "missing
+/// placement metadata never hides an action" (§11.3) holds by construction.
+pub fn presentation(plane: *const Plane, ctx: ?*command.Context, c: catalog_mod.Candidate) catalog_mod.Affordance {
+    const cat = &plane.catalog;
     const name = cat.intentionName(c.intention);
     const known = intentions.find(name);
     var out = c.affordance;
+    if (ctx) |live| if (plane.invokers.commandOf(live, c.endpoint)) |runs| {
+        // The label and the icon only: a command's `group`/`order` place it
+        // in a MENU, and a toolbar clusters offers by what they do here —
+        // the intention's package — not by where a menubar files them.
+        // A std intention keeps the vocabulary's word (`Paste`, not the
+        // provider's `Paste After`): the offer IS the intention.
+        if (@import("presentations.zig").of(live, runs)) |own| {
+            if (out.label.len == 0 and known == null) out.label = own.label;
+            if (out.icon.len == 0) out.icon = own.icon;
+        }
+    };
     if (out.label.len == 0) out.label = if (known) |k| k.intention.label else lastSegment(name);
     if (out.group.len == 0) out.group = packageOf(name);
     if (out.order == null) if (known) |k| {
@@ -684,14 +796,6 @@ fn packageOf(name: []const u8) []const u8 {
 fn lastSegment(name: []const u8) []const u8 {
     const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return name;
     return name[dot + 1 ..];
-}
-
-/// WHERE this entry's bytes live (`facts.zig`'s `Locality`) — answerable
-/// only now that an entry has a place. A tool entry is `.tool` first: its
-/// content is a projection, so "are the files real here" is not a question
-/// about it.
-fn localityOf(entry: anytype) @import("weft_facts").Locality {
-    return if (entry.tool.len > 0) .tool else if (entry.place.isHere()) .local else .remote;
 }
 
 pub fn catalogContext(ctx: *command.Context) catalog_mod.Context {
@@ -729,6 +833,19 @@ fn contextIn(ctx: *command.Context, scope: Scope) catalog_mod.Context {
         .revision = scope.clock.revision,
         .facts = facts,
         .shape = shape,
+    };
+}
+
+/// The command `intention` would run HERE: the winning offer's endpoint, read
+/// through its invoker (`Invokers.commandOf`). Null when nothing offers it,
+/// the offer is refused, or its endpoint runs no named command.
+pub fn providerCommand(ctx: *command.Context, intention: []const u8) ?[]const u8 {
+    const plane = ctx.intent orelse return null;
+    const id = plane.catalog.findIntention(intention) orelse return null;
+    const snap = plane.snapshotFor(ctx) orelse return null;
+    return switch (snap.resolveOne(id)) {
+        .decision => |d| plane.invokers.commandOf(ctx, d.endpoint),
+        else => null,
     };
 }
 
@@ -856,7 +973,7 @@ test "intent: an endpoint token refused once its invoker is retired" {
         }
     };
     S.runs = 0;
-    const h = try inv.register(gpa, "fixture", S.go, null);
+    const h = try inv.register(gpa, "fixture", S.go, null, null);
     try inv.invoke(undefined, h.endpoint(7)); // `go` never dereferences the ctx
     try t.expectEqual(@as(u32, 1), S.runs);
 
@@ -864,7 +981,7 @@ test "intent: an endpoint token refused once its invoker is retired" {
     try t.expectError(Error.StaleEndpoint, inv.invoke(undefined, h.endpoint(7)));
 
     // The reused slot is a DIFFERENT generation, so the old token stays dead.
-    const h2 = try inv.register(gpa, "fixture-2", S.go, null);
+    const h2 = try inv.register(gpa, "fixture-2", S.go, null, null);
     try t.expectEqual(h.slot, h2.slot);
     try t.expectError(Error.StaleEndpoint, inv.invoke(undefined, h.endpoint(7)));
     try inv.invoke(undefined, h2.endpoint(7));
@@ -944,7 +1061,7 @@ test "intent: presentation completes what a provider left unsaid from the intent
     const snap = try plane.catalog.snapshot(.{ .key = 1, .revision = 1 });
 
     const undo = plane.catalog.findIntention("std.history.undo").?;
-    const shown = presentation(&plane.catalog, snap.offersFor(undo)[0]);
+    const shown = presentation(&plane, null, snap.offersFor(undo)[0]);
     try t.expectEqualStrings("Undo", shown.label);
     try t.expectEqualStrings("history", shown.group);
     try t.expect(shown.order != null);
@@ -953,14 +1070,14 @@ test "intent: presentation completes what a provider left unsaid from the intent
     // from its name and grouped by its plugin.
     var c = snap.offersFor(undo)[0];
     c.affordance = .{ .label = "Take back", .order = 3 };
-    const over = presentation(&plane.catalog, c);
+    const over = presentation(&plane, null, c);
     try t.expectEqualStrings("Take back", over.label);
     try t.expectEqualStrings("history", over.group);
     try t.expectEqual(@as(?i32, 3), over.order);
 
     c.intention = try plane.catalog.intention("plugin.git.stage");
     c.affordance = .{};
-    const plugin_row = presentation(&plane.catalog, c);
+    const plugin_row = presentation(&plane, null, c);
     try t.expectEqualStrings("stage", plugin_row.label);
     try t.expectEqualStrings("git", plugin_row.group);
     try t.expectEqual(@as(?i32, null), plugin_row.order);

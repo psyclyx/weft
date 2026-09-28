@@ -37,6 +37,7 @@ pub const collab_cmds = @import("collab_cmds.zig");
 
 /// Collaboration wiring and its preset grant bundles.
 pub const collab = @import("collab.zig");
+pub const peer_file = @import("peer_file.zig");
 pub const collab_presets = @import("collab_presets.zig");
 
 /// Capability/syntax/LSP providers attached to a running system.
@@ -71,5 +72,5 @@ test {
     _ = render_memory;
     _ = collab_presets; // §13.6: echo derives from bundle values only
     _ = config_load; // W4 slice 4: the production plugin/grant-table loader
-    _ = providers; // `grammar-add` arity gate: DynLib.open stays guest-unreachable
+    _ = providers; // `syntax.add-grammar` arity gate: DynLib.open stays guest-unreachable
 }

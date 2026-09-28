@@ -13,6 +13,7 @@ const Resources = plugin_resources.Resources;
 const Door = plugin_resources.Door;
 const Perm = shared.Perm;
 const selection = @import("../selection.zig");
+const presentation = @import("weft_membrane").presentation;
 
 pub fn hLog(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
@@ -114,18 +115,38 @@ pub fn declareArityBody(d: Door, caller: *wasm.Caller, args: []const i32, result
     decl.arity = arity;
 }
 
-/// The three doors, and the table the anti-drift gate reads. Same shape as
+/// `declare_command_meta(name, meta)` — say how an already-declared command is
+/// PRESENTED (doc/chrome.md §1.2), in the shared text form
+/// (`weft_membrane.presentation`). Replaces what was said before; a name not
+/// yet declared declares nothing, like `declare_arity`.
+pub fn declareMetaBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const r = d.resources;
+    if (!r.accepting_declarations) return;
+    const gpa = r.gpa;
+    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(name);
+    const decl = r.declarationMut(name) orelse return;
+    const text = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    gpa.free(decl.meta_text);
+    decl.meta_text = text;
+    decl.meta = presentation.decode(text);
+}
+
+/// The four doors, and the table the anti-drift gate reads. Same shape as
 /// `wasm_host/proc.zig`'s `doors`, for the same reason.
 pub const doors = .{
     .{ .name = "declare_command", .body = declareBody, .wl = hDeclareCommand, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, null) },
     .{ .name = "declare_command_doc", .body = declareDocBody, .wl = hDeclareCommandDoc, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, null) },
     .{ .name = "declare_arity", .body = declareArityBody, .wl = hDeclareArity, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, null) },
+    .{ .name = "declare_command_meta", .body = declareMetaBody, .wl = hDeclareCommandMeta, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, null) },
 };
 
 /// Re-exported so the anti-drift gate can recompute a handler from the table
 /// and compare pointers, exactly as it does for `proc`.
 pub const wasmDoorFor = shared.wasmDoor;
 
+pub const hDeclareCommandMeta = wasmDoorFor(declareMetaBody, null);
 pub const hDeclareCommand = wasmDoorFor(declareBody, null);
 pub const hDeclareCommandDoc = wasmDoorFor(declareDocBody, null);
 pub const hDeclareArity = wasmDoorFor(declareArityBody, null);
@@ -135,7 +156,7 @@ pub fn hDeclareCapability(data: ?*anyopaque, caller: *wasm.Caller, args: []const
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     if (p.phase != .describing) return;
     const name = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    p.declared_caps.append(p.gpa, name) catch {
+    p.resources.declared_capabilities.append(p.gpa, name) catch {
         p.gpa.free(name);
         return;
     };

@@ -197,7 +197,7 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding, d
         .facts = try nameFacts(arena, row, indent),
         .target = binding.target,
         .focusable = true,
-        .content = .{ .field = .{ .ref = binding.field, .single_line = true } },
+        .content = .{ .field = .{ .ref = binding.field, .single_line = true, .primary = true } },
     };
     children[3] = .{
         .id = try stableId(row.id, size_domain),
@@ -220,7 +220,7 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding, d
         };
     }
 
-    const facts = try rowFacts(arena, row);
+    const facts = try rowFacts(arena, row, indent);
     const actions = try rowActions(arena, row, binding.mode_field != null, binding.target != null);
     return .{
         .id = try stableId(row.id, row_domain),
@@ -232,8 +232,8 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding, d
     };
 }
 
-fn rowFacts(arena: std.mem.Allocator, row: model.Row) ![]scene.Fact {
-    var count: usize = 3;
+fn rowFacts(arena: std.mem.Allocator, row: model.Row, indent: u16) ![]scene.Fact {
+    var count: usize = 4;
     if (row.draft.mode != null) count += 1;
     if (row.conflict == .stale and row.pending != .observed) count += 1;
     const facts = try arena.alloc(scene.Fact, count);
@@ -243,6 +243,10 @@ fn rowFacts(arena: std.mem.Allocator, row: model.Row) ![]scene.Fact {
     facts[index] = .{ .name = "kind", .value = kindName(row.draft.kind) };
     index += 1;
     facts[index] = .{ .name = "tone", .value = toneName(row) };
+    index += 1;
+    // How much of every column below is depth: what a narrow pane may give
+    // back so a deep name keeps its room (the renderer's `indentScale`).
+    facts[index] = .{ .name = "indent", .value = try std.fmt.allocPrint(arena, "{d}", .{indent}) };
     index += 1;
     if (row.draft.mode) |mode| {
         facts[index] = .{ .name = "mode", .value = try std.fmt.allocPrint(arena, "{d}", .{mode}) };

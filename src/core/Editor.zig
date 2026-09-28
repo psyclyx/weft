@@ -79,14 +79,32 @@ fold_layer: ?*const layers.Layer = null,
 /// `fold_layer`; consulted at the edit door.
 readonly_layer: ?*const layers.Layer = null,
 
-pub const SaveError = file.GuardedWriteError || ShellFs.WriteError;
-pub const PollError = file.ReadError || ShellFs.Error || Allocator.Error;
+pub const SaveError = file.GuardedWriteError || backing_mod.RemoteError;
+pub const PollError = file.ReadError || backing_mod.RemoteError || Allocator.Error;
+
+/// Work whose result folds in later: on a pool worker, or — for a tier whose
+/// calls run on the thread that asked (`Remote.Affinity.caller`) — already
+/// done. One shape, so every fold reads both the same way.
+pub fn Pending(comptime T: type) type {
+    return union(enum) {
+        task: task.Handle(T),
+        done: T,
+
+        /// The result if it is in (consumes it), else null.
+        pub fn poll(self: *@This()) ?T {
+            return switch (self.*) {
+                .task => |*h| h.poll(),
+                .done => |value| value,
+            };
+        }
+    };
+}
 
 pub const SaveState = union(enum) {
     idle,
     /// A save is in flight; the version it snapshots. The worker
     /// returns the written content's token.
-    saving: struct { handle: task.Handle(SaveError![]u8), version: []u8 },
+    saving: struct { pending: Pending(SaveError![]u8), version: []u8 },
     /// The disk moved under us — poll the backing (merges the external
     /// write), then request again. Cleared by `pollBacking`.
     stale,
@@ -96,7 +114,7 @@ pub const SaveState = union(enum) {
 
 pub const PollState = union(enum) {
     idle,
-    polling: task.Handle(PollError!?file.Fetched),
+    polling: Pending(PollError!?file.Fetched),
 };
 
 /// One selection: a `head` (the caret — where typing lands and motion acts)
@@ -111,22 +129,66 @@ pub const PollState = union(enum) {
 ///
 /// Biases are fixed by role: the head is `.right` (text typed at it pushes it
 /// forward, as do other peers' inserts there), the anchor `.left`.
+///
+/// An INCLUSIVE selection (vim's charwise visual) has its caret ON a
+/// character, not between two, and covers from the anchor's character
+/// through the caret's, both included. It is stored as the range it covers:
+/// `anchor` and `head` are that range's ends, the head the end the caret is
+/// at. So every reader of what a selection covers — the highlight, an
+/// operator, cut and copy, a search seeded from it — reads the range and
+/// cannot be one character short; only WHERE THE CARET IS differs (`Ends.
+/// caretIn`: on a forward selection, the character before the head), and the
+/// cursor API translates both ways (`cursorOffset`, `moveTo`).
 pub const Selection = struct {
     head: stemma.AnchorSet.Handle,
     anchor: ?stemma.AnchorSet.Handle = null,
+    inclusive: bool = false,
 };
 
 /// A selection's endpoints as offsets — what crosses the ABI and what
-/// `setSelections` takes. `anchor == head` asks for a caret (no anchor).
-pub const Ends = struct { anchor: usize, head: usize };
+/// `setSelections` takes. `anchor == head` asks for a caret (no anchor),
+/// unless the selection is `inclusive` (then it keeps its anchor: it grows
+/// from there).
+pub const Ends = struct {
+    anchor: usize,
+    head: usize,
+    inclusive: bool = false,
+
+    /// Where the caret is: the head, or on a forward inclusive selection the
+    /// last character it covers.
+    pub fn caretIn(self: Ends, rope: *const stemma.Rope) usize {
+        if (!self.inclusive or self.head <= self.anchor) return self.head;
+        return rope.scalarToOffset(rope.offsetToScalar(self.head) - 1);
+    }
+
+    /// The character the anchor holds on to, on an inclusive selection: the
+    /// anchor, or on a backward one the character before it.
+    fn pinnedIn(self: Ends, rope: *const stemma.Rope) usize {
+        if (!self.inclusive or self.head >= self.anchor) return self.anchor;
+        return rope.scalarToOffset(rope.offsetToScalar(self.anchor) - 1);
+    }
+};
 
 pub fn init(gpa: Allocator, pool: *task.Pool, user_agent: []const u8) Allocator.Error!Editor {
     var doc = try Document.init(gpa, user_agent);
     errdefer doc.deinit(gpa);
+    return around(gpa, pool, &doc);
+}
+
+/// An editor around a document that already exists — one restored from the
+/// document store (`Document.restore`). MOVES `doc` in on success (leaving
+/// it empty, so the caller's cleanup of it is a no-op); on failure the
+/// caller still owns it, unchanged. The caret starts at the top, and there
+/// is no backing and nothing saved: the editor is new even though the
+/// document is not.
+pub fn around(gpa: Allocator, pool: *task.Pool, doc: *Document) Allocator.Error!Editor {
     const cursor = try doc.addAnchor(gpa, 0, .right);
+    errdefer doc.removeAnchor(cursor);
     var selections: std.ArrayList(Selection) = .empty;
     try selections.append(gpa, .{ .head = cursor });
-    return .{ .doc = doc, .selections = selections, .pool = pool };
+    const moved = doc.*;
+    doc.* = .{};
+    return .{ .doc = moved, .selections = selections, .pool = pool };
 }
 
 pub fn deinit(self: *Editor, gpa: Allocator) void {
@@ -134,9 +196,8 @@ pub fn deinit(self: *Editor, gpa: Allocator) void {
     // it out (shutdown path, blocking allowed) so nothing leaks.
     switch (self.save_state) {
         .saving => |*s| {
-            var h = s.handle;
             while (true) {
-                if (h.poll()) |result| {
+                if (s.pending.poll()) |result| {
                     if (result) |token| gpa.free(token) else |_| {}
                     break;
                 }
@@ -147,10 +208,9 @@ pub fn deinit(self: *Editor, gpa: Allocator) void {
         else => {},
     }
     switch (self.poll_state) {
-        .polling => |*h| {
-            var handle = h.*;
+        .polling => |*pending| {
             while (true) {
-                if (handle.poll()) |result| {
+                if (pending.poll()) |result| {
                     if (result) |maybe| {
                         if (maybe) |f| {
                             gpa.free(f.bytes);
@@ -170,9 +230,9 @@ pub fn deinit(self: *Editor, gpa: Allocator) void {
             f.sync.deinit(gpa, &self.doc);
             gpa.free(f.path);
         },
-        .shell => |*s| {
-            s.sync.deinit(gpa, &self.doc);
-            gpa.free(s.path);
+        .remote => |*r| {
+            r.sync.deinit(gpa, &self.doc);
+            r.remote.deinit(gpa);
         },
     }
     self.history.deinit(gpa);
@@ -190,7 +250,7 @@ pub fn text(self: *const Editor) *const stemma.Rope {
 
 /// The primary selection's head — "the cursor" of every single-cursor API.
 pub fn cursorOffset(self: *const Editor) usize {
-    return self.doc.anchorOffset(self.primarySelection().head);
+    return self.selectionEndsOf(self.primarySelection()).caretIn(self.text());
 }
 
 fn primarySelection(self: *const Editor) Selection {
@@ -201,10 +261,26 @@ fn primarySelection(self: *const Editor) Selection {
 // ── Files & backings ────────────────────────────────────────────────
 
 /// The display/save path, when the backing has one.
+/// The path of the LOCAL file backing this entry, or null — for a scratch,
+/// a projection, and a remote file, whose path names a file on another
+/// locus. Whatever will act on a path here (reopen it, dedupe an open by
+/// it, hand it to a local tool or server) reads this, never `backingPath`:
+/// a far-side `/etc/hosts` taken for this machine's is a different file.
+/// A remote entry is named by its designation.
+pub fn localPath(self: *const Editor) ?[]const u8 {
+    return switch (self.backing) {
+        .file => |f| f.path,
+        else => null,
+    };
+}
+
+/// The backing's path on whichever locus holds it — for DISPLAY and for
+/// what a path's spelling says (a language by its extension), never for
+/// acting on here (`localPath`).
 pub fn backingPath(self: *const Editor) ?[]const u8 {
     return switch (self.backing) {
         .file => |f| f.path,
-        .shell => |s| s.path,
+        .remote => |r| r.remote.path(),
         else => null,
     };
 }
@@ -255,17 +331,28 @@ pub fn openFileContent(self: *Editor, gpa: Allocator, path: []const u8, bytes: [
 
 /// Open a remote file over a persistent shell (coreutils tier). Blocks
 /// (two shell round-trips); startup/open path.
-pub fn openShell(self: *Editor, gpa: Allocator, fs: *ShellFs, path: []const u8) (Allocator.Error || ShellFs.Error || Document.AddPeerError)!void {
+pub fn openShell(self: *Editor, gpa: Allocator, fs: *ShellFs, path: []const u8) (backing_mod.RemoteError || Document.AddPeerError)!void {
     task.assertMayBlock();
+    const remote = try backing_mod.ShellRemote.create(gpa, fs, path);
+    return self.openRemote(gpa, remote);
+}
+
+/// Open a file on another tier as this buffer's backing (`backing.Remote`),
+/// which the backing takes over — freed with it, or here on failure. Blocks
+/// for the tier's fetch; the open path.
+pub fn openRemote(self: *Editor, gpa: Allocator, remote: backing_mod.Remote) (backing_mod.RemoteError || Document.AddPeerError)!void {
     assert(self.backing == .none);
-    const bytes = try fs.readAll(gpa, path);
-    defer gpa.free(bytes);
-    const token = try fs.hashToken(gpa, path);
-    defer gpa.free(token);
+    var owned = true;
+    errdefer if (owned) remote.deinit(gpa);
+    try remote.prepare();
+    const fetched = (try remote.fetch(gpa, null)) orelse return error.Failed;
+    defer gpa.free(fetched.bytes);
+    defer gpa.free(fetched.token);
     var sync = try backing_mod.Sync.init(gpa, &self.doc);
-    errdefer sync.deinit(gpa, &self.doc);
-    try sync.load(gpa, &self.doc, bytes, token);
-    self.backing = .{ .shell = .{ .fs = fs, .path = try gpa.dupe(u8, path), .sync = sync } };
+    errdefer if (owned) sync.deinit(gpa, &self.doc);
+    try sync.load(gpa, &self.doc, fetched.bytes, fetched.token);
+    self.backing = .{ .remote = .{ .remote = remote, .sync = sync } };
+    owned = false;
     try self.setBackingLoaded(gpa);
 }
 
@@ -323,7 +410,7 @@ fn compactIfGrown(self: *Editor, gpa: Allocator) void {
 fn backingSync(self: *Editor) ?*backing_mod.Sync {
     return switch (self.backing) {
         .file => |*f| &f.sync,
-        .shell => |*s| &s.sync,
+        .remote => |*r| &r.sync,
         else => null,
     };
 }
@@ -336,24 +423,24 @@ fn filePollWorker(gpa: Allocator, path: []u8, expected: []u8) PollError!?file.Fe
     return file.pollFile(gpa, path, expected);
 }
 
-fn shellSaveWorker(gpa: Allocator, fs: *ShellFs, path: []u8, bytes: []u8, expected: ?[]u8) SaveError![]u8 {
-    defer gpa.free(path);
+fn remoteSaveWorker(gpa: Allocator, remote: backing_mod.Remote, bytes: []u8, expected: ?[]u8) SaveError![]u8 {
     defer gpa.free(bytes);
     defer if (expected) |e| gpa.free(e);
-    return fs.writeGuarded(gpa, path, bytes, expected);
+    return remote.write(gpa, bytes, expected);
 }
 
-fn shellPollWorker(gpa: Allocator, fs: *ShellFs, path: []u8, expected: []u8) PollError!?file.Fetched {
-    defer gpa.free(path);
+fn remotePollWorker(gpa: Allocator, remote: backing_mod.Remote, expected: []u8) PollError!?file.Fetched {
     defer gpa.free(expected);
-    const token = try fs.hashToken(gpa, path);
-    if (std.mem.eql(u8, token, expected)) {
-        gpa.free(token);
-        return null;
-    }
-    errdefer gpa.free(token);
-    const bytes = try fs.readAll(gpa, path);
-    return .{ .bytes = bytes, .token = token };
+    return remote.fetch(gpa, expected);
+}
+
+/// Run `f` where `remote`'s calls may run: on a pool worker, or right here.
+/// The caller has prepared the tier (`Remote.prepare`) on this thread.
+fn onTier(self: *Editor, remote: backing_mod.Remote, comptime f: anytype, args: std.meta.ArgsTuple(@TypeOf(f))) Allocator.Error!Pending(@typeInfo(@TypeOf(f)).@"fn".return_type.?) {
+    return switch (remote.vtable.affinity) {
+        .worker => .{ .task = try self.pool.spawn(f, args) },
+        .caller => .{ .done = @call(.auto, f, args) },
+    };
 }
 
 /// Request a guarded save: O(1) rope snapshot + version token, written
@@ -363,34 +450,34 @@ fn shellPollWorker(gpa: Allocator, fs: *ShellFs, path: []u8, expected: []u8) Pol
 /// poll the backing (which merges), then request again.
 pub fn requestSave(self: *Editor, gpa: Allocator) Allocator.Error!void {
     if (self.save_state == .saving) return;
+    if (self.backing == .remote) self.backing.remote.remote.prepare() catch |err| {
+        self.save_state = if (err == error.Stale) .stale else .{ .failed = err };
+        return;
+    };
     const version = try self.doc.version(gpa);
     errdefer gpa.free(version);
-    const handle: task.Handle(SaveError![]u8) = switch (self.backing) {
+    const pending: Pending(SaveError![]u8) = switch (self.backing) {
         .none => {
             gpa.free(version);
             return;
         },
-        .file => |f| try self.pool.spawn(fileSaveWorker, .{
+        .file => |f| .{ .task = try self.pool.spawn(fileSaveWorker, .{
             gpa,
             try gpa.dupe(u8, f.path),
             self.doc.text().snapshot(),
             if (f.sync.token) |tk| try gpa.dupe(u8, tk) else null,
-        }),
-        .shell => |s| blk: {
+        }) },
+        .remote => |r| blk: {
             var snap = self.doc.text().snapshot();
             defer snap.deinit(gpa);
             const bytes = try snap.toOwnedSlice(gpa);
             errdefer gpa.free(bytes);
-            break :blk try self.pool.spawn(shellSaveWorker, .{
-                gpa,
-                s.fs,
-                try gpa.dupe(u8, s.path),
-                bytes,
-                if (s.sync.token) |tk| try gpa.dupe(u8, tk) else null,
-            });
+            const expected = if (r.sync.token) |tk| try gpa.dupe(u8, tk) else null;
+            errdefer if (expected) |e| gpa.free(e);
+            break :blk try self.onTier(r.remote, remoteSaveWorker, .{ gpa, r.remote, bytes, expected });
         },
     };
-    self.save_state = .{ .saving = .{ .handle = handle, .version = version } };
+    self.save_state = .{ .saving = .{ .pending = pending, .version = version } };
 }
 
 /// Non-blocking: fold a finished save into state. Returns true when a
@@ -399,8 +486,7 @@ pub fn requestSave(self: *Editor, gpa: Allocator) Allocator.Error!void {
 pub fn pollSave(self: *Editor, gpa: Allocator) bool {
     switch (self.save_state) {
         .saving => |*s| {
-            var h = s.handle;
-            const result = h.poll() orelse return false;
+            const result = s.pending.poll() orelse return false;
             const version = s.version;
             if (result) |token| {
                 defer gpa.free(token);
@@ -430,15 +516,14 @@ pub fn requestBackingPoll(self: *Editor, gpa: Allocator) Allocator.Error!void {
         .none => {},
         .file => |f| {
             const tk = f.sync.token orelse return;
-            self.poll_state = .{ .polling = try self.pool.spawn(filePollWorker, .{
+            self.poll_state = .{ .polling = .{ .task = try self.pool.spawn(filePollWorker, .{
                 gpa, try gpa.dupe(u8, f.path), try gpa.dupe(u8, tk),
-            }) };
+            }) } };
         },
-        .shell => |s| {
-            const tk = s.sync.token orelse return;
-            self.poll_state = .{ .polling = try self.pool.spawn(shellPollWorker, .{
-                gpa, s.fs, try gpa.dupe(u8, s.path), try gpa.dupe(u8, tk),
-            }) };
+        .remote => |r| {
+            const tk = r.sync.token orelse return;
+            r.remote.prepare() catch return; // transient; the next poll retries
+            self.poll_state = .{ .polling = try self.onTier(r.remote, remotePollWorker, .{ gpa, r.remote, try gpa.dupe(u8, tk) }) };
         },
     }
 }
@@ -449,9 +534,8 @@ pub fn requestBackingPoll(self: *Editor, gpa: Allocator) Allocator.Error!void {
 /// for retry. Returns true when the buffer changed.
 pub fn pollBacking(self: *Editor, gpa: Allocator) Allocator.Error!bool {
     switch (self.poll_state) {
-        .polling => |*h| {
-            var handle = h.*;
-            const result = handle.poll() orelse return false;
+        .polling => |*pending| {
+            const result = pending.poll() orelse return false;
             self.poll_state = .idle;
             const fetched = result catch return false; // transient; next poll retries
             const f = fetched orelse {
@@ -698,15 +782,36 @@ fn solo(self: *Editor) void {
 pub fn setMark(self: *Editor, gpa: Allocator) Allocator.Error!void {
     self.solo();
     const sel = &self.selections.items[self.primary];
-    const a = try self.doc.addAnchor(gpa, self.doc.anchorOffset(sel.head), .left);
+    const at = self.selectionEndsOf(sel.*).caretIn(self.text());
+    const a = try self.doc.addAnchor(gpa, at, .left);
     if (sel.anchor) |m| self.doc.removeAnchor(m);
     sel.anchor = a;
+    sel.inclusive = false;
+    self.doc.anchors.set(sel.head, .{ .offset = at, .bias = .right });
 }
 
-/// Lift the anchor, leaving one caret where the head is.
+/// Start an INCLUSIVE selection at the caret (vim's `v`): it covers the
+/// character the caret is on at once, and grows through every character the
+/// caret moves onto.
+pub fn setInclusiveMark(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    const at = self.cursorOffset();
+    try self.setMark(gpa);
+    const sel = &self.selections.items[self.primary];
+    sel.inclusive = true;
+    self.doc.anchors.set(sel.anchor.?, .{ .offset = at, .bias = .left });
+    self.doc.anchors.set(sel.head, .{ .offset = self.stepOffset(at, .fwd, .char), .bias = .right });
+    self.normalize();
+}
+
+/// Lift the anchor, leaving one caret where the caret was (on an inclusive
+/// selection, the character it was on — not the covered range's end).
 pub fn clearSelection(self: *Editor) void {
     self.solo();
     const sel = &self.selections.items[self.primary];
+    if (sel.inclusive) {
+        self.doc.anchors.set(sel.head, .{ .offset = self.selectionEndsOf(sel.*).caretIn(self.text()), .bias = .right });
+        sel.inclusive = false;
+    }
     if (sel.anchor) |m| {
         self.doc.removeAnchor(m);
         sel.anchor = null;
@@ -794,8 +899,8 @@ pub fn setSelections(self: *Editor, gpa: Allocator, ends: []const Ends, primary:
         const anchor_off = @min(e.anchor, len);
         const head = try self.doc.addAnchor(gpa, head_off, .right);
         errdefer self.doc.removeAnchor(head);
-        const anchor = if (anchor_off == head_off) null else try self.doc.addAnchor(gpa, anchor_off, .left);
-        next.appendAssumeCapacity(.{ .head = head, .anchor = anchor });
+        const anchor = if (anchor_off == head_off and !e.inclusive) null else try self.doc.addAnchor(gpa, anchor_off, .left);
+        next.appendAssumeCapacity(.{ .head = head, .anchor = anchor, .inclusive = e.inclusive });
     }
     for (self.selections.items) |sel| self.releaseSelection(sel);
     self.selections.deinit(gpa);
@@ -825,23 +930,24 @@ pub fn replaceVisited(self: *Editor, gpa: Allocator, ends: []const Ends) Allocat
         const anchor_off = @min(e.anchor, len);
         const head = try self.doc.addAnchor(gpa, head_off, .right);
         errdefer self.doc.removeAnchor(head);
-        const anchor = if (anchor_off == head_off) null else try self.doc.addAnchor(gpa, anchor_off, .left);
-        slot.* = .{ .head = head, .anchor = anchor };
+        const anchor = if (anchor_off == head_off and !e.inclusive) null else try self.doc.addAnchor(gpa, anchor_off, .left);
+        slot.* = .{ .head = head, .anchor = anchor, .inclusive = e.inclusive };
         made += 1;
     }
     const first = ends[0];
     const head_off = @min(first.head, len);
     const anchor_off = @min(first.anchor, len);
     const visited = &self.selections.items[self.primary];
-    if (anchor_off != head_off and visited.anchor == null)
+    if ((anchor_off != head_off or first.inclusive) and visited.anchor == null)
         visited.anchor = try self.doc.addAnchor(gpa, anchor_off, .left);
     self.doc.anchors.set(visited.head, .{ .offset = head_off, .bias = .right });
     if (visited.anchor) |a| {
-        if (anchor_off == head_off) {
+        if (anchor_off == head_off and !first.inclusive) {
             self.doc.removeAnchor(a);
             visited.anchor = null;
         } else self.doc.anchors.set(a, .{ .offset = anchor_off, .bias = .left });
     }
+    visited.inclusive = first.inclusive;
     self.selections.appendSliceAssumeCapacity(fresh);
     self.normalize(); // the visited one stays primary wherever it lands
     self.clearGoal();
@@ -854,8 +960,8 @@ pub fn addSelection(self: *Editor, gpa: Allocator, e: Ends) Allocator.Error!void
     try self.selections.ensureUnusedCapacity(gpa, 1);
     const head = try self.doc.addAnchor(gpa, @min(e.head, len), .right);
     errdefer self.doc.removeAnchor(head);
-    const anchor = if (@min(e.anchor, len) == @min(e.head, len)) null else try self.doc.addAnchor(gpa, @min(e.anchor, len), .left);
-    self.selections.appendAssumeCapacity(.{ .head = head, .anchor = anchor });
+    const anchor = if (@min(e.anchor, len) == @min(e.head, len) and !e.inclusive) null else try self.doc.addAnchor(gpa, @min(e.anchor, len), .left);
+    self.selections.appendAssumeCapacity(.{ .head = head, .anchor = anchor, .inclusive = e.inclusive });
     self.primary = self.selections.items.len - 1;
     self.normalize();
     self.history.barrier();
@@ -939,7 +1045,7 @@ fn spanOf(self: *const Editor, sel: Selection) Range {
 
 fn selectionEndsOf(self: *const Editor, sel: Selection) Ends {
     const head = self.doc.anchorOffset(sel.head);
-    return .{ .anchor = if (sel.anchor) |a| self.doc.anchorOffset(a) else head, .head = head };
+    return .{ .anchor = if (sel.anchor) |a| self.doc.anchorOffset(a) else head, .head = head, .inclusive = sel.inclusive };
 }
 
 /// Fold `other` into `into`, spanning `span`. Reuses handles rather than
@@ -984,7 +1090,19 @@ fn mergeInto(self: *Editor, into: *Selection, other: Selection, span: Range) voi
 
 pub fn moveTo(self: *Editor, offset: usize) void {
     self.solo();
-    self.doc.anchors.set(self.primarySelection().head, .{ .offset = offset, .bias = .right });
+    const sel = self.primarySelection();
+    if (sel.inclusive) if (sel.anchor) |a| {
+        // The caret goes onto `offset`'s character; the range still covers
+        // the anchor's, whichever side of it the caret now is.
+        const pinned = self.selectionEndsOf(sel).pinnedIn(self.text());
+        const forward = offset >= pinned;
+        self.doc.anchors.set(a, .{ .offset = if (forward) pinned else self.stepOffset(pinned, .fwd, .char), .bias = .left });
+        self.doc.anchors.set(sel.head, .{ .offset = if (forward) self.stepOffset(offset, .fwd, .char) else offset, .bias = .right });
+        self.normalize();
+        self.history.barrier();
+        return;
+    };
+    self.doc.anchors.set(sel.head, .{ .offset = offset, .bias = .right });
     // Moving one head can carry it onto or past another selection; keep the
     // set sorted and disjoint (free for a single selection).
     self.normalize();

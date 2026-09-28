@@ -1,14 +1,14 @@
-//! Per-mode caret style + blink, set from config via `set-cursor` and
-//! `cursor-blink` and read into the Hud each frame. Blink is per mode so
+//! Per-mode caret style + blink, set from config via `cursor.set-style` and
+//! `cursor.set-blink` and read into the Hud each frame. Blink is per mode so
 //! the sample config can blink in insert and stay solid in normal. Also
-//! the runtime `set-color` theme command and the markdown-path test.
+//! the runtime `theme.set-color` theme command and the markdown-path test.
 
 const std = @import("std");
 const core = @import("weft_core");
 const view_mod = @import("weft_gfx").view;
 
 pub const CursorConfig = struct {
-    const Entry = struct { mode: []u8, style: view_mod.CursorStyle = .block, place: view_mod.CaretPlace = .head, blink: bool = false };
+    const Entry = struct { mode: []u8, style: ?view_mod.CursorStyle = null, place: view_mod.CaretPlace = .head, blink: bool = false };
     gpa: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
 
@@ -30,9 +30,20 @@ pub const CursorConfig = struct {
         if (keymap.modeHasTag(mode, "menu")) if (head.menuReturn(mode)) |ret| return ret;
         return mode;
     }
-    pub fn styleFor(self: *const CursorConfig, mode: []const u8) view_mod.CursorStyle {
-        for (self.entries.items) |e| if (std.mem.eql(u8, e.mode, mode)) return e.style;
-        return .block;
+    /// The caret's shape in `mode` — DERIVED from whether a printable key
+    /// inserts there (`scene_edit.textCommit`), not chosen (doc/chrome.md §5.2).
+    /// A bar says "type here", so it is drawn only where typing inserts: a
+    /// mode that declared one and commits nothing gets a block, which is
+    /// honest about a position that matters but takes no text. Where typing
+    /// inserts, the bar is the default and a grammar may still choose
+    /// otherwise; `underline` (a capture awaiting one key) is a grammar's to
+    /// keep either way.
+    pub fn styleFor(self: *const CursorConfig, mode: []const u8, inserts: bool) view_mod.CursorStyle {
+        const declared: ?view_mod.CursorStyle = for (self.entries.items) |e| {
+            if (std.mem.eql(u8, e.mode, mode)) break e.style;
+        } else null;
+        if (inserts) return declared orelse .bar;
+        return if (declared == .underline) .underline else .block;
     }
     pub fn placeFor(self: *const CursorConfig, mode: []const u8) view_mod.CaretPlace {
         for (self.entries.items) |e| if (std.mem.eql(u8, e.mode, mode)) return e.place;
@@ -56,7 +67,7 @@ fn parseCursorStyle(s: []const u8) ?view_mod.CursorStyle {
     return null;
 }
 
-/// `set-color <name> <#rrggbb>` — a BINDING at the transient tier, then a
+/// `theme.set-color <name> <#rrggbb>` — a BINDING at the transient tier, then a
 /// re-resolve, rather than a poke at the view's struct. So the interactive
 /// command and a config's `weft.set("theme", ...)` are the same mechanism at
 /// different tiers, and the interactive one wins because `transient` outranks
@@ -66,12 +77,12 @@ pub fn setColorHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []co
     const v: *view_mod.View = @ptrCast(@alignCast(data.?));
     const slot = core.palette.slotFor(args[0].string) orelse return error.InvalidArgument;
     if (core.palette.parseHex(args[1].string) == null) return error.InvalidArgument;
-    ctx.actions.container.bind(.{
+    ctx.actions.container.rebind(.{
         .slot = slot,
         .provider = .{ .value = args[1].string },
         .predicate = .{ .all = &.{} },
         .tier = .transient,
-        .owner = "set-color",
+        .owner = "theme.set-color",
     }) catch return error.InvalidArgument;
     v.theme.resolve(ctx.actions.container, ctx.capturedCtx().mergedFacts());
     return .nil;
@@ -85,7 +96,7 @@ pub fn setCursorHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []c
     return .nil;
 }
 
-/// `cursor-place <mode> head|inside` — where the caret draws relative to the
+/// `cursor.set-place <mode> head|inside` — where the caret draws relative to the
 /// selection in `mode` (`view_mod.CaretPlace`). A grammar declares it, as it
 /// declares the caret's shape; core picks no answer for anyone.
 pub fn cursorPlaceHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {

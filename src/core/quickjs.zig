@@ -44,6 +44,7 @@ const edit_doors = @import("wasm_host/edit.zig");
 const pointer_doors = @import("wasm_host/pointer.zig");
 const clipboard_doors = @import("wasm_host/clipboard.zig");
 const context_doors = @import("wasm_host/context.zig");
+const tool_doors = @import("wasm_host/tool.zig");
 const history_doors = @import("wasm_host/history.zig");
 const Perm = perm_gate.Perm;
 const perm_count = perm_gate.WasmPlugin.perm_count;
@@ -116,6 +117,11 @@ const Bridge = struct {
     /// safety argument: `active_ctx` is still the fresh load-time `ctx`
     /// during this call, so nothing else could be mid-interaction yet.
     loading: bool = false,
+    /// Who a LIVE registration (a key, a group label, a provider, a
+    /// description) is made on behalf of: the resident plugin's name, so its
+    /// teardown can take back exactly what it registered (`JsPlugin.retract`).
+    /// Config-eval mode stages onto `manifest` and never reads it.
+    owner: []const u8 = "config",
 
     /// Optional-with-fallback where WasmPlugin's twin is non-optional
     /// (init'd to the load ctx): the null here MEANS something — config-eval
@@ -127,7 +133,7 @@ const Bridge = struct {
 
     /// task #19 item 4 (mirrors `wasm_host/plugin.zig`'s `requireDispatch`
     /// exactly, one layer down under the JS engine): every LIVE `weft.*`
-    /// handler that MUTATES head state (`weft.echo`, `weft.pick` — see
+    /// handler that MUTATES head state (`weft.pick` — see
     /// `membrane/root.zig`'s `.head_gated` doc for the exact boundary this
     /// mirrors) calls this before touching `activeCtx().head`. In dispatch
     /// (`in_dispatch`, set by `JsPlugin.onCommand`/`jsPickAccept`) or loading
@@ -210,6 +216,7 @@ const config_handlers = .{
     .{ .name = "qjs_group", .handler = cGroup },
     .{ .name = "qjs_action", .handler = cAction },
     .{ .name = "qjs_semantic_action", .handler = cSemanticAction },
+    .{ .name = "qjs_describe", .handler = cDescribe },
     .{ .name = "qjs_provide", .handler = cProvide },
     .{ .name = "qjs_status_segment", .handler = cStatusSegment },
     .{ .name = "qjs_grant", .handler = cGrant },
@@ -230,6 +237,11 @@ pub const plugin_handlers = .{
     .{ .name = "qjs_declare_command", .handler = cDeclareCommand },
     .{ .name = "qjs_declare_command_doc", .handler = cDeclareCommandDoc },
     .{ .name = "qjs_declare_arity", .handler = cDeclareArity },
+    .{ .name = "qjs_declare_command_meta", .handler = cDeclareCommandMeta },
+    // What a name is called here and which key runs it: `wasm_host/commands.zig`'s
+    // bodies, the ones `wl_command_meta` and `wl_keys_for` run.
+    .{ .name = "qjs_command_meta", .handler = cCommandMeta },
+    .{ .name = "qjs_keys_for", .handler = cKeysFor },
     .{ .name = "qjs_proc_spawn", .handler = cProcSpawn },
     .{ .name = "qjs_proc_send", .handler = cProcSend },
     .{ .name = "qjs_proc_read", .handler = cProcRead },
@@ -264,6 +276,14 @@ pub const plugin_handlers = .{
     .{ .name = "qjs_macro_recording", .handler = cMacroRecording },
     .{ .name = "qjs_context_set", .handler = cContextSet },
     .{ .name = "qjs_context_get", .handler = cContextGet },
+    .{ .name = "qjs_context_listen", .handler = cContextListen },
+    .{ .name = "qjs_context_changed", .handler = cContextChanged },
+    .{ .name = "qjs_places", .handler = cPlaces },
+    .{ .name = "qjs_subject_watch", .handler = cSubjectWatch },
+    .{ .name = "qjs_tool_backing", .handler = cToolBacking },
+    .{ .name = "qjs_designation", .handler = cDesignation },
+    .{ .name = "qjs_designate", .handler = cDesignate },
+    .{ .name = "qjs_designation_opener", .handler = cDesignationOpener },
 };
 
 /// The shared `weft.*` membrane, bound over a `Bridge` — used by both the
@@ -343,7 +363,7 @@ pub fn evalToManifest(engine: *wasm.Engine, ctx: *command.Context, loader: ?Plug
 /// Evaluate `src` as the user config AND apply it — `evalToManifest` plus
 /// the hash-log + fresh `apply` pass (doc/configuration.md §5's "the approved
 /// artifact is the manifest value plus its hash"). This is the convenience
-/// entry point for a FIRST load; a config-reload wired against a previous
+/// entry point for a FIRST load; a app.reload-config wired against a previous
 /// manifest should call `evalToManifest` + `Manifest.reconcile` directly
 /// (see `config_load.ConfigSession`) so an unchanged reload is a verified
 /// no-op instead of a blind re-apply.
@@ -413,6 +433,12 @@ pub const JsPlugin = struct {
     /// own claims and its own open entry, so neither can land a chunk in the
     /// other's transcript (§18's isolation gate).
     conversations: std.ArrayList(*Conversation) = .empty,
+    /// Whether the plugin has a context handler installed
+    /// (`weft.onContextChanged`, reported through `qjs_context_listen`). The
+    /// event goes only to a plugin that has one — the JS twin of a `.wasm`
+    /// plugin's `context_listener`, told rather than probed, since a JS
+    /// handler is a value the host cannot see.
+    hears_context: bool = false,
 
     const Cmd = struct { plugin: *JsPlugin, id: i32, name: []u8 };
 
@@ -491,7 +517,24 @@ pub const JsPlugin = struct {
     /// from `ctx.grant_table` — whatever `weft.grant` already minted for
     /// `name`, adopted BEFORE the body runs, so the plugin's very first
     /// statement is already gated.
+    ///
+    /// TRANSACTIONAL: a body that fails — it threw, or claimed a projection
+    /// kind it may not — leaves nothing behind. Its commands, keys, group
+    /// labels, providers, descriptions, context values, watches and openers
+    /// go by the one path an unload takes (`deinit`), so a half-registered
+    /// plugin is not a state the editor can be in.
     pub fn load(gpa: Allocator, engine: *wasm.Engine, ctx: *command.Context, pool: *task.Pool, environ: std.process.Environ, name: []const u8, config_store: ?*kv.Store, src: []const u8) !*JsPlugin {
+        if (std.mem.eql(u8, name, command.Command.core_owner)) return error.ReservedPluginName;
+        const self = try instantiate(gpa, engine, ctx, pool, environ, name, config_store);
+        self.run(src) catch |e| {
+            self.deinit();
+            return e;
+        };
+        return self;
+    }
+
+    /// Stand up the instance and its membrane, running nothing of the body.
+    fn instantiate(gpa: Allocator, engine: *wasm.Engine, ctx: *command.Context, pool: *task.Pool, environ: std.process.Environ, name: []const u8, config_store: ?*kv.Store) !*JsPlugin {
         const self = try gpa.create(JsPlugin);
         errdefer gpa.destroy(self);
         // Hoisted out of the struct literal so each owned value gets its
@@ -517,7 +560,7 @@ pub const JsPlugin = struct {
             // LIVE mode (`manifest` left null) — see Bridge's doc: a resident
             // JS plugin's `weft.*` calls mutate the editor immediately, not
             // staged.
-            .bridge = .{ .ctx = ctx, .loader = null, .config = null, .engine = engine },
+            .bridge = .{ .ctx = ctx, .loader = null, .config = null, .engine = engine, .owner = name_dup },
             .module = module,
             .linker = undefined,
             .instance = undefined,
@@ -534,7 +577,12 @@ pub const JsPlugin = struct {
         self.instance.callVoid("_initialize", &.{}) catch |e| {
             if (e != error.MissingExport) return e;
         };
+        return self;
+    }
 
+    /// Run the plugin body (`src`), which registers its commands. On an
+    /// error what it registered is still there; `load` takes it back.
+    fn run(self: *JsPlugin, src: []const u8) !void {
         const size: i32 = @intCast(src.len + 1);
         const ptr = try self.instance.callI32("malloc", &.{size});
         if (ptr == 0) return error.OutOfMemory;
@@ -543,11 +591,9 @@ pub const JsPlugin = struct {
         try self.instance.writeGuest(at, src);
         try self.instance.writeGuest(at + src.len, &.{0});
         // `Bridge.loading` (task #19 item 4): legitimate for the top-level JS
-        // body to touch head state while it runs (see that field's doc) — no
-        // `defer` needed to reset it: every error path below returns before
-        // reaching the plain `false` set, and `self`/`self.bridge` are only
-        // read again on the surviving success path.
+        // body to touch head state while it runs (see that field's doc).
         self.bridge.loading = true;
+        defer self.bridge.loading = false;
         // A JS plugin has no `describe()` to separate declaring from
         // registering, so its whole top-level body is the declaring window —
         // `weft.command(name, fn, summary)` declares and registers in one call.
@@ -555,11 +601,76 @@ pub const JsPlugin = struct {
         // rewrite what one of its commands claims to be after the palette has
         // read it.
         self.resources.accepting_declarations = true;
-        const rc = try self.instance.callI32("weft_plugin_init", &.{ ptr, @intCast(src.len) });
-        self.resources.accepting_declarations = false;
-        self.bridge.loading = false;
+        defer self.resources.accepting_declarations = false;
+        const rc = blk: {
+            const entries = self.ctx.buffers;
+            const was = entries.actAs(self.name);
+            defer _ = entries.actAs(was);
+            break :blk try self.instance.callI32("weft_plugin_init", &.{ ptr, @intCast(src.len) });
+        };
+        // A body that threw, or a projection kind it may not claim (the same
+        // rule, and the same refusal, as a `.wasm` plugin's load).
         if (rc != 0) return error.ConfigException;
-        return self;
+        if (self.resources.load_refusal) |e| return e;
+    }
+
+    /// Every guest call enters here: for its duration this plugin is the
+    /// ACTING one (`Buffers.actAs`), so an entry it creates — however it
+    /// comes to — is its own (`Buffer.creator`), and only it may say what
+    /// that entry is (`wasm_host/tool.zig`). The wasm plane's `contract.enter`
+    /// twin.
+    fn enter(self: *JsPlugin, symbol: []const u8, args: []const i32) wasm.Error!void {
+        const entries = self.activeCtx().buffers;
+        const was = entries.actAs(self.name);
+        defer _ = entries.actAs(was);
+        return self.instance.callVoid(symbol, args);
+    }
+
+    /// The context event (`on_context_changed`'s JS twin): keys of the
+    /// head's primary context moved; `weft.onContextChanged`'s handler hears
+    /// them (read through `qjs_context_changed`). The app's frame boundary
+    /// decides WHEN, exactly as for a wasm plugin. Returns whether it ran:
+    /// never, for a plugin with no handler (`hears_context`).
+    pub fn notifyContextChanged(self: *JsPlugin) bool {
+        if (!self.hears_context) return false;
+        self.enter("weft_on_context_changed", &.{}) catch return false;
+        return true;
+    }
+
+    /// The subject event (`on_subject_changed`'s JS twin), bound to the
+    /// subject's entry for the call, so `weft.designation()`, `weft.slice`
+    /// and the other reads answer for the subject.
+    pub fn notifySubjectChanged(self: *JsPlugin, entry: Buffers.Ref) bool {
+        const ctx = self.activeCtx();
+        const was = ctx.bindEntry(entry);
+        defer _ = ctx.bindEntry(was);
+        self.enter("weft_on_subject_changed", &.{}) catch return false;
+        return true;
+    }
+
+    /// Take back everything this plugin registered: its commands, the keys
+    /// and group labels it bound, the providers it offered, the descriptions
+    /// it gave, its published context values, its subject watches, its
+    /// projection kinds — as a `.wasm` plugin's unload does. The one path for
+    /// an unload and a failed load alike. Before `name`, which they are keyed
+    /// by, is freed; before the trampolines, which the commands point into.
+    /// Declarations (an action's name, a menu mode) outlive it, as they do a
+    /// `.wasm` plugin: cheap names another provider may still answer.
+    fn retract(self: *JsPlugin) void {
+        const ctx = self.activeCtx();
+        for (self.cmds.items) |c| {
+            const n = ctx.commands.find(c.name) orelse continue;
+            const cmd = ctx.commands.lookup(n) orelse continue;
+            if (cmd.data == @as(?*anyopaque, c)) ctx.commands.unbind(n);
+        }
+        ctx.keymap.unbindOwner(self.gpa, self.name);
+        ctx.actions.unregisterByOwner(self.name);
+        if (ctx.presentations) |table| table.dropOwner(self.gpa, self.name);
+        if (ctx.context) |context| {
+            _ = context.store.retractOwner(self.resources.name);
+            context.unwatchOwner(self.resources.name);
+        }
+        if (ctx.designations) |openers| openers.release(self.gpa, self.name);
     }
 
     /// Dispatch command `id` into the JS handler registered for it. DISPATCHING
@@ -583,7 +694,7 @@ pub const JsPlugin = struct {
             self.bridge.active_ctx = saved_ctx;
             self.bridge.in_dispatch = saved_dispatch;
         }
-        self.instance.callVoid("weft_on_command", &.{id}) catch {};
+        self.enter("weft_on_command", &.{id}) catch {};
     }
 
     /// Frame boundary: fire the JS output handler for every stream with new
@@ -596,7 +707,7 @@ pub const JsPlugin = struct {
         while (h < self.resources.streams.len()) : (h += 1) {
             if (self.resources.streams.slice()[h]) |s| {
                 if (s.pending() > 0) {
-                    self.instance.callVoid("weft_on_output", &.{@intCast(h)}) catch {};
+                    self.enter("weft_on_output", &.{@intCast(h)}) catch {};
                     fired = true;
                 }
             }
@@ -618,7 +729,7 @@ pub const JsPlugin = struct {
             }
             if (h >= self.exits_reported.items.len or self.exits_reported.items[h]) continue;
             self.exits_reported.items[h] = true;
-            self.instance.callVoid("weft_on_exit", &.{@intCast(h)}) catch {};
+            self.enter("weft_on_exit", &.{@intCast(h)}) catch {};
             fired = true;
         }
         return fired;
@@ -693,9 +804,9 @@ pub const JsPlugin = struct {
 
     pub fn deinit(self: *JsPlugin) void {
         const gpa = self.gpa;
-        // What it published leaves with it, exactly as for a `.wasm` plugin —
-        // and before `name`, which the owner key borrows, is freed.
-        if (self.activeCtx().context) |context| _ = context.store.retractOwner(self.resources.name);
+        // What it published and claimed leaves with it, exactly as for a
+        // `.wasm` plugin — and before `name`, which the owner key borrows.
+        self.retract();
         gpa.free(self.name);
         self.resources.deinit(); // kill + join every live child
         self.exits_reported.deinit(gpa);
@@ -758,6 +869,9 @@ pub fn jsDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn {
 const cDeclareCommand = jsDoor(declare_doors.declareBody, null);
 const cDeclareCommandDoc = jsDoor(declare_doors.declareDocBody, null);
 const cDeclareArity = jsDoor(declare_doors.declareArityBody, null);
+const cDeclareCommandMeta = jsDoor(declare_doors.declareMetaBody, null);
+pub const cCommandMeta = jsDoor(@import("wasm_host/commands.zig").commandMetaBody, null);
+pub const cKeysFor = jsDoor(@import("wasm_host/commands.zig").keysForBody, null);
 
 const cProcSpawn = jsDoor(proc_doors.spawnBody, .proc);
 const cProcSend = jsDoor(proc_doors.sendBody, .proc);
@@ -785,6 +899,23 @@ pub const cClipboardGet = jsDoor(clipboard_doors.getBody, .clipboard);
 /// at a scope as this plugin, read the primary context.
 pub const cContextSet = jsDoor(context_doors.setBody, null);
 pub const cContextGet = jsDoor(context_doors.getBody, null);
+pub const cContextChanged = jsDoor(context_doors.changedBody, null);
+/// `weft.onContextChanged` installed (1) or removed (0) its handler. JS-only:
+/// a `.wasm` plugin's handler is an export the host finds for itself.
+fn cContextListen(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    self.hears_context = args[0] != 0;
+}
+pub const cPlaces = jsDoor(context_doors.placesBody, null);
+pub const cSubjectWatch = jsDoor(context_doors.watchBody, null);
+/// The tool doors — `wasm_host/tool.zig`'s bodies: mark an entry this plugin
+/// made, name it, claim a projection kind in its own namespace.
+pub const cToolBacking = jsDoor(tool_doors.toolBackingBody, null);
+pub const cDesignation = jsDoor(tool_doors.designationBody, null);
+pub const cDesignate = jsDoor(tool_doors.designateBody, null);
+pub const cDesignationOpener = jsDoor(tool_doors.openerBody, null);
 /// The head's history — `wl_jump_push`'s and `wl_macro_recording`'s bodies.
 pub const cJumpPush = jsDoor(history_doors.jumpPushBody, null);
 pub const cMacroRecording = jsDoor(history_doors.macroRecordingBody, null);
@@ -801,7 +932,7 @@ fn appendNamed(ctx: *command.Context, gpa: Allocator, name: []const u8, text: []
     const ed = b.textEditor() orelse return;
     const doc = &ed.doc;
     const start = ed.text().byteLen();
-    command.renderInto(gpa, &ctx.buffers.status, doc, .plugin, transcript_peer, &.{.{ .range = .{ .start = start, .end = start }, .bytes = text }}) catch return;
+    command.renderInto(gpa, &ctx.buffers.notices, doc, .plugin, transcript_peer, &.{.{ .range = .{ .start = start, .end = start }, .bytes = text }}) catch return;
     if (class != 0) paintStyle(ctx, gpa, doc, start, start + text.len, class);
 }
 
@@ -931,7 +1062,7 @@ pub fn transcriptEntry(self: *JsPlugin, gpa: Allocator, name: []const u8, role: 
     const b = namedBuffer(self.bridge.activeCtx(), gpa, name) orelse return;
     const ed = b.textEditor() orelse return;
     try b.setTool(gpa, TranscriptDoc.projection_author);
-    try TranscriptDoc.fill(gpa, &self.activeCtx().buffers.status, tr, &ed.doc, &conv.subs);
+    try TranscriptDoc.fill(gpa, &self.activeCtx().buffers.notices, tr, &ed.doc, &conv.subs);
     // Cache the fresh row's claim for `cTranscriptAppend`'s incremental
     // path — see `transcript.lastRowClaim`'s doc comment for why this is
     // safe to grab right here (nothing else claims on `ed.doc`
@@ -999,14 +1130,14 @@ pub fn transcriptAppend(self: *JsPlugin, gpa: Allocator, name: []const u8, text:
     if (sub == null or sub.?.doc != doc) {
         // Slow path: no trustworthy cached claim (see this fn's doc
         // comment for the two cases) — a full re-fill is always correct.
-        try TranscriptDoc.fill(gpa, &self.activeCtx().buffers.status, tr, doc, &conv.subs);
+        try TranscriptDoc.fill(gpa, &self.activeCtx().buffers.notices, tr, doc, &conv.subs);
         conv.live_sub = TranscriptDoc.lastRowClaim(&conv.subs, doc);
         return;
     }
     // Fast path: grow the buffer and the one claim that names this row,
     // nothing else touched.
     const at = sub.?.resolve().end;
-    try command.renderInto(gpa, &self.activeCtx().buffers.status, doc, .plugin, TranscriptDoc.projection_author, &.{
+    try command.renderInto(gpa, &self.activeCtx().buffers.notices, doc, .plugin, TranscriptDoc.projection_author, &.{
         .{ .range = .{ .start = at, .end = at }, .bytes = text },
     });
     try sub.?.extendEnd(gpa, at + text.len);
@@ -1239,7 +1370,7 @@ fn jsPickAccept(ctx: *command.Context, data: ?*anyopaque, outcome: pick_mod.Outc
         bp.plugin.bridge.active_ctx = saved_ctx;
         bp.plugin.bridge.in_dispatch = saved_dispatch;
     }
-    bp.plugin.instance.callVoid("weft_on_pick", &.{
+    bp.plugin.enter("weft_on_pick", &.{
         kind,
         idx,
         text_ptr,
@@ -1356,7 +1487,7 @@ pub fn cAgentWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const ed = b.textEditor() orelse return;
     const doc = &ed.doc;
     const end = ed.text().byteLen();
-    command.renderInto(gpa, &bufs.status, doc, .agent, peer, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch return;
+    command.renderInto(gpa, &bufs.notices, doc, .agent, peer, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch return;
 }
 
 /// The framed blob the shim encodes — one decoder, shared with the guest ABI
@@ -1440,8 +1571,12 @@ fn cRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         .owner = self.name,
         .handler = jsCmdTramp,
         .arity = if (decl) |d| d.arity else null,
+        .meta = if (decl) |d| d.meta else .{},
         .data = c,
-    }) catch {
+    }) catch |err| {
+        // `Command.admit`'s refusal (not its namespace, outside the grammar,
+        // another owner's id) says so; the plugin keeps loading without it.
+        std.log.warn("plugin {s}: command '{s}' refused: {s}", .{ self.name, name, @errorName(err) });
         results[0] = -1;
         return;
     };
@@ -1484,10 +1619,10 @@ fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
         m.addBind(mode, key, cmds[0..n]) catch {};
         return;
     }
-    // LIVE mode (a resident JS plugin): user config shadows plugins and core
-    // defaults (highest tier). Fallback lists bind their FIRST entry, as
-    // `applyDecls` does — no resolution is faked here either.
-    br.activeCtx().keymap.bind(gpa, mode, key, cmds[0], @import("Keymap.zig").prio_config, "config") catch {};
+    // LIVE mode (a resident JS plugin): the PLUGIN tier, a .wasm plugin's own —
+    // under the user's config, which it must never shadow. Fallback lists bind
+    // their FIRST entry, as `applyDecls` does — no resolution is faked here.
+    br.activeCtx().keymap.bind(gpa, mode, key, cmds[0], @import("Keymap.zig").prio_plugin, br.owner) catch {};
 }
 
 /// `weft.use(name)` backing: evaluate `<config_dir>/<name>.js` into ITS OWN
@@ -1497,17 +1632,25 @@ fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
 /// manifests land one tier below the importer"). A no-op (no result to
 /// report — `weft.use` has always been fire-and-forget from JS) when: this
 /// isn't config-eval mode (a resident JS plugin's `weft.use` — no config_dir
-/// is ever wired for one, matching the old `cReadConfig`'s degrade), the
-/// file can't be read, or the nested eval throws — each logged, none fatal
-/// to the OUTER eval (a broken include shouldn't brick the whole config).
+/// is ever wired for one, matching the old `cReadConfig`'s degrade). An
+/// import that cannot land — no directory, an unreadable file, a nested eval
+/// that throws — is logged at error level, none fatal to the OUTER eval (a
+/// broken include shouldn't brick the whole config).
 fn cUse(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
     const gpa = br.activeCtx().gpa;
     const m = br.manifest orelse return;
-    const dir = br.config_dir orelse return;
     const name = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(name);
+    // A config evaluated with no directory cannot resolve an import, and an
+    // import lost here loses every value and plugin the fragment declares —
+    // the includer then reads as if the fragment were never written. Loud
+    // (error level, which fails any test that does it), never a quiet skip.
+    const dir = br.config_dir orelse {
+        std.log.err("config: weft.use(\"{s}\") — this config was evaluated with no directory to resolve it against; the import is lost", .{name});
+        return;
+    };
     // Nested weft.use (an imported file itself calling weft.use) flat-tiers
     // — the sub-sub-manifest still lands at plain `.imported`, one rung, not
     // a deeper one (manifest.zig's module doc: "a deliberate simplification
@@ -1518,20 +1661,19 @@ fn cUse(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
         const msg = std.fmt.allocPrint(gpa, "config: weft.use(\"{s}\") nested inside an imported config — flattens to the same 'imported' tier, not a deeper one", .{name}) catch "";
         defer if (msg.len > 0) gpa.free(msg);
         std.log.warn("{s}", .{msg});
-        br.activeCtx().head.echo.clearRetainingCapacity();
-        br.activeCtx().head.echo.appendSlice(gpa, msg) catch {};
+        br.activeCtx().head.echo.say(gpa, msg) catch {};
     }
     const path = std.fmt.allocPrint(gpa, "{s}/{s}.js", .{ dir, name }) catch return;
     defer gpa.free(path);
     const src = @import("file.zig").readAlloc(gpa, path) catch |e| {
-        std.log.warn("config: weft.use(\"{s}\") failed to read {s}: {t}", .{ name, path, e });
+        std.log.err("config: weft.use(\"{s}\") failed to read {s}: {t}", .{ name, path, e });
         return;
     };
     defer gpa.free(src);
     const owner = std.fmt.allocPrint(gpa, "import:{s}", .{name}) catch return;
     defer gpa.free(owner);
     const sub = evalToManifest(br.engine, br.activeCtx(), br.loader, br.config, dir, src, .imported, owner) catch |e| {
-        std.log.warn("config: weft.use(\"{s}\") failed: {t}", .{ name, e });
+        std.log.err("config: weft.use(\"{s}\") failed: {t}", .{ name, e });
         return;
     };
     m.addImport(sub) catch sub.destroy();
@@ -1617,7 +1759,7 @@ fn cSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
 
 /// weft.menu(name) — declare `name` as a prefix-menu keymap mode: a which-key
 /// submenu. It swallows text (a modal menu, not typing) and Escape/C-g leave it
-/// via `menu-escape`. A leader key bound to `name` enters it (the dispatch
+/// via `mode.leave-menu`. A leader key bound to `name` enters it (the dispatch
 /// treats a bound command that names a menu mode as "enter that submenu").
 fn cMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
@@ -1651,7 +1793,7 @@ fn cGroup(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: [
         m.addGroup(mode, prefix, name) catch {};
         return;
     }
-    br.activeCtx().keymap.setGroupName(gpa, mode, prefix, name, @import("Keymap.zig").prio_config, "config") catch {};
+    br.activeCtx().keymap.setGroupName(gpa, mode, prefix, name, @import("Keymap.zig").prio_plugin, br.owner) catch {};
 }
 
 /// weft.action(name) — declare a `pick` action (an abstract intent) and bind
@@ -1667,7 +1809,7 @@ fn cAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
         m.addAction(name) catch {};
         return;
     }
-    command.registerAction(gpa, br.activeCtx().commands, br.activeCtx().actions, name, .pick) catch {};
+    command.registerAction(gpa, br.activeCtx().commands, br.activeCtx().actions, name, .pick, command.action_summary, .{}) catch {};
 }
 
 /// weft.semanticAction(name) — declare a focused structured-view action
@@ -1685,6 +1827,39 @@ fn cSemanticAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     }
     if (br.activeCtx().semantic) |services|
         @import("builtins.zig").registerSemanticAction(gpa, br.activeCtx().commands, services, name) catch {};
+}
+
+/// weft.command(id, {label, summary, menu, …}) — the config plane's: describe
+/// how a command is presented (doc/chrome.md §1.2). `meta` arrives in the
+/// shared text form the C side built. Staged on the manifest when there is
+/// one; otherwise applied straight into the live table, owned by the
+/// resident plugin that described it (`Bridge.owner`).
+fn cDescribe(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const gpa = br.activeCtx().gpa;
+    const name = readStr(br, caller, args[0], args[1]) orelse return;
+    defer gpa.free(name);
+    const meta = readStr(br, caller, args[2], args[3]) orelse return;
+    defer gpa.free(meta);
+    if (br.manifest) |m| {
+        m.addDescribe(name, meta) catch {};
+        return;
+    }
+    // LIVE: a resident plugin describes only its own commands — a bound id
+    // it owns, or an unbound one in its own namespace. Relabelling core's,
+    // or another plugin's, or clearing its `internal`, is the user's tier
+    // (the config, staged above), never a plugin's.
+    const allowed = if (br.activeCtx().commands.resolve(name)) |cmd|
+        std.mem.eql(u8, cmd.owner, br.owner)
+    else
+        @import("weft_membrane").command_id.mayDescribe(br.owner, name);
+    if (!allowed) {
+        std.log.warn("plugin {s}: may not describe '{s}' — not its command", .{ br.owner, name });
+        return;
+    }
+    const table = br.activeCtx().presentations orelse return;
+    table.put(gpa, name, meta, br.owner, .plugin) catch {};
 }
 
 /// weft.provide(action, when, cmd, prio | opts) — register a provider. `when`
@@ -1722,7 +1897,7 @@ fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
         .predicate = parsed.predicate,
         .command = cmd,
         .priority = parsed.priority,
-        .owner = "config",
+        .owner = br.owner,
         .affordance = parsed.affordance,
     }) catch |e| if (e == error.RaceRejectsProvider) echoProvideRefused(br, action);
 }
@@ -1733,8 +1908,7 @@ fn echoProvideMalformed(br: *Bridge, action: []const u8, why: []const u8) void {
     defer ctx.gpa.free(msg);
     std.log.warn("config: {s}", .{msg});
     if (br.in_dispatch or br.loading) {
-        ctx.head.echo.clearRetainingCapacity();
-        ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+        ctx.head.echo.say(ctx.gpa, msg) catch {};
     }
 }
 
@@ -1898,8 +2072,7 @@ fn echoProvideRefused(br: *Bridge, action: []const u8) void {
     // head.echo only from a dispatching path or load — a BACKGROUND entry's
     // error lands in the log instead (the gated class; see #19 item 4).
     if (br.in_dispatch or br.loading) {
-        ctx.head.echo.clearRetainingCapacity();
-        ctx.head.echo.appendSlice(gpa, msg) catch {};
+        ctx.head.echo.say(gpa, msg) catch {};
     } else {
         std.log.warn("js plugin: {s}", .{msg});
     }
@@ -1918,12 +2091,12 @@ fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
         m.addEcho(msg) catch {};
         return;
     }
-    // HEAD-GATED (task #19 item 4): reached only in LIVE mode (config-eval
-    // already returned above) — a resident plugin's BACKGROUND
-    // `weft_on_output` must not write the head's echo line directly.
-    if (!br.requireDispatch(caller, "weft.echo")) return;
-    br.activeCtx().head.echo.clearRetainingCapacity();
-    br.activeCtx().head.echo.appendSlice(br.activeCtx().gpa, msg) catch {};
+    // Reached only in LIVE mode (config-eval already returned above). A
+    // resident plugin's BACKGROUND `weft_on_output` has no head that asked:
+    // what it says is a notice to the system (`Buffers.notices`), exactly as the wasm
+    // plane's `hEcho` routes it — never the head's echo line, never a trap.
+    if (!(br.in_dispatch or br.loading)) return perm_gate.noteBackground(br.activeCtx(), br.owner, msg);
+    br.activeCtx().head.echo.say(br.activeCtx().gpa, msg) catch {};
 }
 
 fn cLog(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

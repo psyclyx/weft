@@ -21,10 +21,13 @@
 //! pane, never in the companion showing the tree) and moves the caret to the
 //! symbol, leaving a jump behind.
 //!
-//! What it shows is read when it is presented. An edit to the subject does
-//! not re-read it until the subject is presented again — the editor moving to
-//! another entry and back, or `symbols-refresh`: there is no event for a
-//! document's revision yet, and polling one is not an option.
+//! What it shows is read when it is presented, and again whenever the subject
+//! reads differently: each tree WATCHES its subject (`weft.subjectWatch`), and
+//! `on_subject_changed` — at the frame boundary, bound to the subject's entry
+//! — re-reads the outline there, so an edit, or a parse that lands frames
+//! after the tree was presented, shows without the subject coming to the
+//! front and without anything polling. A re-read that finds the same symbols
+//! publishes nothing.
 
 const std = @import("std");
 const weft = @import("weft");
@@ -53,6 +56,9 @@ const Tree = struct {
     symbols: std.ArrayList(Symbol) = .empty,
     view: ?weft.semantic.view.Ref = null,
     revision: u32 = 0,
+    /// What the read symbols hash to, so a re-read that finds the same ones
+    /// publishes nothing.
+    digest: u64 = 0,
 
     fn name(self: *const Tree) []const u8 {
         return self.name_buf[0..self.name_len];
@@ -68,19 +74,19 @@ const Tree = struct {
 var trees: std.ArrayList(*Tree) = .empty;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "symbols-present", .arity = .whole, .call = present, .params = "designation", .summary = "present an entry's symbols (weft://…?as=symbols)" },
-    .{ .name = "symbols-refresh", .arity = .whole, .call = refresh, .summary = "read the presented entry's symbols again" },
-    .{ .name = "symbols-jump", .arity = .one, .call = jump, .params = "offset" },
+    .{ .name = "symbols.present", .arity = .whole, .call = present, .params = "designation", .summary = "Present an entry's symbols (weft://…?as=symbols).", .internal = true },
+    .{ .name = "symbols.jump", .arity = .one, .call = jump, .params = "offset", .summary = "Open the subject with the cursor at a symbol.", .internal = true },
 };
 
 comptime {
     weft.plugin(&cmds, .{ .init = init }).exportAll();
     weft.exportCallback("on_semantic_action", &onSemanticAction);
+    weft.exportCallback("on_subject_changed", &onSubjectChanged);
 }
 
 fn init() void {
     _ = weft.semanticActionProvider();
-    _ = weft.designationOpener(kind, "symbols-present");
+    _ = weft.designationOpener(kind, "symbols.present");
 }
 
 /// The opener: `open <entry>?as=symbols`, run with that entry active.
@@ -103,6 +109,9 @@ fn present() void {
     weft.toolBacking(kind);
     designateFor(d);
     publish(tree) catch return;
+    // Hear the subject change from here on; the watch's baseline is what
+    // was just read.
+    _ = weft.subjectWatch(tree.subject);
     if (tree.view) |ref| _ = weft.semanticViewFocus(ref, null);
 }
 
@@ -116,6 +125,7 @@ fn prune() void {
             continue;
         }
         _ = trees.swapRemove(i);
+        weft.subjectUnwatch(tree.subject);
         tree.destroy();
     }
 }
@@ -158,30 +168,24 @@ fn designateFor(d: durable.Designation) void {
     _ = weft.designate(own.render(&out) catch return);
 }
 
-/// The tree `symbols-refresh` is about: the one in front, or the one whose
-/// subject is.
-fn treeHere() ?*Tree {
+/// `on_subject_changed`: a watched subject reads differently, and this call
+/// is bound to its entry — the outline read here is the subject's, whatever
+/// is in front. Re-read its tree; publish only when the symbols moved.
+fn onSubjectChanged() callconv(.c) void {
     prune();
-    var name_buf: [64]u8 = undefined;
-    const active = weft.activeBufferName(&name_buf) orelse "";
-    for (trees.items) |tree| if (std.mem.eql(u8, tree.name(), active)) return tree;
-    const here = weft.designation() orelse return null;
-    for (trees.items) |tree| if (std.mem.eql(u8, tree.subject, here)) return tree;
-    return null;
-}
-
-fn refresh() void {
-    const tree = treeHere() orelse return;
-    const text = weft.allocator.dupe(u8, tree.subject) catch return;
-    defer weft.allocator.free(text);
-    weft.openDesignation(text);
-    collect(tree);
-    publish(tree) catch {};
+    const here = weft.designation() orelse return;
+    for (trees.items) |tree| {
+        if (!std.mem.eql(u8, tree.subject, here)) continue;
+        const was = tree.digest;
+        collect(tree);
+        if (tree.digest != was) publish(tree) catch {};
+    }
 }
 
 /// The active entry's outline, nested by span: each item's depth is how many
 /// of the items before it still enclose it.
 fn collect(tree: *Tree) void {
+    defer tree.digest = digestOf(tree.symbols.items);
     _ = tree.arena.reset(.retain_capacity);
     tree.symbols = .empty;
     const a = tree.arena.allocator();
@@ -194,6 +198,16 @@ fn collect(tree: *Tree) void {
         tree.symbols.append(a, .{ .name = a.dupe(u8, c.name) catch return, .start = c.start, .depth = ends.items.len }) catch return;
         ends.append(a, c.end) catch return;
     }
+}
+
+fn digestOf(symbols: []const Symbol) u64 {
+    var h = std.hash.Wyhash.init(0);
+    for (symbols) |s| {
+        h.update(s.name);
+        h.update(std.mem.asBytes(&s.start));
+        h.update(std.mem.asBytes(&s.depth));
+    }
+    return h.final();
 }
 
 fn publish(tree: *Tree) !void {
@@ -211,7 +225,10 @@ fn publish(tree: *Tree) !void {
             .focusable = true,
             .content = .{ .action = .{ .action = jump_action, .label = s.name } },
         };
-        try rows.append(a, .{ .id = @enumFromInt(line_base + i), .content = .{ .container = .{ .axis = .horizontal, .children = cells } } });
+        // The row says how much of its column is depth, so a narrow outline
+        // gives the depth back before it cuts a name.
+        const indent = try a.dupe(weft.semantic.scene.Fact, &.{.{ .name = "indent", .value = try std.fmt.allocPrint(a, "{d}", .{depth * 2}) }});
+        try rows.append(a, .{ .id = @enumFromInt(line_base + i), .facts = indent, .content = .{ .container = .{ .axis = .horizontal, .children = cells } } });
     }
     if (tree.symbols.items.len == 0)
         try rows.append(a, .{ .id = @enumFromInt(row_base), .role = "muted", .content = .{ .label = "No symbols" } });
@@ -248,13 +265,13 @@ fn onSemanticAction() callconv(.c) void {
     // The row's tree names its subject: `<offset>\t<subject>`.
     const arg = std.fmt.allocPrint(weft.allocator, "{d}\t{s}", .{ tree.symbols.items[@intCast(raw - row_base)].start, tree.subject }) catch return;
     defer weft.allocator.free(arg);
-    weft.runStr("symbols-jump", arg);
+    weft.runStr("symbols.jump", arg);
 }
 
-/// `symbols-jump <offset>\t<subject>`: the subject, the caret at the symbol.
+/// `symbols.jump <offset>\t<subject>`: the subject, the caret at the symbol.
 fn jump() void {
     const arg = weft.argStr(0) orelse return;
-    const tab = std.mem.indexOfScalar(u8, arg, '\t') orelse return weft.echo("symbols-jump: <offset>\\t<subject>");
+    const tab = std.mem.indexOfScalar(u8, arg, '\t') orelse return weft.echo("symbols.jump: <offset>\\t<subject>");
     const offset = std.fmt.parseInt(usize, std.mem.trim(u8, arg[0..tab], " "), 10) catch return;
     const subject = weft.allocator.dupe(u8, arg[tab + 1 ..]) catch return;
     defer weft.allocator.free(subject);

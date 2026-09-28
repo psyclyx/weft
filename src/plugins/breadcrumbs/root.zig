@@ -4,19 +4,24 @@
 //! It is an ordinary status-line provider: it binds `ui/statusline-seg` for
 //! text entries (the same slot the mode chip and the path answer), so it
 //! sits right after the path and a click on a crumb runs the command the
-//! crumb carries — `breadcrumbs-jump <offset>`, the symbol's start. No
+//! crumb carries — `breadcrumbs.jump <offset>`, the symbol's start. No
 //! header door, no knowledge of any language: the symbols are the grammar's
 //! OUTLINE (`weft.outline`, the configured `outline.scm`), and "encloses"
 //! is a span test.
 //!
-//! **Cheap on every frame.** The host asks once per built frame, and this
-//! asks the outline only for the items overlapping the caret's byte — the
-//! caret's path through the tree, never the file. It used to read the WHOLE
-//! outline and cache it against the document's snapshot witness; that made
-//! every keystroke re-run the outline query over the entire file (~15ms per
+//! **Cheap on every frame.** This asks the outline only for the items
+//! overlapping the caret's byte — the caret's path through the tree, never
+//! the file. It used to read the WHOLE outline and cache it against the
+//! document's snapshot witness; that made every keystroke re-run the outline query over the entire file (~15ms per
 //! key on an 11.6k-line javascript file, the whole of a typing frame's cost),
-//! and silently lost crumbs past its 512-symbol cap. The answer is still
-//! cached, against the witness AND the caret, so an idle redraw asks nothing.
+//! and silently lost crumbs past its 512-symbol cap. It kept a private cache
+//! too, which is gone: the host caches every status answer against the
+//! caret and the SUBJECT's revision — its text and its tree
+//! (`Context.revisionOf`) — so an idle redraw asks nothing, and a parse that
+//! lands after the question was answered empty (a fresh file's first frames)
+//! is a new question, asked again. The private cache could not know that:
+//! it declined to cache an empty outline and relied on being asked every
+//! frame, which the answer cache ended.
 //! Nothing here ever asks a language server.
 
 const std = @import("std");
@@ -32,10 +37,6 @@ const Symbol = struct { start: u32, end: u32, name_off: u32, name_len: u16 };
 var symbols: [max_symbols]Symbol = undefined;
 var symbol_count: usize = 0;
 var names: [1 << 12]u8 = undefined;
-/// The document version the cache describes; null when there is none.
-var cached: ?u32 = null;
-/// The caret the cache was read at.
-var cached_caret: u32 = 0;
 
 fn init() void {
     // Text entries only (a listing's rows are not a document's symbols), at
@@ -44,14 +45,8 @@ fn init() void {
     statusline.bind(.{ .all = &.{ .{ .posture = "text" }, .{ .tool = "" } } }, .core, 75);
 }
 
-/// Re-read what encloses `caret` when the document or the caret moved since
-/// the cache was filled.
-fn refresh(caret: u32) void {
-    if (cached) |witness| {
-        if (caret == cached_caret and weft.docSnapshotIsCurrent(witness)) return;
-        weft.releaseDocSnapshot(witness);
-        cached = null;
-    }
+/// Read what encloses `caret`.
+fn read(caret: u32) void {
     symbol_count = 0;
     const n = weft.outline(.{ .start = caret, .end = @as(usize, caret) + 1 });
     var used: usize = 0;
@@ -69,12 +64,6 @@ fn refresh(caret: u32) void {
         used += c.name.len;
         symbol_count += 1;
     }
-    // An empty outline is not cached: the grammar's first parse may simply
-    // not have landed yet, and the next frame asks again.
-    if (symbol_count > 0) {
-        cached = weft.docSnapshot();
-        cached_caret = caret;
-    }
 }
 
 fn nameOf(s: Symbol) []const u8 {
@@ -89,7 +78,7 @@ fn on_slot_fire(session: i32) callconv(.c) void {
     const q = statusline.ask(handle) orelse return;
     // Only the focused pane's entry is the one the document doors read.
     if (!q.focused) return statusline.tell(handle, &.{});
-    refresh(q.caret);
+    read(q.caret);
     var segs: [max_crumbs]statusline.Segment = undefined;
     var n: usize = 0;
     // Document order with nested items after their parents, so every
@@ -97,15 +86,18 @@ fn on_slot_fire(session: i32) callconv(.c) void {
     for (symbols[0..symbol_count]) |s| {
         if (n >= max_crumbs) break;
         if (q.caret < s.start or q.caret >= s.end) continue;
-        const text = std.fmt.bufPrint(&text_buf[n], " › {s}", .{nameOf(s)}) catch continue;
-        const command = std.fmt.bufPrint(&command_buf[n], "breadcrumbs-jump {d}", .{s.start}) catch continue;
-        segs[n] = .{ .text = text, .role = if (n == 0) .muted else .accent, .command = command };
+        const text = std.fmt.bufPrint(&text_buf[n], "› {s}", .{nameOf(s)}) catch continue;
+        const command = std.fmt.bufPrint(&command_buf[n], "breadcrumbs.jump {d}", .{s.start}) catch continue;
+        // A trail is worth less room than the path it hangs off, and its
+        // outer crumbs less than the one the caret is in: on a short line
+        // they go outermost first.
+        segs[n] = .{ .text = text, .role = if (n == 0) .muted else .accent, .command = command, .priority = @intCast(20 + n), .tooltip = nameOf(s) };
         n += 1;
     }
     statusline.tell(handle, segs[0..n]);
 }
 
-/// `breadcrumbs-jump <offset>`: what a click on a crumb runs — the caret to
+/// `breadcrumbs.jump <offset>`: what a click on a crumb runs — the caret to
 /// the symbol's start, leaving a jump behind.
 fn jump() void {
     const arg = weft.argStr(0) orelse return;
@@ -115,7 +107,7 @@ fn jump() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "breadcrumbs-jump", .arity = .one, .call = jump, .params = "offset", .summary = "move the caret to a breadcrumb's symbol" },
+    .{ .name = "breadcrumbs.jump", .arity = .one, .call = jump, .params = "offset", .summary = "Move the cursor to a breadcrumb's symbol.", .internal = true },
 };
 
 comptime {

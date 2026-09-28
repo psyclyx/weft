@@ -95,7 +95,7 @@ pub const ShareCtx = struct {
     /// collab emits our caret. False ⇒ sharing text emits no presence — the
     /// mechanism default, kept by hubs and programmatic shares. The
     /// interactive editor sets it from `presenceDefault` at startup and the
-    /// `share-presence` command flips it at runtime.
+    /// `collab.share-presence` command flips it at runtime.
     publish_presence: bool = false,
     /// Which endpoint surfaces a newly shared quad EXPORTS (§13.2) — the
     /// typed export set, distinct from `publish_presence`, which only
@@ -104,6 +104,9 @@ pub const ShareCtx = struct {
     export_presence: bool = true,
     export_diagnostics: bool = true,
     peer_fs_service: ?core.peer_fs.Service = null,
+    /// The outbound connection's mailbox for peer filesystem requests made
+    /// off the frame thread (`Collab.remote_mailbox`), serviced by `tickCollab`.
+    remote_mailbox: ?*RemoteMailbox = null,
     /// Published by `Collab.reconcileRemoteFilesystem`; commands only see an
     /// ordinary located target and use the generic target resolver.
     remote_fs_target: ?semantic.target.Located = null,
@@ -147,15 +150,13 @@ pub const ShareCtx = struct {
     /// tree, published once and reused: looked up in the provider's own
     /// listing of `parent`, so it is what the peer really has. Null when
     /// there is no such directory (a file by that name included).
-    pub fn remoteChild(self: *ShareCtx, ctx: *core.command.Context, parent: semantic.target.Located, name: []const u8) !?semantic.target.Located {
+    pub fn remoteChild(self: *ShareCtx, services: *core.semantic.Services, router: *fs_runtime.Router, parent: semantic.target.Located, name: []const u8) !?semantic.target.Located {
         for (self.remote_children.items) |c| {
             if (c.registration.active and c.parent.target.eql(parent.target) and
                 c.parent.revision == parent.revision and std.mem.eql(u8, c.name, name))
                 return c.registration.located();
         }
         const owner = self.remote_fs_owner orelse return null;
-        const services = ctx.semantic orelse return null;
-        const router = ctx.filesystems orelse return null;
         const published = (fs_runtime.publication.publishChildByName(self.gpa, &services.targets, router, owner, parent, name) catch return null) orelse return null;
         switch (published) {
             .file => |registration| {
@@ -174,41 +175,17 @@ pub const ShareCtx = struct {
         }
     }
 
-    /// The bytes of the file `name` in the peer's directory `parent`, owned
-    /// by `gpa` — looked up in the provider's own listing of `parent` and
-    /// read through the router at the revision that listing observed, then
-    /// the file's publication retired again. Null when the peer has no such
-    /// regular file there.
-    pub fn readRemoteFile(self: *ShareCtx, ctx: *core.command.Context, parent: semantic.target.Located, name: []const u8) !?[]u8 {
-        const owner = self.remote_fs_owner orelse return null;
-        const services = ctx.semantic orelse return null;
-        const router = ctx.filesystems orelse return null;
-        const published = (fs_runtime.publication.publishChildByName(self.gpa, &services.targets, router, owner, parent, name) catch return null) orelse return null;
-        var file = switch (published) {
-            .file => |registration| registration,
-            .directory => |registration| {
-                var directory = registration;
-                _ = directory.close(self.gpa, &services.targets);
-                return null;
-            },
-        };
-        defer _ = file.close(self.gpa, &services.targets, router);
-        const entry = try router.authorizedEntry(file.ref, file.revision);
-        var read = try router.read(ctx.gpa, .{ .source = .{ .entry = .{ .root = entry.root, .ref = entry.ref, .revision = entry.revision } } });
-        defer read.deinit();
-        return try ctx.gpa.dupe(u8, read.value.bytes);
-    }
-
     /// The place a peer's shared tree is (doc/place.md): its root container,
     /// named by the designation it was published under (`weft://<peer>/dir/`),
     /// so the `place` context key of an entry opened from the peer's tree is
-    /// the tree, and a sidebar following that key lists it. Bound in this
-    /// process's router, hence the `here` locus — which also means nothing
-    /// local can be realized there: a spawn from a peer's file has no
-    /// directory of ours to run in, and says so.
-    pub fn remotePlace(self: *const ShareCtx) ?core.Place {
+    /// the tree, and a sidebar following that key lists it. On the PEER's
+    /// locus, the one its fingerprint names (`designation.placeOf`), so the
+    /// entries in it read `locality = remote`, and nothing local can be
+    /// realized there: a spawn from a peer's file has no directory of ours to
+    /// run in, and says so.
+    pub fn remotePlace(self: *const ShareCtx, ctx: *core.command.Context) !?core.Place {
         const root = self.remote_fs_target orelse return null;
-        return .{ .container = .{ .locus = .here, .ref = root.target, .revision = root.revision } };
+        return core.designation.placeOf(ctx, root);
     }
 
     /// Remember what the person called the host they connected to: the
@@ -285,12 +262,19 @@ pub const Collab = struct {
 
     // ── Semantic remote filesystem client (ordinary provider + target) ──
     remote_exchange: RemoteExchange,
+    /// Requests the peer tree's provider makes off the frame thread, carried by
+    /// `tickCollab` (`RemoteExchange`).
+    remote_mailbox: RemoteMailbox,
+    /// The thread that owns the connection: `initBase`'s, the frame loop's.
+    frame_thread: std.Thread.Id,
     remote_provider: ?fs_remote.Provider,
     remote_root: ?fs.contract.Root,
     remote_system: ?*core.System,
     remote_owner: ?semantic.owner.Id,
     remote_publication: ?fs_runtime.publication.Registration,
-    next_remote_authority: u32,
+    /// The peer locus the published tree is on, while this connection is
+    /// what reaches it.
+    remote_locus: ?core.locus.Locus,
     remote_attempted_session: ?*core.session.Session,
 
     // ── The share intent surface (self-referential: points at siblings) ──
@@ -370,12 +354,14 @@ pub const Collab = struct {
         core.wasm_host.setPeerFsBridge(&self.peer_fs_bridge);
         self.peer_fs_inflight = .empty;
         self.remote_exchange = .{ .collab = self };
+        self.frame_thread = std.Thread.getCurrentId();
+        self.remote_mailbox = .{ .gpa = gpa };
         self.remote_provider = null;
         self.remote_root = null;
         self.remote_system = null;
         self.remote_owner = null;
         self.remote_publication = null;
-        self.next_remote_authority = 1;
+        self.remote_locus = null;
         self.remote_attempted_session = null;
         // Best-effort: a failed eventfd create (fd exhaustion) falls back to
         // the scheduler's bounded background-services poll rather than
@@ -398,6 +384,7 @@ pub const Collab = struct {
             .publish_presence = share_presence,
             .peer_fs_service = if (self.shared_fs_server) |*server| core.peer_fs.Service.init(server) else null,
             .conn_wake_fd = conn_wake_fd,
+            .remote_mailbox = &self.remote_mailbox,
         };
         // Boot --listen folds onto the runtime listen path (one code path): seed
         // the intent; the first frame boots the hub.
@@ -489,6 +476,7 @@ pub const Collab = struct {
         }
         core.wasm_host.setPeerFsBridge(null);
         self.peer_fs_bridge.deinit();
+        self.remote_mailbox.close();
         self.detachRemoteFilesystem();
         self.remote_fs.deinit();
         self.share_ctx.remote_children.deinit(gpa);
@@ -522,11 +510,7 @@ pub const Collab = struct {
         if (self.remote_attempted_session == active_session) return false;
         self.remote_attempted_session = active_session;
 
-        var authority_raw = self.next_remote_authority;
-        while (authority_raw == 0) : (authority_raw +%= 1) {}
-        self.next_remote_authority = authority_raw +% 1;
-        if (self.next_remote_authority == 0) self.next_remote_authority = 1;
-        const authority: semantic.handle.Authority = @enumFromInt(authority_raw);
+        const authority = system.filesystems.freshAuthority();
         self.remote_provider = try fs_remote.Provider.init(authority, .init(&self.remote_exchange));
         var provider_registered = false;
         errdefer {
@@ -549,10 +533,17 @@ pub const Collab = struct {
         // not the address, is the authority (substrate §7, R2), so the name
         // survives a reconnect from somewhere else.
         var designation_buf: [64]u8 = undefined;
-        const designation: []const u8 = if (active_session.peerFingerprint()) |fp|
+        const fingerprint = active_session.peerFingerprint();
+        const designation: []const u8 = if (fingerprint) |fp|
             (semantic.durable.Designation{ .authority = .{ .peer = &fp }, .kind = .directory, .ref = "/" }).render(&designation_buf) catch ""
         else
             "";
+        // The peer's locus is its fingerprint; this connection is only what
+        // reaches it now (R2) — bound here, unbound when the tree goes.
+        if (fingerprint) |fp| {
+            self.remote_locus = try system.loci.peer(&fp);
+            system.loci.bindPeer(self.remote_locus.?, &self.conn.?);
+        }
         var publication = try fs_runtime.publication.publish(
             self.gpa,
             &system.semantic.targets,
@@ -576,6 +567,8 @@ pub const Collab = struct {
 
     fn detachRemoteFilesystem(self: *Collab) void {
         const system = self.remote_system orelse return;
+        if (self.remote_locus) |l| system.loci.bindPeer(l, null);
+        self.remote_locus = null;
         self.share_ctx.remote_fs_target = null;
         self.share_ctx.closeRemoteChildren(&system.semantic.targets);
         self.share_ctx.remote_fs_owner = null;
@@ -614,26 +607,178 @@ pub const Collab = struct {
             };
             if (taken) |response| {
                 defer self.gpa.free(response);
-                const decoded = core.peer_fs.decodeResponse(response) orelse return error.Io;
-                return switch (decoded.status) {
-                    .ok => try gpa.dupe(u8, decoded.payload),
-                    .denied => error.PermissionDenied,
-                    .not_found => error.NotFound,
-                    .confined => error.Confined,
-                    .stale => error.Stale,
-                    .io, .bad => error.Io,
-                };
+                return decodeRemoteReply(gpa, response);
             }
             std.Thread.yield() catch {};
         }
     }
 };
 
+/// The peer filesystem's transport, as the provider the router serves it by
+/// sees it. On the frame thread — which owns the connection — a round trip
+/// ticks the connection until the reply lands. Anywhere else (a peer file's
+/// save or poll on a pool worker) it is posted to the `RemoteMailbox` and
+/// waited for: the frame's tick sends it and delivers the reply, so nothing
+/// off the frame thread touches the connection, and a slow peer stalls the
+/// worker, never a frame.
 const RemoteExchange = struct {
     collab: *Collab,
 
     pub fn roundTrip(self: *RemoteExchange, gpa: std.mem.Allocator, request: []const u8) fs.contract.Error![]u8 {
+        if (std.Thread.getCurrentId() != self.collab.frame_thread)
+            return self.collab.remote_mailbox.roundTrip(gpa, request);
         return self.collab.roundTripRemoteFilesystem(gpa, request);
+    }
+};
+
+/// Decode a peer filesystem reply envelope into the service bytes, owned by
+/// `gpa`, or the error it carries.
+fn decodeRemoteReply(gpa: std.mem.Allocator, response: []const u8) fs.contract.Error![]u8 {
+    const decoded = core.peer_fs.decodeResponse(response) orelse return error.Io;
+    return switch (decoded.status) {
+        .ok => try gpa.dupe(u8, decoded.payload),
+        .denied => error.PermissionDenied,
+        .not_found => error.NotFound,
+        .confined => error.Confined,
+        .stale => error.Stale,
+        .io, .bad => error.Io,
+    };
+}
+
+/// Peer filesystem requests made off the frame thread, carried by its tick
+/// (`service`, from `tickCollab`): a worker posts a letter and waits on its
+/// gate; the frame sends it over the session, and opens the gate when the
+/// reply — or its failure, or its deadline — settles it. The frame never
+/// waits on a worker, and a worker never touches the connection.
+pub const RemoteMailbox = struct {
+    gpa: std.mem.Allocator,
+    mutex: core.task.Mutex = .{},
+    /// Posted, not yet sent. Under `mutex`.
+    posted: std.ArrayList(*Letter) = .empty,
+    /// Sent, awaiting their replies. The frame thread's alone.
+    inflight: std.ArrayList(*Letter) = .empty,
+    /// Set at teardown: nothing more is taken.
+    closed: bool = false,
+
+    pub const Letter = struct {
+        /// The service request, encoded; the poster's, alive until `gate`.
+        envelope: []const u8,
+        /// Whose allocator the reply is made with.
+        gpa: std.mem.Allocator,
+        id: u64 = 0,
+        result: fs.contract.Error![]u8 = error.Io,
+        gate: core.task.Gate = .{},
+    };
+
+    /// What the frame sends letters over: `request(envelope) !u64` and
+    /// `take(id) !?[]u8`, the session requester's own shape.
+    pub fn roundTrip(self: *RemoteMailbox, gpa: std.mem.Allocator, request: []const u8) fs.contract.Error![]u8 {
+        const envelope = try core.peer_fs.encodeService(gpa, request);
+        defer gpa.free(envelope);
+        var letter: Letter = .{ .envelope = envelope, .gpa = gpa };
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.closed) return error.Io;
+            try self.posted.append(self.gpa, &letter);
+        }
+        letter.gate.wait();
+        return letter.result;
+    }
+
+    fn settle(letter: *Letter, result: fs.contract.Error![]u8) void {
+        letter.result = result;
+        letter.gate.open();
+    }
+
+    /// On the frame thread: send what was posted over `transport` (null when
+    /// there is no connection: everything waiting fails now), and settle
+    /// whatever has an answer. Whether anything settled.
+    pub fn service(self: *RemoteMailbox, transport: anytype) bool {
+        var fresh: std.ArrayList(*Letter) = .empty;
+        defer fresh.deinit(self.gpa);
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            std.mem.swap(std.ArrayList(*Letter), &fresh, &self.posted);
+        }
+        var any = false;
+        const tr = transport orelse {
+            for (fresh.items) |l| settle(l, error.Io);
+            for (self.inflight.items) |l| settle(l, error.Io);
+            any = fresh.items.len + self.inflight.items.len > 0;
+            self.inflight.clearRetainingCapacity();
+            return any;
+        };
+        for (fresh.items) |l| {
+            l.id = tr.request(l.envelope) catch {
+                settle(l, error.Io);
+                any = true;
+                continue;
+            };
+            self.inflight.append(self.gpa, l) catch {
+                settle(l, error.OutOfMemory);
+                any = true;
+            };
+        }
+        var i: usize = 0;
+        while (i < self.inflight.items.len) {
+            const l = self.inflight.items[i];
+            const taken = tr.take(l.id) catch |err| {
+                settle(l, if (err == error.RequestDenied) error.PermissionDenied else error.Io);
+                _ = self.inflight.swapRemove(i);
+                any = true;
+                continue;
+            };
+            const response = taken orelse {
+                i += 1;
+                continue;
+            };
+            defer tr.free(response);
+            settle(l, decodeRemoteReply(l.gpa, response));
+            _ = self.inflight.swapRemove(i);
+            any = true;
+        }
+        return any;
+    }
+
+    /// Teardown: fail everything waiting, and take nothing more.
+    pub fn close(self: *RemoteMailbox) void {
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            self.closed = true;
+        }
+        _ = self.service(@as(?*NoTransport, null));
+        self.posted.deinit(self.gpa);
+        self.inflight.deinit(self.gpa);
+    }
+
+    const NoTransport = struct {
+        fn request(_: *NoTransport, _: []const u8) !u64 {
+            return error.Io;
+        }
+        fn take(_: *NoTransport, _: u64) !?[]u8 {
+            return null;
+        }
+        fn free(_: *NoTransport, _: []u8) void {}
+    };
+};
+
+/// The session requester as a `RemoteMailbox` transport.
+const SessionTransport = struct {
+    remote_fs: *core.session.RemoteFs,
+    session: *core.session.Session,
+    gpa: std.mem.Allocator,
+
+    fn request(self: *const SessionTransport, envelope: []const u8) !u64 {
+        return self.remote_fs.request(self.session, 0, envelope);
+    }
+    fn take(self: *const SessionTransport, id: u64) !?[]u8 {
+        return self.remote_fs.take(id);
+    }
+    fn free(self: *const SessionTransport, bytes: []u8) void {
+        self.gpa.free(bytes);
     }
 };
 
@@ -680,7 +825,7 @@ pub fn startListen(
     token: []const u8,
     access: core.session.Access,
     my_identity: *const core.identity.Identity,
-    echo: *std.ArrayList(u8),
+    echo: *core.Head.Echo,
 ) void {
     sc.primary_doc = if (buffers.active().textEditor()) |ed| &ed.doc else null;
     sc.primary_tag = buffers.active_id;
@@ -720,7 +865,7 @@ pub fn applyIntents(
     connect_task: *?core.task.Handle(anyerror!i32),
     connect_hostport: *?[]u8,
     fd_link: *core.session.FdLink,
-    echo: *std.ArrayList(u8),
+    echo: *core.Head.Echo,
     my_identity: *const core.identity.Identity,
     token: []const u8,
     user: []const u8,
@@ -836,10 +981,15 @@ pub fn tickCollab(
     pool: *core.task.Pool,
     connect: ?[]const u8,
     token: []const u8,
-    echo: *std.ArrayList(u8),
+    echo: *core.Head.Echo,
 ) !bool {
     const gpa = sc.gpa;
     var dirty = false;
+    // No connection: a worker's request to the peer tree fails now rather
+    // than waiting for one (serviced over the session below when there is).
+    if (sc.conn.* == null or sc.session.* == null) if (sc.remote_mailbox) |mb| {
+        if (mb.service(@as(?*const SessionTransport, null))) dirty = true;
+    };
     if (sc.hub.*) |*h| {
         // Adopt new peers (binds the primary + replays shares), then
         // publish the local cursor to every peer and tick.
@@ -940,6 +1090,12 @@ pub fn tickCollab(
             }
             for (done[0..dn]) |id| _ = peer_fs_inflight.remove(id);
         }
+        // The peer tree's requests from pool workers (a peer file's save or
+        // poll): sent and settled here, by the thread that owns the session.
+        if (sc.remote_mailbox) |mb| if (sc.session.*) |sess| {
+            const tr: SessionTransport = .{ .remote_fs = remote_fs, .session = sess, .gpa = gpa };
+            if (mb.service(@as(?*const SessionTransport, &tr))) dirty = true;
+        };
         // Note the host's identity once per handshake: TOFU-record it
         // and echo its fingerprint + SAS + trust so the user can verify
         // the four words out of band before trusting a new host.
@@ -1052,4 +1208,70 @@ test "presence: interactive sharing pre-selects a legible cursor; the mechanism 
     };
     try expect(!sc.publish_presence);
     try std.testing.expectEqualStrings("presence off", presenceNote(sc.publish_presence));
+}
+
+/// A session requester stand-in the test thread answers by hand.
+const FakeTransport = struct {
+    gpa: std.mem.Allocator,
+    sent: std.atomic.Value(bool) = .init(false),
+    answer: ?[]const u8 = null,
+
+    fn request(self: *FakeTransport, _: []const u8) !u64 {
+        self.sent.store(true, .release);
+        return 7;
+    }
+    fn take(self: *FakeTransport, id: u64) !?[]u8 {
+        std.debug.assert(id == 7);
+        const payload = self.answer orelse return null;
+        return try core.peer_fs.reply(self.gpa, .ok, payload);
+    }
+    fn free(self: *FakeTransport, bytes: []u8) void {
+        self.gpa.free(bytes);
+    }
+};
+
+test "remote mailbox: a worker's peer filesystem request is sent and settled by the frame's tick, which never waits for it" {
+    const t = std.testing;
+    var mb: RemoteMailbox = .{ .gpa = t.allocator };
+    var tr: FakeTransport = .{ .gpa = t.allocator };
+    const Worker = struct {
+        fn run(box: *RemoteMailbox, out: *?fs.contract.Error![]u8) void {
+            out.* = box.roundTrip(std.testing.allocator, "list /");
+        }
+    };
+    var result: ?fs.contract.Error![]u8 = null;
+    const worker = try std.Thread.spawn(.{}, Worker.run, .{ &mb, &result });
+
+    // Frames tick while the worker waits: the first to find its letter
+    // sends it; the peer has not answered, so nothing settles.
+    const deadline = core.task.nowNs() + 30 * std.time.ns_per_s;
+    while (!tr.sent.load(.acquire) and core.task.nowNs() < deadline) {
+        try t.expect(!mb.service(@as(?*FakeTransport, &tr)));
+        std.Thread.yield() catch {};
+    }
+    try t.expect(tr.sent.load(.acquire));
+    try t.expect(!mb.service(@as(?*FakeTransport, &tr)));
+    // The answer lands; the next tick hands it over.
+    tr.answer = "entries";
+    try t.expect(mb.service(@as(?*FakeTransport, &tr)));
+    worker.join();
+    const bytes = try result.?;
+    defer t.allocator.free(bytes);
+    try t.expectEqualStrings("entries", bytes);
+
+    // Without a connection, a waiting request fails at the next tick.
+    tr.sent.store(false, .release);
+    const lost = try std.Thread.spawn(.{}, Worker.run, .{ &mb, &result });
+    while (core.task.nowNs() < deadline) {
+        {
+            mb.mutex.lock();
+            defer mb.mutex.unlock();
+            if (mb.posted.items.len > 0) break;
+        }
+        std.Thread.yield() catch {};
+    }
+    try t.expect(mb.service(@as(?*FakeTransport, null)));
+    lost.join();
+    try t.expectError(error.Io, result.?);
+    mb.close();
 }

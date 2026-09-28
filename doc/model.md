@@ -21,7 +21,7 @@ that stops composing:
 
 | Symptom | Where | The missing noun |
 |---|---|---|
-| The sidebar presents `"."` (relative to launch); `files` presents `placeRoot()` (absolute); a peer's tree opens as a located target | `config/sidebar.js`, `plugins/files`, `collab_cmds.zig` peer-files | **designation**: one name for content anywhere |
+| The sidebar presents `"."` (relative to launch); `files` presents `placeRoot()` (absolute); a peer's tree opens as a located target | `config/sidebar.js`, `plugins/files`, `collab_cmds.zig` `collab.peer-files` | **designation**: one name for content anywhere |
 | Scratch, tool, REPL and terminal buffers have no name outside a live slot; viewports and jumplists held raw slot ids (two review bugs) | `Buffers.Ref`, `viewport.zig`, `jumplist.zig` | **designation**, and **entry** as distinct from it |
 | Three "follow the primary context" mechanisms: the Zig-only focus feed, `on_offers_changed`, and a sidebar that follows nothing | `focus_feed.zig`, toolbar, sidebar | **context**: one observable, keyed, open |
 | `Facts` is a closed struct; a plugin can't say "a REPL is connected here" | `facts/root.zig` | **context** with open keys |
@@ -41,9 +41,9 @@ the locus (`here`, a peer fingerprint, `shell:<id>`); a path without one means
 nothing (substrate §7, R1).
 
 The shift: **a designation is the only way to name content across the ABI.**
-`open`, `present`, `reveal`, jumplist entries, embeds, context values and
+`file.open`, `present`, `reveal`, jumplist entries, embeds, context values and
 viewport subjects all take one. A bare absolute path is accepted as sugar for
-`weft://here/file/…`. A relative name a person types (`open foo.txt`, `:e`,
+`weft://here/file/…`. A relative name a person types (`file.open foo.txt`, `:e`,
 the command line, a stored recent that predates designations) is resolved
 once, at the user-facing door, against the place the command runs in
 (`designation.resolveRelative`), so nothing downstream ever holds one. The
@@ -211,10 +211,16 @@ As built (phase 4, `core/selection.zig`):
   node selection stays a text extent — nothing yet needs a node's identity to
   outlive an edit. A scene's selection is `Head.SceneSelection` (what was
   `semantic_focus`): the focus path is its primary extent, grown from
-  `anchor` (`mark-rows`, vim's `V`), and `others` are marked rows
-  (`pointer-add-selection`, C-click). Both kinds cross the same door record
-  (`wl_selections_get/set`: `[primary, kind, anchor, head, …]`; rows by their
-  place in the view's focus order) and the same SDK `Selection`.
+  `anchor` (`selection.start-rows`, vim's `V`), and `others` are marked rows
+  (`pointer.add-selection`, C-click). Both kinds cross the same door record
+  (`wl_selections_get/set`: `[primary, kind, anchor, head, flags, …]`; rows
+  by their place in the view's focus order) and the same SDK `Selection`.
+  A text extent may be **inclusive** (flag bit 0; vim's `v` and `V` start
+  one, `selection.start-inclusive`): its caret sits ON a character and it
+  covers the anchor's character through the caret's. Its ends are still the
+  range it covers, so the highlight, every operator, cut/copy and a seeded
+  search read one range with no rule of their own; only the caret's place
+  differs (`Editor.Ends.caretIn`), and the cursor API translates both ways.
 - **Arity**, declared per command (`Command.arity`; guests through
   `wl_declare_arity`, the SDK's `CommandEntry.arity`, JS's fifth
   `weft.command` argument). The SDK field is required and there is no
@@ -310,30 +316,51 @@ shared tree.
 
 ## 3.5 Open gaps found while building
 
-- **Remote shells can't be followed.** A `shell:` place has no filesystem
-  provider that lists directories; making the coreutils tier (substrate §7) a
-  real filesystem provider closes it.
-- **Locality of peer places reads `local`.** The locus registry isn't wired,
-  so a peer place's locus is `here`. §3's example (Build dropping for a
-  remote file) holds for peer *documents* today by other facts, but locality
-  is wrong until the registry is wired.
-- **Peer files open read-only.** Editing one still means sharing it as a
-  document; a remote-file backing (substrate §2) is the general answer.
-- **Projections can't see documents change.** The outline re-reads on
-  presentation; there is no "document changed" event, so a later parse shows
-  only on the next presentation. This belongs to the context/signal layer.
-- **Scratch documents don't persist across restarts**, and an answer's
-  QUESTION key still holds the local buffer ref and the local log length (a
-  peer-rendered view needs an opaque remote version). What an answer is
+- **Remote places, what is left.** A shell's tree lists and reveals but is
+  not edited through a listing's draft (its provider refuses `apply`; its
+  files open and save through their own backing). Listing a shell's or a
+  peer's directory is still one round trip on the thread that asks, as
+  peer listings always were. A shell listing's revisions are `ls -l` stamps,
+  minute-grained (substrate §2's mtime+size fallback). Only the outbound
+  connection binds a peer locus; hub peers share no tree to be a place.
+- **An answer's QUESTION key** still holds the local buffer ref and a local
+  revision (`Context.revisionOf`: the log length and the tree generation), so
+  a peer-rendered view needs an opaque remote version. What an answer is
   about — the key a pane's lookup names — is the designation.
-- **JS plugins** lack the designation doors and `on_context_changed`.
+- **The problems list** hears its source's signal, not its documents: a
+  diagnostic is an occurrence the source reports, not a function of the
+  text, so it does not watch subjects; `problems.refresh` stays for a source
+  that raises no signal.
+- **A JS plugin** declares no capabilities (no `describe()`), so it claims
+  projection kinds only in its own namespace; it registers its
+  `onContextChanged`/`onSubjectChanged` handlers from JS. The host cannot
+  probe for a JS handler as it probes a wasm export, so
+  `weft.onContextChanged` tells it (`qjs_context_listen`), and the context
+  event goes only to the JS plugins that installed one.
+
+*Landed (2026-09-27): remote places.* `locus.Loci` is wired (on `System`,
+`Context.loci`) and keyed by identity — a peer by its fingerprint, a shell by
+its id — with the transport a rebindable binding (R2); a published
+container's place is on the locus its designation names
+(`designation.placeOf`), so peer and shell entries read `locality = remote`
+by locus, `Buffer.locality()` is the one reading, and ide.js offers
+build/test/debug/run in local source only. The coreutils tier is a
+filesystem provider (`ShellProvider`, mounted under `Router.freshAuthority`):
+`file.open weft://shell:<id>/dir/…` lists, a shell file is in its directory's
+place, the sidebar follows and reveals, and the status line reports a remote
+place's liveness (R5; `ShellFs` no longer blocks its spawn on the far side).
+A peer's file is editable: `Backing.remote` is one `backing.Remote` seam for
+the shell and peer tiers — guarded save (temp, then rename with
+`expected = .entry`, else STALE → merge → retry) and external changes merged
+as the backing peer's ops — and without the peer's write surface the entry is
+read-only with the reason (`Buffer.read_only` holds it).
 
 ## 4. What retires
 
 - `on_offers_changed` and the focus feed's `Companion` → `on_context_changed(keys)`.
 - The toolbar and contextmenu plugins as viewport owners → one `offers` projection provider.
 - Path subjects and `weft.placeRoot()` as a browsing root → designations.
-  Done for names and pickers: a plugin hands a typed name to `open`
+  Done for names and pickers: a plugin hands a typed name to `file.open`
   (`weft.openTyped`; `openUnder`, the guest-side join, is deleted) and
   `openFilePick` names no directory — core lists the dispatch's place and
   resolves the accepted name against the same place.
@@ -358,7 +385,7 @@ kept alive past its phase.
    `DocId`, 32 lowercase hex), `proc`, and any lowercase dotted name as a
    producer's projection; a path kind's ref is absolute by construction (the
    kind's separator is the path's root), so no relative designation can be
-   spelled. `durable.Spec` is the one reading of what `open`/`present` are
+   spelled. `durable.Spec` is the one reading of what `file.open`/`present` are
    handed: a designation, an absolute path as sugar, or a refusal
    (relative, malformed). Every `Document` mints 128 random bits at `init`;
    a bulk load, an edit, a save and a reload keep them, and a joined
@@ -368,7 +395,7 @@ kept alive past its phase.
    the receiver's own replica; the wire version is unchanged, as with every
    additive field before it. `core/designation.zig` answers an entry's
    designation — what was declared for it, else its file, else its
-   document — finds the live entry for one, and routes `open` for the kinds
+   document — finds the live entry for one, and routes `file.open` for the kinds
    core can answer: a live entry, a parked document (closing a scratch
    document with text parks it in `Buffers.parked`, bounded at 16), a
    projection's producer re-run (`Openers`: a producer claims its kind and a
@@ -377,12 +404,12 @@ kept alive past its phase.
    declares as `designation/<kind>`, and a refused claim fails its load; an
    unloaded producer's kind is refused as such), a live process
    reattached by the producer of its namespace (`proc.<ns>`), else a refusal
-   by name. The shell's `open` adds `here` paths, `shell:` files, and peer
+   by name. The shell's `file.open` adds `here` paths, `shell:` files, and peer
    authorities (`collab_cmds.openPeer`: a peer's `dir` walks down the shared
    tree by the provider's own listing and is presented as every directory
    is; a peer's `doc` opens the offer carrying that id, across reconnects;
-   a peer's `file` is refused, see below); `peer-files` is now `open
-   weft://<fingerprint>/dir/`. Doors: `wl_entry_designation`,
+   a peer's `file` is refused, see below); `collab.peer-files` is `file.open`
+   of `weft://<fingerprint>/dir/`. Doors: `wl_entry_designation`,
    `wl_entry_designate` (only on an entry the plugin made — `Buffer.creator`,
    stamped from the guest call it was made in — only `proc` in its own
    namespace or a projection kind it claimed, and never on a file-backed
@@ -469,9 +496,9 @@ kept alive past its phase.
    the previous presentation made is closed through the shell's close once
    nothing shows it — the refusing close, so an entry holding unsaved work
    stays as a tab: a listing says it holds a draft by offering `view.apply`
-   enabled (`Services.holdsDraft`), which `buffer-close` refuses like a dirty
-   file; and a presentation drops the placement an `open` from a
-   tool entry asks for. `as` rides to `open` as the `?as=` view parameter:
+   enabled (`Services.holdsDraft`), which `buffer.close` refuses like a dirty
+   file; and a presentation drops the placement a `file.open` from a
+   tool entry asks for. `as` rides to `file.open` as the `?as=` view parameter:
    `designation.openHeld` routes `?as=<a claimed kind>` to that producer with
    the subject's entry active (the projection OF the subject), otherwise the
    subject's own producer reads it, and a live entry satisfies an open only
@@ -521,7 +548,7 @@ kept alive past its phase.
    (`menuBindingIntent`), a different question from what a context offers;
    the outline reads the tree an entry has when it is presented (no event
    for a document's revision yet, so a parse or an edit landing later shows
-   at the next presentation or `symbols-refresh`) and asks no language
+   at the next presentation) and asks no language
    server; a `shell:` locus lists no directories and a shell file has no
    place of its own, so the sidebar cannot follow a remote shell; a peer's
    file is read-only, and a peer place's locus is `here` (its locality reads
@@ -595,6 +622,30 @@ kept alive past its phase.
    version (its subject is already the designation); the `Hud`'s strings, surfaces and semantic scenes
    are borrowed for the frame (safe: nothing mutates them between capture
    and draw) but a view sent to a peer would need them owned.
+
+*Gaps closed (2026-09-27, branch `arc/model-gaps`).* A projection hears its
+subject change: a producer watches a designation (`wl_subject_watch`, 64 per
+plugin), and at the frame boundary, beside `on_context_changed`, core compares
+each watched subject's revision (`Context.revisionOf`: the opening, the text,
+and the grammar tree via the app's `Context.derived`) and fires
+`on_subject_changed` once per moved subject, bound to the subject's entry. The
+outline watches what it presents (`symbols-refresh` is deleted); the chrome
+answer cache keys on the same revision, so the breadcrumbs are asked again
+when a parse lands (their private cache is deleted). Scratch documents
+outlive the process: past the parked bound, and at shutdown for every open or
+parked scratch with text, a document goes to `Buffers.documents` (`DocStore`:
+32 records, histories up to 1 MiB else the text alone, `documents.kv` beside
+`plugins.kv`), and `file.open weft://here/doc/<id>` or a jump restores it on
+demand — no session restore, since weft has none; a record is forgotten only
+once its entry stands, and a document ever bound to a peer
+(`Document.bound_to_peer`) is never stored. JS plugins reach the tool and
+context groups whole through the same bodies (`qjs_designation`,
+`qjs_designate`, `qjs_designation_opener`, `qjs_tool_backing`,
+`qjs_context_changed`, `qjs_places`, `qjs_subject_watch`;
+`weft.onContextChanged`, `weft.onSubjectChanged`), and a JS call is an acting
+bracket, so the creator rule holds for JS-made entries. vim's visual `y`/`d`/`p`
+over `V`'s rows are one row transfer, as `yy`/`dd`/`p` are, and visual
+linewise holds for every caret.
 
 Phases 1-2 are foundations and touch every plugin lightly. Phase 3 is most of
 the visible payoff. Phase 4 is the largest and riskiest; it is where the

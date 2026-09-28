@@ -1,9 +1,9 @@
 //! Pick — the fuzzy-select primitive. One core mechanism, many uses:
-//! the command palette is `pick-commands` over the registry's names, a
+//! the command palette is `palette.open` over the registry's names, a
 //! config can `weft.pick` its own items with a Fennel callback. State
 //! is plain data the view renders (prompt, query, filtered items,
 //! selection); interaction is ordinary commands bound in the "pick"
-//! keymap mode, which declares `pick-input` as its commit command — the
+//! keymap mode, which declares `pick.input` as its commit command — the
 //! picker adds no new input machinery at all.
 //!
 //! Entries carry an optional docstring the view renders beside the
@@ -13,7 +13,7 @@
 //! substring, prefix), ranked by word-boundary hits, then span tightness,
 //! then earliest match, then FRECENCY — what you accepted recently under
 //! this prompt floats up, so an empty-query palette is your recent list.
-//! A sticky NARROWING filter (`pick-narrow`) pre-restricts the set, the
+//! A sticky NARROWING filter (`pick.narrow`) pre-restricts the set, the
 //! live query ranking within it. Recency is an ordinal use counter, not a
 //! clock. Tab completes the query (common prefix of the matches, else
 //! the selection).

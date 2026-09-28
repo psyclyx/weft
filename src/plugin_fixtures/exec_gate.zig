@@ -7,12 +7,12 @@
 //!   - the EXIT STATUS crosses as a number, not as a sentinel the command
 //!     prints into its own stdout for the plugin to scan back out;
 //!   - stderr arrives SEPARATELY, not folded into stdout with `2>&1`;
-//!   - an argument is one argument. `exec-argv` passes a string full of the
+//!   - an argument is one argument. `exec.argv` passes a string full of the
 //!     characters a shell would act on — spaces, a quote, a `;`, a `$` — and
 //!     the child sees it whole. There is no quoting layer to get wrong because
 //!     there is no shell.
 //!
-//! …and that the spool contract survives the move to argv: `exec-spool` hands
+//! …and that the spool contract survives the move to argv: `exec.spool` hands
 //! the child bytes as a real file through a bare `{}` argument, with no `fs`
 //! permission anywhere in this guest.
 //!
@@ -24,11 +24,11 @@ const std = @import("std");
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "exec-ok", .arity = .one, .call = execOk },
-    .{ .name = "exec-fail", .arity = .one, .call = execFail },
-    .{ .name = "exec-argv", .arity = .one, .call = execArgv },
-    .{ .name = "exec-spool", .arity = .one, .call = execSpool },
-    .{ .name = "exec-ctx", .arity = .one, .call = execCtx },
+    .{ .name = "exec-gate.ok", .arity = .one, .call = execOk, .summary = "Exercise the exec.ok fixture command.", .internal = true },
+    .{ .name = "exec-gate.fail", .arity = .one, .call = execFail, .summary = "Exercise the exec.fail fixture command.", .internal = true },
+    .{ .name = "exec-gate.argv", .arity = .one, .call = execArgv, .summary = "Exercise the exec.argv fixture command.", .internal = true },
+    .{ .name = "exec-gate.spool", .arity = .one, .call = execSpool, .summary = "Exercise the exec.spool fixture command.", .internal = true },
+    .{ .name = "exec-gate.ctx", .arity = .one, .call = execCtx, .summary = "Exercise the exec.ctx fixture command.", .internal = true },
 };
 comptime {
     weft.plugin(&cmds, .{ .perms = &.{ .proc, .timer } }).exportAll();
@@ -38,11 +38,11 @@ var report: [4096]u8 = undefined;
 
 /// Write what the delivery said into a buffer of its own, which is the only
 /// channel a guest has back to the host-side gate. One buffer PER command:
-/// `buffer-create` does not dedupe by name, so a shared report entry would be
+/// `buffer.create` does not dedupe by name, so a shared report entry would be
 /// a fresh empty buffer each time and the gate would read the first one.
 fn note(name: []const u8, comptime fmt: []const u8, args: anytype) void {
     const line = std.fmt.bufPrint(&report, fmt, args) catch return;
-    weft.runStr("buffer-create", name);
+    weft.runStr("buffer.create", name);
     weft.edit(.{ .start = 0, .end = weft.byteLen() }, line);
 }
 

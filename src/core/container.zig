@@ -44,7 +44,7 @@
 //! Allocation discipline: `resolveOne` — the hot-path entry (action dispatch
 //! rides it every keystroke, see action.zig) — never allocates. `eligible`/
 //! `explain` allocate through a caller-supplied `Allocator` (off the hot
-//! path: load-time binding, or an explicit `explain-binding` command).
+//! path: load-time binding, or an explicit `action.explain` command).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -299,6 +299,22 @@ pub const Container = struct {
     /// slots skip this check entirely: ties there are the composition
     /// working as designed.
     pub fn bind(self: *Container, binding: Binding) BindError!void {
+        return self.bindReplacing(binding, false);
+    }
+
+    /// Bind `binding` IN PLACE of every binding the same owner holds on the
+    /// same slot, domain and tier — the one-setting-per-owner rule a runtime
+    /// setter wants (`theme.set-color`, `theme.set-chrome`: setting a thing
+    /// twice must not tie with, and lose to, the first setting, since
+    /// `betterThan` keeps the earlier `decl_index` and a runtime binder has no
+    /// list to take one from). Only by asking: `bind` accumulates at every
+    /// tier, because an owner's several bindings on one slot are how an
+    /// authored list — or a plugin with two providers — says what it means.
+    pub fn rebind(self: *Container, binding: Binding) BindError!void {
+        return self.bindReplacing(binding, true);
+    }
+
+    fn bindReplacing(self: *Container, binding: Binding, replace: bool) BindError!void {
         const decl = self.slots.get(binding.slot) orelse return error.UnknownSlot;
         if (decl.composition == .first_wins) {
             for (self.bindings.items) |existing| {
@@ -321,8 +337,28 @@ pub const Container = struct {
         owned.slot = decl.name;
         owned.provider = try dupePayload(self.gpa, binding.provider);
         errdefer freePayload(self.gpa, owned.provider);
-        try self.bindings.append(self.gpa, owned);
+        try self.bindings.ensureUnusedCapacity(self.gpa, 1);
+        // A `rebind` drops what it replaces only now: the payload is copied
+        // (it may borrow the binding it replaces) and the append can no
+        // longer fail.
+        if (replace) self.dropReplaced(binding);
+        self.bindings.appendAssumeCapacity(owned);
         self.epoch +%= 1;
+    }
+
+    /// The bindings a `rebind` of `binding` replaces: same slot, domain,
+    /// tier and owner.
+    fn dropReplaced(self: *Container, binding: Binding) void {
+        var i: usize = 0;
+        while (i < self.bindings.items.len) {
+            const e = self.bindings.items[i];
+            if (e.tier == binding.tier and e.domain == binding.domain and
+                std.mem.eql(u8, e.slot, binding.slot) and std.mem.eql(u8, e.owner, binding.owner))
+            {
+                freePayload(self.gpa, e.provider);
+                _ = self.bindings.swapRemove(i);
+            } else i += 1;
+        }
     }
 
     /// Remove every binding in `domain` whose owner starts with `prefix`
@@ -585,6 +621,33 @@ test "container: within-owner decl_index — earlier index wins by convention" {
     try c.bind(.{ .slot = "s", .provider = .{ .value = "first" }, .predicate = .{ .all = &.{} }, .owner = "a", .decl_index = 0 });
     try c.bind(.{ .slot = "s", .provider = .{ .value = "second" }, .predicate = .{ .all = &.{} }, .owner = "a", .decl_index = 1 });
     try t.expectEqualStrings("first", c.resolveOne("s", .{}).?.provider.value);
+}
+
+test "container: a rebind from the same owner replaces its previous binding on that slot" {
+    const gpa = t.allocator;
+    var c = Container.init(gpa);
+    defer c.deinit();
+    try declared(&c, "theme/fg", .first_wins);
+    try declared(&c, "theme/bg", .first_wins);
+    try c.bind(.{ .slot = "theme/fg", .provider = .{ .value = "#111111" }, .predicate = .{ .all = &.{} }, .tier = .config, .owner = "config" });
+    try c.rebind(.{ .slot = "theme/fg", .provider = .{ .value = "#222222" }, .predicate = .{ .all = &.{} }, .tier = .transient, .owner = "theme.set-color" });
+    try c.rebind(.{ .slot = "theme/bg", .provider = .{ .value = "#000000" }, .predicate = .{ .all = &.{} }, .tier = .transient, .owner = "theme.set-color" });
+    try c.rebind(.{ .slot = "theme/fg", .provider = .{ .value = "#333333" }, .predicate = .{ .all = &.{} }, .tier = .transient, .owner = "theme.set-color" });
+    try t.expectEqualStrings("#333333", c.resolveOne("theme/fg", .{}).?.provider.value);
+    // Only that slot's binding went: the owner's other slot, and the config
+    // tier under it, stay.
+    try t.expectEqualStrings("#000000", c.resolveOne("theme/bg", .{}).?.provider.value);
+    try t.expectEqual(@as(usize, 3), c.bindings.items.len);
+}
+
+test "container: bind accumulates at every tier — two transient slot providers from one owner both stand" {
+    const gpa = t.allocator;
+    var c = Container.init(gpa);
+    defer c.deinit();
+    try declared(&c, "panel", .ordered_union);
+    try c.bind(.{ .slot = "panel", .provider = .{ .schema_provider = .{ .owner = "p", .seq = 0 } }, .predicate = .{ .ext = ".zig" }, .tier = .transient, .owner = "p", .domain = .slot });
+    try c.bind(.{ .slot = "panel", .provider = .{ .schema_provider = .{ .owner = "p", .seq = 1 } }, .predicate = .{ .ext = ".py" }, .tier = .transient, .owner = "p", .domain = .slot });
+    try t.expectEqual(@as(usize, 2), c.bindings.items.len);
 }
 
 test "container: same-owner rebind never collides; cross-owner tie collides unless disjoint" {

@@ -21,8 +21,9 @@
 //!
 //! That host is `kv_file.zig`, and it is what makes "outlives a run"
 //! above a fact rather than an aspiration: it owns where the blob lives
-//! (XDG), when it is written (`main.zig` arms one `kv_file.Binding` over
-//! the plugin store: load at startup, save on clean shutdown), and how
+//! (XDG), when it is written (`main.zig` arms a `kv_file.Binding` per
+//! persisted store — the plugin one, and the document store `Buffers` keeps
+//! scratch documents in: load at startup, save on clean shutdown), and how
 //! every failure degrades. Which store gets persisted — the plugin one,
 //! not `System.config_kv` — is decided there too, with the reason.
 //!

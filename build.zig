@@ -51,7 +51,7 @@ const Guest = struct {
 /// (doc/configs.md §0.2), with the one word-character rule `\b`, the word
 /// motions, text objects and C-d all ask, and `search` the query → matches
 /// planning over it that helix's `s S K A-K / ? n N *` and the find bar share
-/// — core never parses a pattern — and `labels` the jump labels snipe and helix's `gw`
+/// — core never parses a pattern — and `labels` the jump labels helix's `gw`
 /// draw over the visible text.
 const Library = enum {
     prompt,
@@ -70,6 +70,7 @@ const Library = enum {
     affordances,
     offers,
     statusline,
+    menu,
 
     /// The import name a guest spells. One place, so a library cannot be
     /// reached under two names.
@@ -91,6 +92,7 @@ const Library = enum {
             .affordances => "weft_affordances",
             .offers => "weft_offers",
             .statusline => "weft_statusline",
+            .menu => "weft_menu",
         };
     }
 
@@ -109,7 +111,9 @@ const Library = enum {
             // first, then arranged by `affordances`) that the offers
             // projection and the palette share.
             .annotate, .gutter, .statusline, .output, .files, .prompt, .search, .labels, .offers => .service_presentation,
-            .invoke => .interaction_orchestration,
+            // `menu` is a menu's behaviour, scene and interaction — what the
+            // context menu and the menubar share (doc/chrome.md §2).
+            .invoke, .menu => .interaction_orchestration,
             .ex => .editor_composition,
         };
     }
@@ -456,20 +460,19 @@ const guests = [_]Guest{
     .{ .name = "vim", .import = "guest_vim_wasm", .install = true, .libraries = &.{ .ex, .regex } },
     .{ .name = "comment", .import = "guest_comment_wasm", .install = true },
     .{ .name = "lsp", .import = "guest_lsp_wasm", .install = true, .libraries = &.{ .jsonrpc, .prompt, .annotate } },
-    .{ .name = "indent", .import = "guest_indent_wasm", .install = true },
+    .{ .name = "indent", .import = "guest_indent_wasm", .install = true, .libraries = &.{.statusline} },
     .{ .name = "whitespace", .import = "guest_whitespace_wasm", .install = true },
     .{ .name = "numbers", .import = "guest_numbers_wasm", .install = true },
     .{ .name = "autopair", .import = "guest_autopair_wasm", .install = true },
     .{ .name = "consult", .import = "guest_consult_wasm", .install = true },
-    .{ .name = "git", .import = "guest_git_wasm", .install = true, .libraries = &.{ .prompt, .sessions, .rowkey } },
+    .{ .name = "git", .import = "guest_git_wasm", .install = true, .libraries = &.{ .prompt, .sessions, .rowkey, .statusline } },
     .{ .name = "grep", .import = "guest_grep_wasm", .install = true, .libraries = &.{.output} },
-    .{ .name = "run", .import = "guest_run_wasm", .install = true, .libraries = &.{.output} },
-    .{ .name = "make", .import = "guest_make_wasm", .install = true, .libraries = &.{.output} },
+    .{ .name = "run", .import = "guest_run_wasm", .install = true, .libraries = &.{ .output, .statusline } },
+    .{ .name = "make", .import = "guest_make_wasm", .install = true, .libraries = &.{ .output, .statusline } },
     .{ .name = "notes", .import = "guest_notes_wasm", .install = true },
     .{ .name = "fmt", .import = "guest_fmt_wasm", .install = true },
     .{ .name = "buffers", .import = "guest_buffers_wasm", .install = true },
     .{ .name = "dashboard", .import = "guest_dashboard_wasm", .install = true },
-    .{ .name = "windows", .import = "guest_windows_wasm", .install = true },
     .{ .name = "modes", .import = "guest_modes_wasm", .install = true },
     .{ .name = "snippets", .import = "guest_snippets_wasm", .install = true },
     .{ .name = "direnv", .import = "guest_direnv_wasm", .install = true },
@@ -492,19 +495,23 @@ const guests = [_]Guest{
     // window of cells per round (absolute or caret-relative). No commands.
     .{ .name = "linenumbers", .import = "guest_linenumbers_wasm", .install = true, .libraries = &.{.gutter} },
     // Jump labels on f/F/t/T over the visible range; composes with operators.
-    .{ .name = "snipe", .import = "guest_snipe_wasm", .install = true, .libraries = &.{.labels} },
+    .{ .name = "snipe", .import = "guest_snipe_wasm", .install = true },
     // The incremental find/replace bar (doc/configs.md §3.4) on the regex library.
     .{ .name = "find", .import = "guest_find_wasm", .install = true, .libraries = &.{.search} },
     // The offers projection (doc/model.md §2.4): what a context offers, as a
     // strip a toolbar viewport presents, a list, or a menu at the pointer.
-    .{ .name = "offers", .import = "guest_offers_wasm", .install = true, .libraries = &.{.offers} },
+    .{ .name = "offers", .import = "guest_offers_wasm", .install = true, .libraries = &.{ .offers, .menu } },
+    // The main menu (doc/chrome.md §2): every command that says where it
+    // lives, as a menubar a viewport presents (config/menubar.js) or a menu
+    // at the caret.
+    .{ .name = "menu", .import = "guest_menu_wasm", .install = true, .libraries = &.{ .menu, .invoke } },
     // The symbols projection: an entry's outline as a tree of rows — what an
     // outline viewport presents `as: "symbols"` (config/outline.js).
     .{ .name = "symbols", .import = "guest_symbols_wasm", .install = true },
     // The panels (doc/configs.md §3.6.4): the diagnostics list, the line-mode
     // shell, and the caret's symbol trail on the status line.
     .{ .name = "panel", .import = "guest_panel_wasm", .install = true },
-    .{ .name = "problems", .import = "guest_problems_wasm", .install = true },
+    .{ .name = "problems", .import = "guest_problems_wasm", .install = true, .libraries = &.{.statusline} },
     .{ .name = "terminal", .import = "guest_terminal_wasm", .install = true },
     .{ .name = "breadcrumbs", .import = "guest_breadcrumbs_wasm", .install = true, .libraries = &.{.statusline} },
 };
@@ -893,6 +900,14 @@ pub fn build(b: *std.Build) void {
     // here instead, at the one place a reader hits it.
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
+    // `zig build test-only -Dtest-filter=<substring>`: the e2e/app binary
+    // alone, filtered — the iteration loop for one test, not a gate. (The
+    // core suite's twin, `test-core-only`, is declared beside it below.)
+    const test_filter = b.option([]const u8, "test-filter", "With `test-only`/`test-core-only`: run only tests whose name contains this");
+    if (test_filter) |filter| {
+        const filtered = b.addTest(.{ .root_module = test_mod, .filters = b.dupeStrings(&.{filter}) });
+        b.step("test-only", "Run the e2e/app tests matching -Dtest-filter").dependOn(&b.addRunArtifact(filtered).step);
+    }
     const explorer_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{ "files:", "authoring/files:", "e2e/files:", "e2e/sidebar:", "e2e/grammar:", "e2e/dashboard:", "semantic view edits", "sidebar fragment", "e2e/spine:" } });
     b.step("test-explorer", "Run explorer object, navigation, grammar, and pane integration tests").dependOn(&b.addRunArtifact(explorer_tests).step);
 
@@ -927,8 +942,16 @@ pub fn build(b: *std.Build) void {
     addQuickjs(b, core_tests_mod);
     embedGuests(b, core_tests_mod);
     const core_tests = b.addTest(.{ .root_module = core_tests_mod });
+    if (test_filter) |filter| {
+        const filtered = b.addTest(.{ .root_module = core_tests_mod, .filters = b.dupeStrings(&.{filter}) });
+        b.step("test-core-only", "Run the core tests matching -Dtest-filter").dependOn(&b.addRunArtifact(filtered).step);
+    }
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
     const gfx_tests = b.addTest(.{ .root_module = gfx_mod });
+    if (test_filter) |filter| {
+        const filtered = b.addTest(.{ .root_module = gfx_mod, .filters = b.dupeStrings(&.{filter}) });
+        b.step("test-gfx-only", "Run the gfx tests matching -Dtest-filter").dependOn(&b.addRunArtifact(filtered).step);
+    }
     test_step.dependOn(&b.addRunArtifact(gfx_tests).step);
 
     // The raster timing instrument. `latency_test.zig` measures dispatch and
@@ -965,6 +988,10 @@ pub fn build(b: *std.Build) void {
     embedGuests(b, app_mod);
     const app_tests = b.addTest(.{ .root_module = app_mod });
     test_step.dependOn(&b.addRunArtifact(app_tests).step);
+    if (test_filter) |filter| {
+        const filtered = b.addTest(.{ .root_module = app_mod, .filters = b.dupeStrings(&.{filter}) });
+        b.step("test-app-only", "Run the app module's tests matching -Dtest-filter").dependOn(&b.addRunArtifact(filtered).step);
+    }
     // `weft_scene` (6 tests) and `weft_text` (4) have been named modules since
     // before this refactor and never had a test binary — src/weft.zig's
     // `_ = scene; _ = text_engine;` looked like coverage but a module's tests
@@ -1163,6 +1190,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = affordances_lib })).step);
+
+    // A menu's behaviour — the cascade, its keys, its mnemonics — is plain
+    // data under the `menu` library's scene and interaction.
+    const menu_cascade = b.createModule(.{
+        .root_source_file = b.path("src/plugin_lib/menu/cascade.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = menu_cascade })).step);
 
     // The `search` library (query → regex, the prefilter, the match
     // planning — the find bar and helix both link it) imports nothing but

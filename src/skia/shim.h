@@ -61,7 +61,7 @@ void weft_skia_draw_glyph(WeftSkia*, uint32_t font_id, uint32_t glyph_id,
                           float x, float y, float size,
                           float r, float g, float b, float a);
 typedef struct {
-    uint32_t verb;  // 0 move, 1 line, 2 cubic
+    uint32_t verb;  // 0 move, 1 line, 2 cubic, 3 close
     float points[6];
 } WeftSkiaPathCommand;
 typedef struct {
@@ -72,6 +72,18 @@ typedef struct {
 } WeftSkiaPathStyle;
 void weft_skia_draw_path(WeftSkia*, const WeftSkiaPathCommand*, size_t command_count,
                          const WeftSkiaPathStyle*);
+// A rounded rect (core chrome only): uniform corner radius, filled when
+// stroke_width is 0 and outlined otherwise; blur > 0 softens the edge by a
+// Gaussian of that sigma (a drop shadow).
+typedef struct {
+    float x, y, w, h, radius;
+    float r, g, b, a;
+    float stroke_width, blur;
+} WeftSkiaRRect;
+void weft_skia_draw_rrect(WeftSkia*, const WeftSkiaRRect*);
+// Replace the clip for what follows: on=1 clips to the rect, on=0 lifts it.
+// Clips do not nest; end() lifts one left in place.
+void weft_skia_clip(WeftSkia*, int on, float x, float y, float w, float h);
 
 // Flush + read back the frame. Returns a pointer to `height`*`*row_bytes` bytes
 // (the pixel format chosen at create), valid until the next begin/destroy, or

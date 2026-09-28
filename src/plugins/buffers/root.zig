@@ -1,8 +1,8 @@
 //! buffers — buffer management (design §6.1), a `.wasm` plugin (perms `{}`). It
 //! composes the buffer-introspection reads + the core buffer commands + the
-//! pick candidate-key seam: `buf-pick` fuzzy-switches to a buffer (resolved
+//! pick candidate-key seam: `buffer.pick` fuzzy-switches to a buffer (resolved
 //! by the IDENTITY the accepted candidate carries, robust under duplicate
-//! names and under a buffer closing mid-pick), `buf-scratch` opens a fresh
+//! names and under a buffer closing mid-pick), `buffer.scratch` opens a fresh
 //! scratch. The plain next/close/save verbs stay the core primitives a config
 //! binds directly.
 
@@ -16,8 +16,8 @@ var candidates: [1024]ordering.Candidate = undefined;
 var order: [1024]usize = undefined;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "buf-pick", .arity = .whole, .call = bufPick, .summary = "switch to another open buffer" },
-    .{ .name = "buf-scratch", .arity = .whole, .call = bufScratch, .summary = "open a scratch buffer" },
+    .{ .name = "buffer.pick", .arity = .whole, .call = bufPick, .summary = "Switch to another open buffer.", .label = "Switch Editor", .menu = "Go", .group = "buffers", .order = 1, .prompts = true },
+    .{ .name = "buffer.scratch", .arity = .whole, .call = bufScratch, .summary = "Open a new, untitled scratch buffer.", .label = "New File", .menu = "File", .group = "new", .order = 1, .icon = "file-plus" },
 };
 
 fn onPickAccept(pick_id: u32) void {
@@ -28,7 +28,7 @@ fn onPickAccept(pick_id: u32) void {
         .candidate => |candidate| candidate.buffer orelse return weft.echo("that buffer is closed"),
         .input, .cancelled => return,
     };
-    weft.runInt("buffer-switch", @intCast(id));
+    weft.runInt("buffer.switch", @intCast(id));
 }
 
 /// Fuzzy-pick a live buffer by name and switch to it (by its identity).
@@ -61,7 +61,7 @@ fn bufPick() void {
 
 /// Switch to the scratch buffer — reusing the existing one if present, else
 /// creating it. Tool buffers (files/git) bind `q` here to leave; without the
-/// reuse, `buffer-create` spawns a NEW `*scratch*` every time (duplicate names
+/// reuse, `buffer.create` spawns a NEW `*scratch*` every time (duplicate names
 /// are allowed), so leaving a tool repeatedly piled up scratch buffers.
 fn bufScratch() void {
     const count = weft.bufferCount();
@@ -70,12 +70,12 @@ fn bufScratch() void {
         const name = weft.bufferName(i) orelse continue;
         if (std.mem.eql(u8, name, "*scratch*")) {
             if (weft.bufferId(i)) |id| {
-                weft.runInt("buffer-switch", id);
+                weft.runInt("buffer.switch", id);
                 return;
             }
         }
     }
-    weft.runStr("buffer-create", "*scratch*");
+    weft.runStr("buffer.create", "*scratch*");
 }
 
 comptime {

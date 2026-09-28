@@ -69,15 +69,40 @@ pub const Instance = struct {
         return null;
     }
 
+    /// The action `input` runs: its own binding, else the `*` binding — an
+    /// interaction that captures every other input (a menu: a key it does
+    /// not use must not fall through to the editor beneath it). `hover` is
+    /// never caught by `*`: an interaction hears the pointer's resting place
+    /// only by asking for it by name.
     pub fn actionForInput(self: *const Instance, input: []const u8) ?*const semantic.interaction.Action {
+        const bound = self.bindingFor(input) orelse
+            (if (std.mem.eql(u8, input, hover_input)) null else self.bindingFor(capture_input)) orelse
+            return null;
+        const candidate = self.action(bound.action) orelse return null;
+        return if (candidate.enabled) candidate else null;
+    }
+
+    /// Whether `input` is bound by name (never through `*`).
+    pub fn binds(self: *const Instance, input: []const u8) bool {
+        return self.bindingFor(input) != null;
+    }
+
+    fn bindingFor(self: *const Instance, input: []const u8) ?semantic.interaction.Binding {
         for (self.descriptor.bindings) |binding| {
-            if (!std.mem.eql(u8, binding.input, input)) continue;
-            const candidate = self.action(binding.action) orelse return null;
-            return if (candidate.enabled) candidate else null;
+            if (std.mem.eql(u8, binding.input, input)) return binding;
         }
         return null;
     }
 };
+
+/// The input an interaction binds to capture every input it binds nothing
+/// else to.
+pub const capture_input = "*";
+/// The input delivered to an interaction that binds it when the pointer comes
+/// to rest on a different target — hover as an interaction's input, where the
+/// editor at large treats it as frame input only (a menu's highlight follows
+/// the pointer; a toolbar's does not need to).
+pub const hover_input = "hover";
 
 /// A LIFO interaction scope owned by one head. Closing out of order is an
 /// explicit error, so one plugin cannot accidentally expose a buried dialog.

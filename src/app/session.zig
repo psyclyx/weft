@@ -30,7 +30,7 @@
 //! `deinit` frees in the exact reverse order `main()`'s defers used to run.
 //!
 //! The grammar/LSP registries (`grammars`, `lsp_servers`) that the capability
-//! consumers' `grammar-add`/`lsp-add` bind onto live in `Providers`; `init`
+//! consumers' `syntax.add-grammar`/`lsp-add` bind onto live in `Providers`; `init`
 //! borrows them by pointer to wire those two commands. `which_key_now` (the
 //! F1 flag the dispatch path reads) lives on `menu_overlay` below, not a
 //! separate `main()` local — see `frame.MenuOverlay`'s field doc for why.
@@ -40,8 +40,10 @@ const core = @import("weft_core");
 const cursor_config = @import("cursor_config.zig");
 const providers = @import("providers.zig");
 const setup = @import("setup.zig");
+const theme_cmds = @import("theme_cmds.zig");
 const frame = @import("frame.zig");
 const ui_mesh = @import("weft_gfx").view.ui_mesh;
+const view_mod = @import("weft_gfx").view;
 const fs_platform = @import("weft_fs_platform");
 const fs = @import("weft_fs");
 const fs_runtime = @import("weft_fs_runtime");
@@ -113,7 +115,7 @@ pub const Session = struct {
     /// "editor" `core.System` (buffers/commands/keymap/caps/actions/
     /// container/config_kv + the built-in command/keymap floor — see
     /// `System.create`), then binds the capability consumers (which also
-    /// wire `grammar-add` onto the caller-owned `grammars` registry) and the
+    /// wire `syntax.add-grammar` onto the caller-owned `grammars` registry) and the
     /// caret/which-key commands — in registration order.
     pub fn init(
         self: *Session,
@@ -163,8 +165,16 @@ pub const Session = struct {
         // This session opened the roots, so it is the only party entitled to
         // say what they are called (`doc/place.md` §2.3).
         self.cmd_ctx.realizer = self.realizer();
+        // This session attaches the grammars, so it alone can say when an
+        // entry's tree moved — what a projection of the entry reads besides
+        // its text (`core.context.Derived`).
+        self.system.context.derived = providers.treeRevision;
         try ui_mesh.declareSlots(&self.system.container);
         try ui_mesh.bindDefaultStatusline(&self.system.container);
+        // How chrome looks is a theme value the view reads each frame; the
+        // switch commands bind it live (doc/chrome.md §3.2).
+        try view_mod.View.declareChromeSlots(&self.system.container);
+        try theme_cmds.register(gpa, &self.system.commands);
         // Capability consumers — written against capability names only.
         self.completion_ui = .empty;
         try setup.registerCapabilityConsumers(gpa, &self.system.commands, &self.completion_ui, grammars);
@@ -547,7 +557,7 @@ pub const Session = struct {
             try opener.open(ctx, (semantic.durable.parse(owned) orelse return false).ref, bytes);
             return true;
         }
-        _ = try core.command.run(ctx.commands, ctx, "open", &.{.{ .string = owned }});
+        _ = try core.command.run(ctx.commands, ctx, "file.open", &.{.{ .string = owned }});
         return true;
     }
 
@@ -611,7 +621,7 @@ pub const Session = struct {
     /// section 6 W2a-1 moved it out of `Session`'s own storage) — this is
     /// the one spot app-side code says `session.echo()` instead of reaching
     /// into `session.head.echo` directly.
-    pub fn echo(self: *Session) *std.ArrayList(u8) {
+    pub fn echo(self: *Session) *core.Head.Echo {
         return &self.head.echo;
     }
 
@@ -624,7 +634,7 @@ pub const Session = struct {
     /// unchanged; app-side callers that need to refuse on OTHER grounds
     /// (task #19 item 2's live-collab case) check BEFORE calling this — see
     /// `SwapCmdData`/`systemSwapHandler` below, which is how `main.zig`
-    /// wires the actual `system-swap` command so the collab check runs at
+    /// wires the actual `app.swap-system` command so the collab check runs at
     /// COMMAND time, not bind time.
     pub fn rebindSystem(self: *Session, target: []const u8) core.System.Host.SwapError!void {
         try self.host.swap(self.gpa, &self.cmd_ctx, &self.head, target);
@@ -635,10 +645,10 @@ pub const Session = struct {
         // providers borrows are baked once at boot, W0b) — named loudly
         // here so a live user isn't silently confused by typing into a
         // buffer the screen isn't showing.
-        std.log.info("system-swap: dispatch now targets '{s}' (render surface unchanged until the render membrane repoints it — W0b)", .{target});
+        std.log.info("app.swap-system: dispatch now targets '{s}' (render surface unchanged until the render membrane repoints it — W0b)", .{target});
     }
 
-    /// `main.zig`'s `system-swap` command data: bundles `*Session` with an
+    /// `main.zig`'s `app.swap-system` command data: bundles `*Session` with an
     /// OPTIONAL app-level refusal predicate, checked at COMMAND time (not
     /// bind time) before `rebindSystem` runs. Generic (a function pointer +
     /// opaque ctx) rather than importing `app/collab.zig` directly, so
@@ -656,11 +666,11 @@ pub const Session = struct {
 
     pub const SwapCmdError = core.System.Host.SwapError || error{SwapBlocked};
 
-    /// The app-level `system-swap` command handler — the ONLY registered
+    /// The app-level `app.swap-system` command handler — the ONLY registered
     /// handler in the real editor (`main.zig` binds this directly onto every
     /// hosted system; `core.System.registerSwapCommand` exists for the
     /// synthetic gate fixtures and is not registered here, so there is
-    /// nothing to shadow): identical `system-swap <name>` surface, but
+    /// nothing to shadow): identical `app.swap-system <name>` surface, but
     /// refuses loudly (logged, like `Host.swap`'s own transient refusal)
     /// when `data.isBlocked` says so, BEFORE touching the Host at all.
     pub fn systemSwapHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
@@ -669,7 +679,7 @@ pub const Session = struct {
         if (args.len == 0 or args[0] != .string) return .nil;
         if (d.isBlocked) |blocked| {
             if (blocked(d.blocked_ctx)) {
-                std.log.warn("system-swap: refused — a live collab connection is bound to this system's document; disconnect before swapping systems", .{});
+                std.log.warn("app.swap-system: refused — a live collab connection is bound to this system's document; disconnect before swapping systems", .{});
                 return error.SwapBlocked;
             }
         }
@@ -832,7 +842,7 @@ fn focusDirectoryTarget(ctx: *core.command.Context, target: semantic.target.Ref)
 /// path for every directory, wherever it is: a local one this session opened
 /// and a peer's shared tree (`collab_cmds`) are presented, named and titled
 /// alike (`designation.presentTarget`), so `open weft://<peer>/dir/…` and
-/// `peer-files` are the same operation as `open /some/dir`.
+/// `collab.peer-files` are the same operation as `open /some/dir`.
 pub fn presentDirectory(ctx: *core.command.Context, located: semantic.target.Located) anyerror!void {
     const services = ctx.semantic orelse return error.SemanticUnavailable;
     switch (try core.target_open.openLocated(services, ctx.head, ctx.gpa, located, null)) {
@@ -882,7 +892,7 @@ test "session: RUNS ON a System — init hosts \"editor\", cmd_ctx is wired to i
 
     // A real command through the real Session's cmd_ctx.
     try t.expect(!sess.system.quit);
-    _ = try core.command.run(&sess.system.commands, &sess.cmd_ctx, "insert-text", &.{.{ .string = "hi" }});
+    _ = try core.command.run(&sess.system.commands, &sess.cmd_ctx, "edit.insert-text", &.{.{ .string = "hi" }});
     const got = try (try sess.cmd_ctx.textEditor()).text().toOwnedSlice(gpa);
     defer gpa.free(got);
     try t.expectEqualStrings("hi", got);
@@ -922,7 +932,7 @@ test "session: config manifest invokes the production grammar-add command with a
     const here = core.file.processDirectory(&cwd_buf) orelse return error.NoProcessDirectory;
     const tmp_path = try std.fs.path.resolve(gpa, &.{ here, tmp_rel });
     defer gpa.free(tmp_path);
-    const source = try std.fmt.allocPrint(gpa, "weft.run('grammar-add', '.fixture', '{s}', 'tree_sitter_fixture');", .{tmp_path});
+    const source = try std.fmt.allocPrint(gpa, "weft.run('syntax.add-grammar', '.fixture', '{s}', 'tree_sitter_fixture');", .{tmp_path});
     defer gpa.free(source);
 
     var engine = try core.wasm.Engine.init(gpa);
@@ -943,10 +953,10 @@ test "session: config manifest invokes the production grammar-add command with a
 
     // The PRODUCTION command, which is this test's whole subject — bound the
     // way setup.zig binds it for the real app. `Session.init` does not bind it
-    // (grammar-add hangs off the caller-owned registry, by design), so without
+    // (syntax.add-grammar hangs off the caller-owned registry, by design), so without
     // this the apply below resolves nothing, logs a warning, and the final
     // assertion can never hold. That is what it did while nothing compiled it.
-    _ = try sess.system.commands.bind(gpa, "grammar-add", providers.grammarAddCommand(&grammars));
+    _ = try sess.system.commands.bind(gpa, "syntax.add-grammar", providers.grammarAddCommand(&grammars));
 
     var actx: core.manifest.Manifest.ApplyCtx = .{ .ctx = &sess.cmd_ctx, .loader = null, .config = &sess.system.config_kv };
     try manifest.apply(gpa, &actx);
@@ -1052,7 +1062,7 @@ test "session: local directories become deduplicated semantic targets while file
         .target = first_target,
         .revision = sess.directory_targets.items[0].publication.revision,
     };
-    _ = try core.command.run(&sess.system.commands, &sess.cmd_ctx, "open-relative", &.{.{ .string = "child\n\xfe" }});
+    _ = try core.command.run(&sess.system.commands, &sess.cmd_ctx, "target.open-relative", &.{.{ .string = "child\n\xfe" }});
     try t.expectEqual(@as(usize, 3), sess.directory_targets.items.len);
     const child_target = sess.directory_targets.items[2].publication.ref;
     const child_view = sess.head.scene_selection.path().?.view;
@@ -1168,7 +1178,7 @@ test "session: GATE — system-swap live-rebinds the REAL Session's head; buffer
     try sess.host.hostSystem(agent_sys);
 
     // Type into the editor system first — lands on ITS buffer.
-    _ = try core.command.run(&editor_sys.commands, &sess.cmd_ctx, "insert-text", &.{.{ .string = "editor text" }});
+    _ = try core.command.run(&editor_sys.commands, &sess.cmd_ctx, "edit.insert-text", &.{.{ .string = "editor text" }});
 
     // Bound into BOTH systems, because a command table is per-system — which
     // is the very thing this test asserts a few lines below
@@ -1178,19 +1188,20 @@ test "session: GATE — system-swap live-rebinds the REAL Session's head; buffer
     // it.
     var swap_data: Session.SwapCmdData = .{ .session = &sess };
     const swap_spec: core.command.Command = .{
-        .name = "system-swap",
-        .summary = "test",
+        .name = "app.swap-system",
+        .summary = "Switch this window over to another hosted system.",
         .args = &.{.{ .name = "name", .type = .string }},
         .handler = Session.systemSwapHandler,
         .data = &swap_data,
+        .meta = .{ .internal = true },
     };
-    _ = try editor_sys.commands.bind(gpa, "system-swap", swap_spec);
-    _ = try agent_sys.commands.bind(gpa, "system-swap", swap_spec);
+    _ = try editor_sys.commands.bind(gpa, "app.swap-system", swap_spec);
+    _ = try agent_sys.commands.bind(gpa, "app.swap-system", swap_spec);
 
     // The swap runs through the ORDINARY command surface — proving this
     // isn't a special path, exactly like `core/System.zig`'s own "via the
-    // system-swap COMMAND" gate test, but against `app.Session` this time.
-    _ = try core.command.run(&editor_sys.commands, &sess.cmd_ctx, "system-swap", &.{.{ .string = "agent-ux" }});
+    // app.swap-system COMMAND" gate test, but against `app.Session` this time.
+    _ = try core.command.run(&editor_sys.commands, &sess.cmd_ctx, "app.swap-system", &.{.{ .string = "agent-ux" }});
 
     // Every table pointer repointed; `sess.system` (the convenience alias)
     // kept in sync.
@@ -1201,7 +1212,7 @@ test "session: GATE — system-swap live-rebinds the REAL Session's head; buffer
 
     // Editing now lands on the NEW system's buffer — the editor's own text
     // from before the swap is untouched.
-    _ = try core.command.run(&agent_sys.commands, &sess.cmd_ctx, "insert-text", &.{.{ .string = "agent text" }});
+    _ = try core.command.run(&agent_sys.commands, &sess.cmd_ctx, "edit.insert-text", &.{.{ .string = "agent text" }});
     const agent_got = try agent_sys.buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(agent_got);
     try t.expectEqualStrings("agent text", agent_got);
@@ -1210,7 +1221,7 @@ test "session: GATE — system-swap live-rebinds the REAL Session's head; buffer
     try t.expectEqualStrings("editor text", editor_got);
 
     // Swap back.
-    _ = try core.command.run(&agent_sys.commands, &sess.cmd_ctx, "system-swap", &.{.{ .string = "editor" }});
+    _ = try core.command.run(&agent_sys.commands, &sess.cmd_ctx, "app.swap-system", &.{.{ .string = "editor" }});
     try t.expect(sess.cmd_ctx.buffers == &editor_sys.buffers);
     try t.expect(sess.system == editor_sys);
 
@@ -1244,15 +1255,16 @@ test "session: SwapCmdData.isBlocked refuses loudly BEFORE touching the Host —
         }
     };
     var swap_data: Session.SwapCmdData = .{ .session = &sess, .isBlocked = AlwaysBlocked.blocked };
-    _ = try sess.system.commands.bind(gpa, "system-swap", .{
-        .name = "system-swap",
-        .summary = "test",
+    _ = try sess.system.commands.bind(gpa, "app.swap-system", .{
+        .name = "app.swap-system",
+        .summary = "Switch this window over to another hosted system.",
         .args = &.{.{ .name = "name", .type = .string }},
         .handler = Session.systemSwapHandler,
         .data = &swap_data,
+        .meta = .{ .internal = true },
     });
 
-    try t.expectError(error.SwapBlocked, core.command.run(&editor_sys.commands, &sess.cmd_ctx, "system-swap", &.{.{ .string = "agent-ux" }}));
+    try t.expectError(error.SwapBlocked, core.command.run(&editor_sys.commands, &sess.cmd_ctx, "app.swap-system", &.{.{ .string = "agent-ux" }}));
     // Refused BEFORE the Host was touched: still targeting the editor.
     try t.expect(sess.cmd_ctx.buffers == &editor_sys.buffers);
     try t.expect(sess.system == editor_sys);

@@ -29,11 +29,15 @@ const std = @import("std");
 const weft = @import("weft");
 
 pub const Config = struct {
-    /// The keymap mode this prompt runs in, and the prefix of the five
-    /// command names it registers (`<name>-type`, `-backspace`, `-clear`,
-    /// `-accept`, `-cancel`). One string, so a mode and its commands cannot
-    /// drift apart.
+    /// The prefix of the five command names it registers, in the command id
+    /// grammar (`<namespace>.<prompt>`: `lsp.rename` registers
+    /// `lsp.rename-type`, `-backspace`, `-clear`, `-accept`, `-cancel`),
+    /// and — its dots turned to dashes (`lsp-rename`) — the keymap mode it
+    /// runs in. One string, so a mode and its commands cannot drift apart.
     name: []const u8,
+    /// The keymap mode, when it is not the one `name` spells: vim's `:` line
+    /// runs in `ex`, a mode older than the command grammar.
+    mode: ?[]const u8 = null,
     /// Where Enter and Escape land.
     ///
     /// Null — the right answer for a SERVICE plugin — means "the entry's own
@@ -75,6 +79,11 @@ pub const Config = struct {
     /// asks its owner what to trail the line with, and its owner — which does
     /// know — answers. Return "" for nothing to say.
     hint: ?*const fn (line: []const u8) []const u8 = null,
+    /// Tab: what the line completes to, or null to leave it (the owner may
+    /// say why through `hint`, which is asked again right after). A hook for
+    /// the same reason `hint` is one: the prompt knows nothing about what is
+    /// being typed. With it, the prompt answers a sixth command, `-complete`.
+    complete: ?*const fn (line: []const u8) ?[]const u8 = null,
     /// Called after every change to the line (a keystroke, a backspace, a
     /// clear) with the line as it now stands, before the redraw — for a
     /// LIVE preview: helix's `s` and `/` select their matches as you type,
@@ -85,16 +94,37 @@ pub const Config = struct {
     trim: bool = true,
 };
 
+/// The keymap mode a prompt named `name` runs in: its dots as dashes.
+pub fn modeOf(comptime name: []const u8) []const u8 {
+    comptime {
+        var out: [name.len]u8 = name[0..name.len].*;
+        for (&out) |*c| if (c.* == '.') {
+            c.* = '-';
+        };
+        const frozen = out;
+        return &frozen;
+    }
+}
+
 /// One of the five commands a prompt answers to. Named at MODULE scope, not
 /// inside `Prompt`, so two instantiations' tables share a type and a plugin
 /// holding several prompts can concatenate them into one flat command table.
-pub const Command = struct { name: []const u8, handler: *const fn () void };
+pub const Command = struct {
+    name: []const u8,
+    handler: *const fn () void,
+    /// One sentence for the command's summary. The five are a prompt's own
+    /// machinery, bound in its mode: a guest splices them in `internal`.
+    summary: []const u8,
+};
 
 /// One prompt. Instantiate at container scope (`const rename = Prompt(.{…});`)
 /// — the state below is per-instantiation, so a plugin may hold several.
 pub fn Prompt(comptime cfg: Config) type {
     return struct {
         const Self = @This();
+
+        /// The keymap mode this prompt runs in.
+        pub const mode = cfg.mode orelse modeOf(cfg.name);
 
         comptime {
             if (cfg.on_accept == null and !cfg.payload_callers)
@@ -128,12 +158,14 @@ pub fn Prompt(comptime cfg: Config) type {
         /// into its own command table rather than this module registering
         /// behind its back — one place still owns "what commands do I have".
         pub const commands = [_]Command{
-            .{ .name = cfg.name ++ "-type", .handler = onType },
-            .{ .name = cfg.name ++ "-backspace", .handler = onBackspace },
-            .{ .name = cfg.name ++ "-clear", .handler = onClear },
-            .{ .name = cfg.name ++ "-accept", .handler = onAccept },
-            .{ .name = cfg.name ++ "-cancel", .handler = onCancel },
-        };
+            .{ .name = cfg.name ++ "-type", .handler = onType, .summary = "Add typed text to the prompt's line." },
+            .{ .name = cfg.name ++ "-backspace", .handler = onBackspace, .summary = "Delete the last character of the prompt's line." },
+            .{ .name = cfg.name ++ "-clear", .handler = onClear, .summary = "Clear the prompt's line." },
+            .{ .name = cfg.name ++ "-accept", .handler = onAccept, .summary = "Accept the prompt's line." },
+            .{ .name = cfg.name ++ "-cancel", .handler = onCancel, .summary = "Leave the prompt without answering." },
+        } ++ (if (cfg.complete != null) [_]Command{
+            .{ .name = cfg.name ++ "-complete", .handler = onComplete, .summary = "Complete what the prompt's line is naming." },
+        } else [_]Command{});
 
         /// Bind the mode: printable keys commit through `-type`, Enter
         /// accepts, Escape and C-c back out, C-u clears. Call from `init`,
@@ -143,13 +175,14 @@ pub fn Prompt(comptime cfg: Config) type {
         /// of a prompt" is exactly the thing that should be the same in every
         /// prompt in the editor. A config that disagrees rebinds the mode.
         pub fn install() void {
-            weft.textInput(cfg.name, cfg.name ++ "-type");
-            weft.bindKey(cfg.name, "Return", cfg.name ++ "-accept");
-            weft.bindKey(cfg.name, "KP_Enter", cfg.name ++ "-accept");
-            weft.bindKey(cfg.name, "BackSpace", cfg.name ++ "-backspace");
-            weft.bindKey(cfg.name, "Escape", cfg.name ++ "-cancel");
-            weft.bindKey(cfg.name, "C-c", cfg.name ++ "-cancel");
-            weft.bindKey(cfg.name, "C-u", cfg.name ++ "-clear");
+            weft.textInput(mode, cfg.name ++ "-type");
+            weft.bindKey(mode, "Return", cfg.name ++ "-accept");
+            weft.bindKey(mode, "KP_Enter", cfg.name ++ "-accept");
+            weft.bindKey(mode, "BackSpace", cfg.name ++ "-backspace");
+            weft.bindKey(mode, "Escape", cfg.name ++ "-cancel");
+            weft.bindKey(mode, "C-c", cfg.name ++ "-cancel");
+            weft.bindKey(mode, "C-u", cfg.name ++ "-clear");
+            if (cfg.complete != null) weft.bindKey(mode, "Tab", cfg.name ++ "-complete");
         }
 
         /// Declare the five command names (call from `describe`).
@@ -214,7 +247,7 @@ pub fn Prompt(comptime cfg: Config) type {
             @memcpy(buf[0..len], seed[0..len]);
             open_now = true;
             render();
-            weft.setMode(cfg.name);
+            weft.setMode(mode);
         }
 
         /// The text typed so far. Borrows the line buffer — copy before
@@ -265,6 +298,17 @@ pub fn Prompt(comptime cfg: Config) type {
         pub fn onClear() void {
             if (!open_now) return;
             len = 0;
+            changed();
+        }
+
+        pub fn onComplete() void {
+            if (!open_now) return;
+            const complete = cfg.complete orelse return;
+            if (complete(buf[0..len])) |next| {
+                if (next.len > buf.len) return;
+                std.mem.copyForwards(u8, buf[0..next.len], next);
+                len = next.len;
+            }
             changed();
         }
 

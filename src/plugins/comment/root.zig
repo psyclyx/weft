@@ -19,10 +19,10 @@ const token = "// ";
 /// carets on one line toggle it once.
 const over_lines: weft.Arity = .{ .each = .{ .over = "comment.lines", .merge = true } };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "comment-line", .call = commentLine, .arity = over_lines, .summary = "toggle this line's comment" },
-    .{ .name = "comment-selection", .call = commentSelection, .arity = over_lines, .summary = "toggle the selection's comments" },
-    .{ .name = "op.comment", .call = opComment, .arity = weft.Arity.each_extent, .summary = "comment the operator's range" },
-    .{ .name = "comment.lines", .call = lines, .arity = weft.Arity.each_extent, .summary = "the selection's lines, or the caret's" },
+    .{ .name = "comment.toggle-line", .call = commentLine, .arity = over_lines, .summary = "Comment or uncomment the current line.", .label = "Toggle Line Comment", .menu = "Edit", .group = "comment", .order = 1 },
+    .{ .name = "comment.toggle-selection", .call = commentSelection, .arity = over_lines, .summary = "Comment or uncomment the selected lines.", .label = "Toggle Selection Comment", .menu = "Edit", .group = "comment", .order = 2 },
+    .{ .name = "comment.toggle", .call = opComment, .arity = weft.Arity.each_extent, .summary = "Comment or uncomment the lines of the operator's range.", .internal = true },
+    .{ .name = "comment.lines", .call = lines, .arity = weft.Arity.each_extent, .summary = "Return the selection's lines, or the cursor's line.", .internal = true },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();
@@ -111,7 +111,7 @@ var starts: [1 << 12]usize = undefined;
 
 /// Toggle every line overlapping `[start, end)` with one uniform decision:
 /// remove iff EVERY non-blank line in the span is already commented, else add.
-/// The shared core of `comment-selection` and the `gc` operator `op.comment`.
+/// The shared core of `comment.toggle-selection` and the `gc` operator `comment.toggle`.
 fn commentSpan(start: usize, end: usize) void {
     // Collect the start of each line the span touches.
     var count: usize = 0;
@@ -154,7 +154,7 @@ fn commentSelection() void {
 
 /// The `gc` operator: toggle comments over the awaited range's lines. Composes
 /// with every vim motion and text object (`gcap`, `gcip`, `gc3j`) and — via the
-/// doubled-operator path (op-line) — `gcc` on the current line.
+/// doubled-operator path (vim.operate-line) — `gcc` on the current line.
 fn opComment() void {
     const h = weft.argRange(0) orelse return;
     const r = weft.rangeEnds(h) orelse return;

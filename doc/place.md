@@ -36,7 +36,7 @@ Five placeholders were cut for this work and left empty:
 | `Ctx.locus` | captured every dispatch, always `.here` |
 | `Facts.locality {local,remote,tool,none}` | declared "so predicates can gate on it"; never set |
 | `ctx.zig:293` `workspace` scope | pushed with empty facts; comment names "workspace-multi-root" |
-| `Head.working_target` | `action.zig` calls it "the target-oriented analogue of `cd` … applies equally to local, remote, archive, and synthetic hierarchies"; one writer (`SPC v c`), one reader (`open-relative`) whose only caller is a unit test |
+| `Head.working_target` | `action.zig` calls it "the target-oriented analogue of `cd` … applies equally to local, remote, archive, and synthetic hierarchies"; one writer (`SPC v c`), one reader (`target.open-relative`) whose only caller is a unit test |
 
 The consequence is five disagreeing root detectors, one correct subsystem
 (git, via a `cd '{s}'` shell string at `git.zig:2436`), and a `SPC p` prefix
@@ -404,7 +404,7 @@ Two further primitives close the honest gaps:
   confirm the module cache is there.
 - **kv persistence** (`plans/02-native-surface.md:107`, P12). `kv.zig`'s header
   says state "outlives a run", but `serialize`/`load` have zero production
-  callers and both stores die with the process — so `project-recent` silently
+  callers and both stores die with the process — so `project.recent` silently
   empties on every restart. Until P12 lands, "use kv instead of files" is not
   an argument a plugin author can act on.
 
@@ -557,7 +557,7 @@ losing their REASONS rather than by having a grant withheld:
 - git's rebase probe is `placeHas(".git/rebase-merge")` /
   `placeHas(".git/rebase-apply")` — two questions about the place the command
   dispatches in, replacing an `fsList` of `<root>/.git` that grepped the names.
-- `project-root` is `weft.placeRoot()`. Its climb, its marker list, and the kv
+- `project.show-root` is `weft.placeRoot()`. Its climb, its marker list, and the kv
   cache that existed to answer for a path-less tool buffer all go: an entry
   inherits the place of whatever produced it, and a user's pinned working
   target overrides both, which no climb could have discovered.
@@ -575,7 +575,7 @@ too — a place can be an ancestor of the editor's own state (the
 version-controlled home directory), and an ungated door is exactly the one a
 capability-less plugin would use to confirm the module cache is there.
 
-Remaining in this wave: kv persistence (P12), so `project-recent` survives a
+Remaining in this wave: kv persistence (P12), so `project.recent` survives a
 restart.
 
 **Wave 6 — Close the standing list.** ABI symmetry (an authority parameter on
@@ -592,7 +592,7 @@ lack one.
 `.fs_root` branch now stats the confined descriptor (`RootedFs.kind`) instead of
 calling `file.statKind` on the raw path, so a symlink inside the root leaks
 nothing and a `root = "."` grant confines it like the other four doors. So is
-the `grammar-add` gate, now a pinned property rather than an ABI accident (§8).
+the `syntax.add-grammar` gate, now a pinned property rather than an ABI accident (§8).
 
 ## 8. Named decisions and risks
 
@@ -626,12 +626,12 @@ the `grammar-add` gate, now a pinned property rather than an ABI accident (§8).
   absolute path.
 - **kv persistence is a prerequisite** for the "plugins use kv, not files"
   argument, which is why P12 sits in Wave 5 rather than being assumed.
-- **`grammar-add` is not currently a guest escape.** It is ungated and does
+- **`syntax.add-grammar` is not currently a guest escape.** It is ungated and does
   `std.DynLib.open`, but the guest command runners top out at two string
   arguments and it takes three. It was held shut by an ABI arity accident
   rather than by design; the accident is now a pinned property
   (`src/app/providers.zig`'s runner census), which fails the build the moment a
-  runner gains the arity to invoke it or `grammar-add` shrinks to a shape one
+  runner gains the arity to invoke it or `syntax.add-grammar` shrinks to a shape one
   can already call. The gate is still arity, not permission — but it is now a
   gate someone has to walk past deliberately, with the reason written down.
 - **JS guests cannot write to disk at all** — `cAgentWrite` writes into a

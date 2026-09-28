@@ -39,8 +39,14 @@ test {
     _ = @import("helix_test.zig");
     _ = @import("history_test.zig");
     _ = @import("chrome_test.zig");
+    _ = @import("chrome_style_test.zig");
+    _ = @import("menubar_test.zig");
     _ = @import("panels_test.zig");
     _ = @import("designation_test.zig");
     _ = @import("snapshot_frames_test.zig");
     _ = @import("projection_test.zig");
+    _ = @import("remote_test.zig");
+    _ = @import("focus_test.zig");
+    _ = @import("command_identity_test.zig");
+    _ = @import("status_test.zig");
 }

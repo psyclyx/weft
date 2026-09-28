@@ -47,6 +47,24 @@ comptime {
     std.debug.assert(@sizeOf(PathStyle) == 40);
 }
 extern fn weft_skia_draw_path(s: ?*Shim, commands: [*]const scene.PathCommand, command_count: usize, style: *const PathStyle) void;
+const RRect = extern struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+    stroke_width: f32,
+    blur: f32,
+};
+comptime {
+    std.debug.assert(@sizeOf(RRect) == 44);
+}
+extern fn weft_skia_draw_rrect(s: ?*Shim, rrect: *const RRect) void;
+extern fn weft_skia_clip(s: ?*Shim, on: c_int, x: f32, y: f32, w: f32, h: f32) void;
 extern fn weft_skia_end(s: ?*Shim, row_bytes: *usize) ?[*]const u8;
 
 /// A rasterized frame: pointer into the shim's buffer (valid until the next
@@ -95,32 +113,67 @@ pub const Skia = struct {
     /// one, so a single-entry memo removes nearly all of the conversion work
     /// without a hash or an allocation. It is a pure function, so the memo can
     /// only ever return what a recomputation would.
+    ///
+    /// A list starts unclipped and ends unclipped: a `clip` item replaces the
+    /// clip for what follows it, and any left in force is lifted here, so one
+    /// pane's clip can never reach the next pane's items.
     pub fn drawItems(self: *Skia, items: []const scene.DrawItem) void {
         var last_in: scene.Color = .{ -1, -1, -1, -1 }; // outside the domain
         var last_out: scene.Color = .{ 0, 0, 0, 0 };
+        var clipped = false;
+        defer if (clipped) weft_skia_clip(self.shim, 0, 0, 0, 0, 0);
         for (items) |item| {
-            if (item == .path) {
-                const path = item.path;
-                const color = scene.linearToSrgbColor(path.color);
-                const style: PathStyle = .{
-                    .x = path.x,
-                    .y = path.y,
-                    .scale = path.scale,
-                    .stroke_width = path.stroke_width,
-                    .r = color[0],
-                    .g = color[1],
-                    .b = color[2],
-                    .a = color[3],
-                    .cap = @intFromEnum(path.cap),
-                    .join = @intFromEnum(path.join),
-                };
-                weft_skia_draw_path(self.shim, path.commands.ptr, path.commands.len, &style);
-                continue;
+            switch (item) {
+                .path => |path| {
+                    const color = scene.linearToSrgbColor(path.color);
+                    const style: PathStyle = .{
+                        .x = path.x,
+                        .y = path.y,
+                        .scale = path.scale,
+                        .stroke_width = path.stroke_width,
+                        .r = color[0],
+                        .g = color[1],
+                        .b = color[2],
+                        .a = color[3],
+                        .cap = @intFromEnum(path.cap),
+                        .join = @intFromEnum(path.join),
+                    };
+                    weft_skia_draw_path(self.shim, path.commands.ptr, path.commands.len, &style);
+                    continue;
+                },
+                .rrect => |rr| {
+                    const color = scene.linearToSrgbColor(rr.color);
+                    weft_skia_draw_rrect(self.shim, &.{
+                        .x = rr.x,
+                        .y = rr.y,
+                        .w = rr.w,
+                        .h = rr.h,
+                        .radius = rr.radius,
+                        .r = color[0],
+                        .g = color[1],
+                        .b = color[2],
+                        .a = color[3],
+                        .stroke_width = rr.stroke_width,
+                        .blur = rr.blur,
+                    });
+                    continue;
+                },
+                .clip => |clip| {
+                    if (clip) |c| {
+                        weft_skia_clip(self.shim, 1, c.x, c.y, c.w, c.h);
+                        clipped = true;
+                    } else if (clipped) {
+                        weft_skia_clip(self.shim, 0, 0, 0, 0, 0);
+                        clipped = false;
+                    }
+                    continue;
+                },
+                .rect, .glyph => {},
             }
             const in = switch (item) {
                 .rect => |rect| rect.color,
                 .glyph => |glyph| glyph.color,
-                .path => unreachable,
+                .path, .rrect, .clip => unreachable,
             };
             if (!std.mem.eql(f32, &in, &last_in)) {
                 last_in = in;
@@ -130,7 +183,7 @@ pub const Skia = struct {
             switch (item) {
                 .rect => |rect| weft_skia_draw_rect(self.shim, rect.x, rect.y, rect.w, rect.h, c[0], c[1], c[2], c[3]),
                 .glyph => |glyph| weft_skia_draw_glyph(self.shim, glyph.font_id, glyph.glyph_id, glyph.x, glyph.y, glyph.size, c[0], c[1], c[2], c[3]),
-                .path => unreachable,
+                .path, .rrect, .clip => unreachable,
             }
         }
     }

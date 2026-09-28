@@ -37,6 +37,7 @@ pub extern "weft:abi/1" fn wl_log(level: u32, ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_declare_command(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_declare_command_doc(ptr: u32, len: u32, params: u32, params_len: u32, summary: u32, summary_len: u32) void;
 pub extern "weft:abi/1" fn wl_declare_arity(ptr: u32, len: u32, code: u32, over: u32, over_len: u32) void;
+pub extern "weft:abi/1" fn wl_declare_command_meta(ptr: u32, len: u32, meta: u32, meta_len: u32) void;
 pub extern "weft:abi/1" fn wl_declare_capability(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_request_perm(perm: u32) void;
 pub extern "weft:abi/1" fn wl_cursor() u32;
@@ -69,6 +70,7 @@ pub extern "weft:abi/1" fn wl_annotate_close(handle: u32) void;
 pub extern "weft:abi/1" fn wl_annotate_len(handle: u32) i32;
 pub extern "weft:abi/1" fn wl_annotate_read(handle: u32, start: u32, end: u32, ptr: u32, cap: u32) i32;
 pub extern "weft:abi/1" fn wl_annotate_begin(handle: u32) i32;
+pub extern "weft:abi/1" fn wl_annotate_begin_until_key(handle: u32) i32;
 pub extern "weft:abi/1" fn wl_annotate_span(handle: u32, start: u32, end: u32, role: u32, placement: u32, ptr: u32, len: u32) void;
 // Native `editor` surface + anchored ranges. A range crosses as an opaque u32
 // handle into a host-side table of document-owned anchors.
@@ -99,6 +101,7 @@ pub extern "weft:abi/1" fn wl_arg_int(i: u32) i32;
 pub extern "weft:abi/1" fn wl_arg_str(i: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_set_result_int(n: i32) void;
 pub extern "weft:abi/1" fn wl_set_result_str(ptr: u32, len: u32) void;
+pub extern "weft:abi/1" fn wl_key_serial() u32;
 // Config surface (the local plane — bindings/modes, as init.fnl did).
 pub extern "weft:abi/1" fn wl_bind_key(m: u32, ml: u32, k: u32, kl: u32, c: u32, cl: u32) void;
 pub extern "weft:abi/1" fn wl_bind_keys(m: u32, ml: u32, k: u32, kl: u32, list: u32, list_len: u32) void;
@@ -114,20 +117,26 @@ pub extern "weft:abi/1" fn wl_posture() u32;
 pub extern "weft:abi/1" fn wl_declare_posture(posture: u32) void;
 pub extern "weft:abi/1" fn wl_provide(a: u32, al: u32, pred: u32, pred_len: u32, c: u32, cl: u32, prio: i32) void;
 pub extern "weft:abi/1" fn wl_sticky_menu(ptr: u32, len: u32) void;
+pub extern "weft:abi/1" fn wl_mode_display(mode_ptr: u32, mode_len: u32, name_ptr: u32, name_len: u32, tone: u32) void;
 pub extern "weft:abi/1" fn wl_run(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_call_string(ptr: u32, len: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_run_int(ptr: u32, len: u32, n: i32) void;
 pub extern "weft:abi/1" fn wl_run_str(ptr: u32, len: u32, s: u32, sl: u32) void;
 pub extern "weft:abi/1" fn wl_run_str2(ptr: u32, len: u32, a: u32, al: u32, b: u32, bl: u32) void;
 pub extern "weft:abi/1" fn wl_run_argv(ptr: u32, len: u32, vec: u32, argc: u32) void;
+pub extern "weft:abi/1" fn wl_run_argv_at(where: u32, ptr: u32, len: u32, vec: u32, argc: u32) i32;
 // Introspection (palettes/help/buffers pickers).
 pub extern "weft:abi/1" fn wl_command_count() u32;
+pub extern "weft:abi/1" fn wl_command_revision() u32;
 pub extern "weft:abi/1" fn wl_command_name(i: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_command_summary(i: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_command_owner(i: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_command_arity(i: u32) i32;
 pub extern "weft:abi/1" fn wl_command_arity_required(i: u32) i32;
 pub extern "weft:abi/1" fn wl_command_arg(i: u32, k: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_command_meta(name: u32, name_len: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_keys_for(name: u32, name_len: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_command_at(where: u32, name: u32, name_len: u32, out_ptr: u32, out_cap: u32) i32;
 // The focused context's live offers, and the door one is accepted through.
 pub extern "weft:abi/1" fn wl_intent_invoke(ptr: u32, len: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_offers_begin(scope: u32, scope_len: u32, revision: u32) u32;
@@ -142,8 +151,6 @@ pub extern "weft:abi/1" fn wl_buffer_count() u32;
 pub extern "weft:abi/1" fn wl_buffer_id(i: u32) i32;
 pub extern "weft:abi/1" fn wl_buffer_name(i: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_buffer_active(i: u32) u32;
-pub extern "weft:abi/1" fn wl_mode_names(out_ptr: u32, out_cap: u32) i32;
-pub extern "weft:abi/1" fn wl_binding_table(mode_ptr: u32, mode_len: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_buffer_readonly(i: u32) u32;
 pub extern "weft:abi/1" fn wl_buffer_path(i: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_buffer_dirty(i: u32) i32;
@@ -156,6 +163,7 @@ pub extern "weft:abi/1" fn wl_pick_begin(prompt_ptr: u32, prompt_len: u32, pick_
 pub extern "weft:abi/1" fn wl_pick_free_text(on: u32) void;
 pub extern "weft:abi/1" fn wl_pick_category(ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_pick_add(t: u32, tl: u32, d: u32, dl: u32) void;
+pub extern "weft:abi/1" fn wl_pick_add_keyed(t: u32, tl: u32, d: u32, dl: u32, k: u32, kl: u32) void;
 pub extern "weft:abi/1" fn wl_pick_add_buffer(t: u32, tl: u32, d: u32, dl: u32, i: u32) void;
 pub extern "weft:abi/1" fn wl_pick_end() void;
 pub extern "weft:abi/1" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, pick_id: u32) void;
@@ -218,6 +226,9 @@ pub extern "weft:abi/1" fn wl_context_set(k: u32, kl: u32, v: u32, vl: u32, scop
 pub extern "weft:abi/1" fn wl_context_get(k: u32, kl: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_context_changed(out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_places(out_ptr: u32, out_cap: u32) i32;
+// Watch a subject designation (1) or stop (0): `on_subject_changed` fires,
+// bound to its entry, when that entry reads differently.
+pub extern "weft:abi/1" fn wl_subject_watch(ptr: u32, len: u32, watching: u32) i32;
 pub extern "weft:abi/1" fn wl_register_set(ptr: u32, len: u32, name: u32) void;
 pub extern "weft:abi/1" fn wl_semantic_view_focus(authority: u32, slot: u32, generation: u32, preferred_low: u32, preferred_high: u32, has_preferred: u32) i32;
 pub extern "weft:abi/1" fn wl_semantic_interaction_open(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;

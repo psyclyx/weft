@@ -1,23 +1,15 @@
-//! structural — syntax-aware editing, a `.wasm` plugin. `node-kind` reports
-//! the tree-sitter construct under the cursor; `delete-node` removes the
-//! innermost named node as one grade-gated edit. Built from `nodeAt` (the
+//! structural — syntax-aware editing, a `.wasm` plugin. `structural.delete-node`
+//! removes the innermost named node as one grade-gated edit. Built from `nodeAt` (the
 //! host-resolved structural read) + the edit door — the same substrate
 //! textobjects and folding compose from, across the membrane.
 
 const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "node-kind", .call = nodeKind, .arity = .whole, .summary = "say what syntax node the cursor is in" },
-    .{ .name = "delete-node", .call = deleteNode, .arity = weft.Arity.each_extent, .summary = "delete the syntax node under the cursor" },
+    .{ .name = "structural.delete-node", .call = deleteNode, .arity = weft.Arity.each_extent, .summary = "Delete the syntax node under the cursor.", .label = "Delete Syntax Node" },
 };
 comptime {
     weft.plugin(&cmds, .{}).exportAll();
-}
-
-/// The grammar kind of the node under the cursor, or nil (no grammar / node).
-fn nodeKind() void {
-    const node = weft.nodeAt(weft.cursor()) orelse return; // result stays nil
-    weft.setResultStr(node.kind);
 }
 
 /// Delete the innermost named node under the cursor; result is the byte count

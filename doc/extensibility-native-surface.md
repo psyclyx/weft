@@ -349,5 +349,5 @@ liveness / presence                 [E] union relay
 ## MUST-FIX HOLES the ABI depends on (current code)
 
 - **Hole #1:** `Document.peerCommit` and the `.user` hot path are ungated → ghost edits on `view` clients. Add `grantOf(author).canEdit()`.
-- **Hole #2:** `command.Context` has no principal → plugins launder edits as `.user` via `run("insert-text")`. Add `Context.principal` + `Context.edit()`; builtins must never call `ctx.document().insert` directly.
+- **Hole #2:** `command.Context` has no principal → plugins launder edits as `.user` via `run("edit.insert-text")`. Add `Context.principal` + `Context.edit()`; builtins must never call `ctx.document().insert` directly.
 - **Grant-keying gap:** capability sessions and `replicated` layers not yet keyed to `secure` peer grants — close before any remote/shared provider is trusted per-peer.

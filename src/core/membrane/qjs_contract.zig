@@ -125,6 +125,7 @@ pub const imports = [_]Entry{
     e("qjs_status_segment", 7, 0, .config, "weft.statusSegment(text, role, priority, command): stage a static ui/statusline-seg segment onto the manifest; a click on it runs `command` (doc/cwa-prior-docs-audit.md §5)"),
     e("qjs_grant", 6, 0, .config, "weft.grant(plugin, capability, root): stage a GrantDecl onto the manifest — root (\"\" = unrestricted) narrows to Limit.fs_root (doc/contextual-workspace-architecture.md §13.5)"),
     e("qjs_viewport", 6, 0, .config, "weft.viewport(name, {edge, extent | {rows}, cycles, persistent, followFocus, takesFocus, statusLine, shown}): stage a viewport's ATTRIBUTES onto the manifest — \"sidebar\" is a fragment setting these, not a kind (doc/cwa-config-decisions.md D1)"),
+    e("qjs_describe", 4, 0, .config, "weft.command(id, {label, summary, menu, group, order, icon, prompts, toggle, internal}): stage how a command is presented, at the config tier, in the shared presentation text form (doc/chrome.md §1.2)"),
     e("qjs_present", 9, 0, .config, "weft.present(viewport, {subject, as, reveal}): stage \"show this subject in that viewport\" — a designation or ONE context key (flags bit 0), as a projection, revealing a designation or key (bit 1) inside it (doc/model.md §2.5)"),
 
     // ── the plugin plane: stubbed on the config linker, real on a JsPlugin's ─
@@ -132,6 +133,9 @@ pub const imports = [_]Entry{
     e("qjs_declare_command", 2, 0, .plugin, "declare a command name — the twin of wl_declare_command, same body"),
     e("qjs_declare_command_doc", 6, 0, .plugin, "declare a command with its parameter list and one-line summary — the twin of wl_declare_command_doc, same body"),
     e("qjs_declare_arity", 5, 0, .plugin, "say how a declared command maps over several selections — the twin of wl_declare_arity, same body"),
+    e("qjs_declare_command_meta", 4, 0, .plugin, "say how a declared command is presented to people — the twin of wl_declare_command_meta, same body"),
+    e("qjs_command_meta", 4, 1, .plugin, "how a command, action or intention is presented here — the twin of wl_command_meta, same body"),
+    e("qjs_keys_for", 4, 1, .plugin, "the keys that run a name where the person is, shortest first — the twin of wl_keys_for, same body"),
     // The four proc doors run `wasm_host/proc.zig`'s bodies — the SAME ones
     // `wl_proc_*` runs. Their arities are `wl_proc_*`'s by construction, not by
     // transcription (doc/place.md §4.1a).
@@ -182,6 +186,17 @@ pub const imports = [_]Entry{
     // `wl_context_set`/`wl_context_get` run.
     e("qjs_context_set", 7, 1, .plugin, "weft.contextSet(key, value, scope[, place]): publish a key under the plugin's own name at entry/place/global — at a place a designation names, when given; empty retracts"),
     e("qjs_context_get", 4, 1, .plugin, "weft.contextGet(key): the primary context's value for any key, or null"),
+    e("qjs_context_listen", 1, 0, .plugin, "weft.onContextChanged(fn): this plugin has a context handler (1) or none (0) — the event goes only to plugins that do"),
+    e("qjs_context_changed", 2, 1, .plugin, "the keys the weft.onContextChanged delivery in flight reports as moved, one per line (clamped); the full length"),
+    e("qjs_places", 2, 1, .plugin, "weft.places(): every open entry's place, then every tree a peer shares, one designation per line (clamped); the full length"),
+    e("qjs_subject_watch", 3, 1, .plugin, "weft.subjectWatch(designation[, false]): hear weft.onSubjectChanged, bound to the subject's entry, when it reads differently; 0 ok, -1 not a designation, -2 too many"),
+    // The designation doors, running `wasm_host/tool.zig`'s bodies — the ones
+    // `wl_entry_designation`/`wl_entry_designate`/`wl_designation_opener` run,
+    // the creator and namespace rules included.
+    e("qjs_tool_backing", 2, 0, .plugin, "weft.toolBacking(name): mark an entry this plugin made as its tool projection"),
+    e("qjs_designation", 2, 1, .plugin, "weft.designation(): the designation of the entry this call is about, or null"),
+    e("qjs_designate", 2, 1, .plugin, "weft.designate(text): declare what an entry this plugin made represents — a proc in its namespace, or a projection kind it claimed; 0 ok, negative refused"),
+    e("qjs_designation_opener", 4, 1, .plugin, "weft.designationOpener(kind, command): claim projection kind `kind` (the plugin's own name, or under it), re-run by `command`; 0 ok, -1 not a kind, -2 claimed by another, -3 not this plugin's"),
 };
 
 // ── Parity with the wasm plane ───────────────────────────────────────
@@ -237,7 +252,7 @@ pub const parity = [_]GroupParity{
     .{ .group = .pointer, .state = .shared, .note = "wl_pointer and qjs_pointer run wasm_host/pointer.zig's one body: a config's command bound to `mouse-1` reads where the click was exactly as a wasm plugin's does" },
     .{ .group = .clipboard, .state = .shared, .note = "wl_clipboard_* and qjs_clipboard_* run wasm_host/clipboard.zig's bodies behind the same config-only grant: a JS grammar mirrors a register into the desktop clipboard exactly as a wasm one does" },
     .{ .group = .history, .state = .shared, .note = "wl_jump_push/wl_macro_recording and their qjs_* twins run wasm_host/history.zig's bodies: a JS grammar decides what a jump is and shows a recording chip through the same door" },
-    .{ .group = .context, .state = .shared, .note = "wl_context_set/get and their qjs_* twins run wasm_host/context.zig's bodies: a JS plugin publishes `acp.session` exactly as the repl publishes `repl.session`. `wl_context_changed` is wasm-only until the JS plane has an `on_context_changed` to read it in" },
+    .{ .group = .context, .state = .shared, .note = "every context door and its qjs_* twin run wasm_host/context.zig's bodies: a JS plugin publishes `acp.session` exactly as the repl publishes `repl.session`, reads the primary context and the places, hears weft.onContextChanged(keys) at the same boundary as on_context_changed (qjs_context_listen says it has a handler, where a wasm export is probed for), and watches a subject (weft.onSubjectChanged) as a wasm projection does" },
     .{ .group = .surface, .state = .absent, .note = "no retained overlay: acp.js and dap.js have a status chip and a buffer, and cannot paint the corner surface which_key and git use. Same shape as .edit — shared bodies plus C shim" },
     .{ .group = .slot, .state = .absent, .note = "a JS plugin can neither provide nor consume a typed capability, so it cannot participate in the D2 mesh at all — the biggest single second-classness left" },
     .{ .group = .intent, .state = .absent, .note = "cannot publish offers, so a JS-owned buffer answers no standard intention and its keys must all be bound by hand" },
@@ -251,7 +266,7 @@ pub const parity = [_]GroupParity{
     .{ .group = .capability, .state = .absent, .note = "the completion provider surface (wl_caps_*)" },
     .{ .group = .syntax, .state = .absent, .note = "tree-sitter reads: no caller yet" },
     .{ .group = .activation, .state = .absent, .note = "on_activate has no JS export twin" },
-    .{ .group = .tool, .state = .absent, .note = "tool-backing and designation doors (wl_entry_designation/designate, wl_designation_opener): a JS-owned entry is named by what core derives — its document — and a JS plugin cannot claim a projection kind or reattach a process" },
+    .{ .group = .tool, .state = .shared, .note = "wl_tool_backing, wl_entry_designation/designate and wl_designation_opener and their qjs_* twins run wasm_host/tool.zig's bodies: a JS producer marks its entries, names them, and claims a projection kind under the same creator and namespace rules — only in its own namespace, since a JS plugin has no describe() to declare a kind outside it" },
     .{ .group = .register, .state = .absent, .note = "the shared kill/yank ring" },
     .{ .group = .sessions, .state = .absent, .note = "repl/net sessions; the JS plane has raw proc, which is the transport underneath them" },
 };
@@ -261,7 +276,7 @@ pub const parity = [_]GroupParity{
 /// `qjs_*` import, so a merge conflict or half-finished edit fails the
 /// build instead of silently drifting quickjs.zig's three registration
 /// sites apart.
-const expected_count = 51;
+const expected_count = 63;
 
 comptime {
     // EVERY wasm import group must appear in `parity` exactly once. This is
@@ -331,8 +346,8 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
         }
     }
     try t.expectEqual(@as(usize, expected_count), imports.len);
-    try t.expectEqual(@as(usize, 16), config_count); // defineConfigFns' surface
-    try t.expectEqual(@as(usize, 35), plugin_count); // the resident-plugin-only surface
+    try t.expectEqual(@as(usize, 17), config_count); // defineConfigFns' surface
+    try t.expectEqual(@as(usize, 46), plugin_count); // the resident-plugin-only surface
 }
 
 // Sealed eval (doc/configuration.md §5 C11; manifest.zig's module doc):
@@ -359,13 +374,13 @@ test "qjs membrane parity: every wasm group is claimed, and the gap is written d
     }
     // A `.shared` claim is a claim about BODIES, and `e2e/demolition_test.zig`
     // checks those by function pointer. What this asserts is that nobody
-    // relabelled a gap as shared without one: today six groups have earned
-    // it — proc, edit, pointer, clipboard, history and context.
+    // relabelled a gap as shared without one: today seven groups have earned
+    // it — proc, edit, pointer, clipboard, history, context and tool.
     var shared: usize = 0;
     for (parity) |p| {
         if (p.state == .shared) shared += 1;
     }
-    try t.expectEqual(@as(usize, 6), shared);
+    try t.expectEqual(@as(usize, 7), shared);
 
     // And the honest headline: how many doors a JS plugin reaches, against
     // the wasm plane's `weft_membrane.imports.len` (which the census in
@@ -389,7 +404,21 @@ test "qjs membrane parity: every wasm group is claimed, and the gap is written d
     //
     // 48 → 50 with the context pair (publish a key, read the primary
     // context), shared from birth.
-    try t.expectEqual(@as(usize, 51), imports.len);
+    //
+    // 51 → 58 closing the context and tool groups whole (doc/model.md
+    // §3.5): the moved-keys list, the places, a subject watch, and the four
+    // tool doors — tool backing and the designation trio — one body each,
+    // with the context event and the subject event delivered to JS at the
+    // same frame boundary as to wasm.
+    //
+    // 58 → 62 with what a command is called and which key runs it
+    // (doc/chrome.md §1.2-1.3): the meta declaration, the two reads, and the
+    // config tier's `weft.command(id, {…})` — shared bodies from birth.
+    //
+    // 62 → 63 with `qjs_context_listen`: a JS handler is a value the host
+    // cannot probe for as it probes a wasm export, so the plugin says when it
+    // has one, and the context event goes only to plugins that do.
+    try t.expectEqual(@as(usize, 63), imports.len);
 }
 
 test "qjs membrane contract: no clock/env/random-shaped .config import" {

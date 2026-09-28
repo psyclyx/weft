@@ -3,7 +3,7 @@
 //!
 //! `surround.add` is an OPERATOR in the `operators` sense: it awaits a live
 //! range (its single arg) and wraps it, so a grammar composes it the way it
-//! composes `op.delete` — helix hands it each selection (`ms`), vim could
+//! composes `operators.delete` — helix hands it each selection (`ms`), vim could
 //! hand it a motion's range (`ys`).
 //!
 //! `surround.delete` and `surround.replace` map over PAIRS: each declares
@@ -12,7 +12,7 @@
 //! distinct pair — two selections inside one pair edit it once, nested pairs
 //! each get theirs, innermost first. A grammar just runs the command.
 //!
-//! Which delimiters is a separate, earlier call: `surround-pair <c> [r]`. The
+//! Which delimiters is a separate, earlier call: `surround.choose-pair <c> [r]`. The
 //! character is the grammar's to read (its own capture mode); this plugin
 //! never takes a key. `c` names the pair — an opening or closing bracket
 //! names both of its brackets, any other character is its own close — and
@@ -29,11 +29,11 @@ const weft = @import("weft");
 const each_pair: weft.Arity = .{ .each = .{ .over = "surround.find" } };
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "surround-pair", .call = setPair, .arity = .whole, .params = "char [replacement]", .summary = "choose the delimiters the next surround operator uses" },
-    .{ .name = "surround.add", .call = opAdd, .arity = weft.Arity.each_extent, .summary = "wrap the operator's range in the chosen pair" },
-    .{ .name = "surround.delete", .call = opDelete, .arity = each_pair, .summary = "delete the chosen pair around each selection" },
-    .{ .name = "surround.replace", .call = opReplace, .arity = each_pair, .summary = "replace the chosen pair around each selection" },
-    .{ .name = "surround.find", .call = find, .arity = weft.Arity.each_extent, .summary = "the chosen pair around the selection, delimiters included" },
+    .{ .name = "surround.choose-pair", .call = setPair, .arity = .whole, .params = "char [replacement]", .summary = "Choose the delimiters the next surround operator uses.", .label = "Choose Surround Pair", .prompts = true },
+    .{ .name = "surround.add", .call = opAdd, .arity = weft.Arity.each_extent, .summary = "Wrap the operator's range in the chosen pair.", .internal = true },
+    .{ .name = "surround.delete", .call = opDelete, .arity = each_pair, .summary = "Delete the chosen pair around each selection.", .internal = true },
+    .{ .name = "surround.replace", .call = opReplace, .arity = each_pair, .summary = "Replace the chosen pair around each selection.", .internal = true },
+    .{ .name = "surround.find", .call = find, .arity = weft.Arity.each_extent, .summary = "Return the chosen pair around the selection, delimiters included.", .internal = true },
 };
 
 comptime {
@@ -85,7 +85,7 @@ const Pair = struct {
 var pair: Pair = .{};
 var replacement: Pair = .{};
 
-/// `surround-pair <c> [r]`: remember the pair (and the replacement pair) the
+/// `surround.choose-pair <c> [r]`: remember the pair (and the replacement pair) the
 /// operators below read.
 fn setPair() void {
     pair = Pair.of(weft.argStr(0) orelse "");

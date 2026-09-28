@@ -171,7 +171,7 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
     const ed = &app.ed;
     try authorTree(ed);
 
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     const listing = ed.buffers.active_id;
     try t.expectEqualStrings("files", ed.buffers.active().tool);
     try t.expect(ed.buffers.active().editor == null);
@@ -254,7 +254,7 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
     // route: no tool claims a file, so the shell's placement policy opens it
     // as an ordinary editor entry. The grammar names neither files nor
     // buffers, and the browser is left exactly where it was.
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     const files_entry = ed.buffers.active().id;
     try focusRowByName(ed, gpa, "top.txt");
     ed.press("Return", "\r");
@@ -274,13 +274,13 @@ test "e2e/grammar: GATE 2 — Tab inserts where it is bound, does nothing where 
     const gpa = t.allocator;
 
     // (1) In a text buffer Tab still inserts — because the editing grammar
-    // BINDS it to the `insert-tab` command, never because a key became text.
+    // BINDS it to the `edit.insert-tab` command, never because a key became text.
     {
         var app: App = undefined;
         try app.init(gpa);
         defer app.deinit();
         const ed = &app.ed;
-        ed.runStr("open", "note.txt");
+        ed.runStr("file.open", "note.txt");
         ed.press("i", "");
         try t.expect(ed.keymap.lookup(ed.mode(), "Tab") != null);
         ed.press("Tab", "\t");
@@ -298,7 +298,7 @@ test "e2e/grammar: GATE 2 — Tab inserts where it is bound, does nothing where 
         defer app.deinit();
         const ed = &app.ed;
         try authorTree(ed);
-        ed.runStr("open", ".");
+        ed.runStr("file.open", ".");
         try focusRowByName(ed, gpa, "child");
 
         ed.press("Tab", "\t");
@@ -326,7 +326,7 @@ test "e2e/grammar: GATE 2 — Tab inserts where it is bound, does nothing where 
         defer app.deinit();
         const ed = &app.ed;
         try authorTree(ed);
-        ed.runStr("open", ".");
+        ed.runStr("file.open", ".");
         try focusRowByName(ed, gpa, "top.txt"); // a file row: nothing to open
         var before = try rowNames(ed, gpa);
         defer freeNames(gpa, &before);
@@ -355,7 +355,7 @@ test "e2e/grammar: GATE 3 — an unbound printable key in the files view synthes
     const ed = &app.ed;
     try authorTree(ed);
 
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     // `&` is genuinely unbound in the synthetic grammar's one mode — not a
     // binding, not a chord prefix — and that mode declares no commit command.
     try t.expect(ed.keymap.lookup("gramtest", "ampersand") == null);
@@ -389,7 +389,7 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
     const ed = &app.ed;
     try authorTree(ed);
 
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     // A keystroke first, exactly as in production: dispatch publishes the
     // focused view's table, and only THEN does a menu open and which-key ask.
     ed.press("j", "j");
@@ -491,7 +491,7 @@ test "e2e/grammar: GATE 4 — a std-only transfer moves a row's identity, it doe
     const ed = &app.ed;
     try authorTree(ed);
 
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     const listing_entry = ed.buffers.active_id;
 
     // Open the directory in place, so ONE listing holds both ends of the move.
@@ -518,7 +518,7 @@ test "e2e/grammar: GATE 4 — a std-only transfer moves a row's identity, it doe
     // from the captured entry's own identity, so the source ceases to exist
     // without anyone staging its deletion. A paste that had ferried no
     // identity could only have created a new file and left the old one.
-    ed.run("view-apply");
+    ed.run("view.apply");
     ed.press("y", "y");
     try t.expect(h.drainUntilOracle(
         &app.proj,
@@ -536,7 +536,7 @@ test "e2e/grammar: GATE 4 — a std-only transfer moves a row's identity, it doe
     ed.settle(4);
     try t.expectEqual(@as(usize, 0), try countName(ed, gpa, "top.txt"));
     // ...and the directory it was placed in holds it, once.
-    ed.runStr("open", "child");
+    ed.runStr("file.open", "child");
     try t.expectEqual(@as(usize, 1), try countName(ed, gpa, "top.txt"));
 }
 
@@ -642,7 +642,7 @@ test "e2e/grammar: a capture declaration round-trips, and break-out returns the 
         try h.Editor.init(gpa, &ed);
         defer ed.deinit();
         try h.loadGrammar(&ed, case.grammar);
-        try h.loadHeadtest(&ed); // `head-capture`: a presentation owner, across the membrane
+        try h.loadHeadtest(&ed); // `head.capture`: a presentation owner, across the membrane
 
         // No capture consumer exists in-tree (§10.4), so what is wired is the
         // DECLARATION and its pairing: a presentation declares capture on its
@@ -652,7 +652,7 @@ test "e2e/grammar: a capture declaration round-trips, and break-out returns the 
         try ed.buffers.switchTo(gpa, view_id, ed.head, ed.keymap);
         try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
 
-        ed.run("head-capture");
+        ed.run("headtest.capture");
         try t.expectEqual(core.input.Posture.capture, ed.ctx.posture());
         // A capture entry still rests where its grammar answers keys, so the
         // break-out chord can be pressed at all.
@@ -666,13 +666,13 @@ test "e2e/grammar: a capture declaration round-trips, and break-out returns the 
         // (An in-process presentation owner declares through the same door a
         // guest's `weft.declarePosture` funnels into.)
         ed.buffers.active().declarePosture(.text);
-        ed.run("head-capture");
+        ed.run("headtest.capture");
         ed.chord(case.break_out);
         try t.expectEqual(core.input.Posture.text, ed.ctx.posture());
     }
 }
 
-test "e2e/grammar: a focused editable field reports `field`, and rests where structural rests" {
+test "e2e/grammar: a grammar that declares no focus granularity focuses ROWS; an edit it begins reports `field`, and rests where structural rests" {
     const gpa = t.allocator;
     var app: GrammarApp = undefined;
     try app.init(gpa);
@@ -680,17 +680,39 @@ test "e2e/grammar: a focused editable field reports `field`, and rests where str
     const ed = &app.ed;
     try authorTree(ed);
 
-    // Point on a row.s editable NAME is a FIELD: commits belong to it, not to
-    // the listing at large (§11.8). That is a refinement of `structural`, not a
-    // departure from it — the entry still rests where the grammar.s structural
-    // state is, which is what keeps the browser.s own keys live while a name is
-    // being typed.
-    ed.runStr("open", ".");
+    // This grammar declares no `mode.set-structural-focus`, so it gets `row` — the
+    // default that can never show a caret where typing does nothing
+    // (doc/chrome.md §5.2). Focusing a row whose name is a field is focusing
+    // the ROW: `structural`, and no field is being edited.
+    ed.runStr("file.open", ".");
     try focusRowByName(ed, gpa, "top.txt");
-    // Focus is on the semantic name field; no document is involved.
+    try t.expectEqual(core.input.Granularity.row, ed.session.system.semantic.granularityFor(ed.head));
+    try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
+    try t.expect(ed.head.scene_selection.edit == null);
+    try t.expect(offeredHere(ed, "std.editing.begin"));
+
+    // `std.editing.begin` edits the row's primary field: point on the NAME is a
+    // FIELD, commits belong to it (§11.8). A refinement of `structural`, not a
+    // departure — the entry still rests where the grammar's structural state
+    // is, which keeps the browser's own keys live while a name is typed.
+    ed.run("field.edit");
     try t.expectEqual(core.input.Posture.field, ed.ctx.posture());
     try t.expectEqualStrings("gramtest", ed.mode());
     try t.expectEqualStrings("gramtest", ed.buffers.restingModeFor(.field));
+    // Cancelling puts the name back and the focus on the row again.
+    ed.run("field.cancel-edit");
+    try t.expectEqual(core.input.Posture.structural, ed.ctx.posture());
+    const name = try focusedName(ed, gpa);
+    defer gpa.free(name);
+    try t.expectEqualStrings("top.txt", name);
+}
+
+/// Whether anything offers `intention` in the active context.
+fn offeredHere(ed: *h.Editor, intention: []const u8) bool {
+    const plane = ed.ctx.intent orelse return false;
+    const id = plane.catalog.findIntention(intention) orelse return false;
+    const snap = plane.snapshotFor(ed.ctx) orelse return false;
+    return snap.offersFor(id).len > 0;
 }
 
 test "e2e/grammar: an open interaction owns input first, and the grammar sees exactly what it declines" {
@@ -701,7 +723,7 @@ test "e2e/grammar: an open interaction owns input first, and the grammar sees ex
     const ed = &app.ed;
     try authorTree(ed);
 
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     try focusRowByName(ed, gpa, "child");
     ed.press("Tab", "\t");
     try focusRowByName(ed, gpa, "top.txt");
@@ -710,7 +732,7 @@ test "e2e/grammar: an open interaction owns input first, and the grammar sees ex
     ed.press("p", "p");
 
     // Applying the draft asks first: an interaction goes on the head's stack.
-    ed.run("view-apply");
+    ed.run("view.apply");
     try t.expect(ed.head.interactions.active() != null);
 
     // §10.4's standing precedence rule (enforced in `dispatchSpec`, which

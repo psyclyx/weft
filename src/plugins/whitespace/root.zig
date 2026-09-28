@@ -2,8 +2,8 @@
 //! privilege beyond the edit door (perms `{}`). Both commands read a read-only
 //! snapshot through `slice`/`lineAt` and mutate through the gated `edit` door,
 //! authored as this plugin's peer (a view-grade doc refuses in the gate with
-//! zero permission code here). `trim-trailing-line` edits just the trailing run
-//! of the current line; `trim-trailing-buffer` rebuilds the whole (capped)
+//! zero permission code here). `whitespace.trim-line` edits just the trailing run
+//! of the current line; `whitespace.trim-buffer` rebuilds the whole (capped)
 //! document trimmed and replaces it with one edit.
 
 const weft = @import("weft");
@@ -16,8 +16,8 @@ var out: [1 << 16]u8 = undefined;
 
 /// Registration order == the id the host hands `on_command`.
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "trim-trailing-line", .call = trimLine, .arity = weft.Arity.each_extent, .summary = "strip trailing whitespace from this line" },
-    .{ .name = "trim-trailing-buffer", .call = trimBuffer, .arity = .whole, .summary = "strip trailing whitespace from every line" },
+    .{ .name = "whitespace.trim-line", .call = trimLine, .arity = weft.Arity.each_extent, .summary = "Strip trailing whitespace from the current line.", .label = "Trim Line Whitespace", .menu = "Edit/Lines", .group = "whitespace", .order = 1 },
+    .{ .name = "whitespace.trim-buffer", .call = trimBuffer, .arity = .whole, .summary = "Strip trailing whitespace from every line.", .label = "Trim Trailing Whitespace", .menu = "Edit/Lines", .group = "whitespace", .order = 2 },
 };
 
 fn isBlank(b: u8) bool {
@@ -45,7 +45,7 @@ fn trimBuffer() void {
     const len = weft.byteLen();
     const n = @min(len, out.len);
     const src = weft.slice(0, n); // borrows shim scratch; copied into `out` below
-    if (n < len) weft.echo("trim-trailing-buffer: buffer exceeds 64KiB, trimmed the leading portion");
+    if (n < len) weft.echo("whitespace.trim-buffer: buffer exceeds 64KiB, trimmed the leading portion");
 
     var j: usize = 0; // write index into `out`
     var line_start: usize = 0; // start of the current line within `out`

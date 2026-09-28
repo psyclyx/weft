@@ -51,6 +51,14 @@ pub const Intent = enum {
     back,
     insert_before,
     insert_after,
+    /// Begin editing the focused row's primary field: the row is focused,
+    /// not edited (doc/chrome.md §5.2).
+    begin_edit,
+    /// `activate` while an edit is begun: activating what you are editing
+    /// accepts it. It replaces the row's own activation for the edit's life.
+    commit_edit,
+    /// Put a begun edit's text back and end it.
+    cancel_edit,
 
     pub const count = @typeInfo(Intent).@"enum".fields.len;
 };
@@ -67,6 +75,9 @@ pub const Item = struct {
 
 pub const Focus = struct {
     path: semantic.focus.Path,
+    /// An edit of the focused row's field was BEGUN (`scene_edit.begun`: an edit under `row`):
+    /// the edit, not the row, answers activation and cancel.
+    editing: bool = false,
 };
 
 /// One item per intent at most, so callers can size storage exactly.
@@ -94,7 +105,11 @@ pub fn derive(instance: *const view.Instance, focus: Focus, out: *Buffer) []cons
     // An `action` node IS its activation: focused, it offers `activate`
     // through the route that runs the action it names — the same reference
     // a click on it runs. It is disabled exactly when the scene says so.
-    if (focusedAction(instance, focus.path)) |action| {
+    // While an edit is begun, activating means accepting it (`commit_edit`,
+    // below): the row's own activation waits for the edit to end.
+    if (focus.editing) {
+        // Accepted by `commit_edit`, below.
+    } else if (focusedAction(instance, focus.path)) |action| {
         out[count] = .{
             .intent = .activate_action,
             .disabled = if (action.enabled) null else provider_disabled,
@@ -152,6 +167,16 @@ pub fn derive(instance: *const view.Instance, focus: Focus, out: *Buffer) []cons
     count += 1;
     count += pushAdvertised(instance, focus.path, out, count, .insert_before, standard.insert_before);
     count += pushAdvertised(instance, focus.path, out, count, .insert_after, standard.insert_after);
+    if (focus.editing) {
+        out[count] = .{ .intent = .commit_edit };
+        out[count + 1] = .{ .intent = .cancel_edit };
+        count += 2;
+    } else if (focus.path.field == null and instance.primaryField(focus.path) != null) {
+        // A row that holds a field, focused as a row: editing it is a step
+        // away. Its provider's `field.edit` says whether it may be taken now.
+        out[count] = .{ .intent = .begin_edit, .disabled = actionState(instance, focus.path, standard.edit) };
+        count += 1;
+    }
     return out[0..count];
 }
 

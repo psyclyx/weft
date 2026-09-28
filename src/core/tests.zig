@@ -403,6 +403,43 @@ test "editor: one selection is the default, and the cursor/mark API is its view"
     try t.expectEqual(Editor.Ends{ .anchor = 3, .head = 3 }, ed.selectionEnds(0));
 }
 
+test "editor: an inclusive selection covers the characters its anchor and caret are on, either way round" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+    try ed.insertText(gpa, "aé bcd");
+
+    // Started on `é` (two bytes): it is covered at once, the caret on it.
+    ed.placeCursor(1);
+    try ed.setInclusiveMark(gpa);
+    try t.expectEqual(stemma.Range{ .start = 1, .end = 3 }, ed.selectedRange().?);
+    try t.expectEqual(@as(usize, 1), ed.cursorOffset());
+    // Forward onto `c`: through it.
+    ed.placeCursor(5);
+    try t.expectEqual(@as(usize, 5), ed.cursorOffset());
+    try t.expectEqual(stemma.Range{ .start = 1, .end = 6 }, ed.selectedRange().?);
+    // Back past the anchor onto `a`: the anchor's `é` is still covered.
+    ed.moveLeft();
+    ed.moveLeft();
+    ed.moveLeft();
+    ed.moveLeft();
+    try t.expectEqual(@as(usize, 0), ed.cursorOffset());
+    try t.expectEqual(stemma.Range{ .start = 0, .end = 3 }, ed.selectedRange().?);
+    // The ends cross the ABI as the covered range, flagged; setting them
+    // back keeps it inclusive.
+    const ends = ed.selectionEnds(0);
+    try t.expectEqual(Editor.Ends{ .anchor = 3, .head = 0, .inclusive = true }, ends);
+    try ed.setSelections(gpa, &.{.{ .anchor = ends.head, .head = ends.anchor, .inclusive = true }}, 0);
+    try t.expectEqual(@as(usize, 1), ed.cursorOffset()); // on `é`, the swapped end
+    ed.moveRight();
+    try t.expectEqual(stemma.Range{ .start = 0, .end = 4 }, ed.selectedRange().?);
+    // Leaving puts the caret on the character it was on.
+    ed.clearSelection();
+    try t.expectEqual(Editor.Ends{ .anchor = 3, .head = 3 }, ed.selectionEnds(0));
+}
+
 test "editor: typing, backspace and delete land at every caret, in reverse order, as ONE undo unit" {
     const gpa = t.allocator;
     var pool = try task.Pool.init(gpa, .{ .threads = 1 });
@@ -553,14 +590,14 @@ test "editor: insert-text through the edit door types at every selection, and re
     const ed = host.editor();
     try ed.insertText(gpa, "x y");
     try ed.setSelections(gpa, &.{ .{ .anchor = 1, .head = 1 }, .{ .anchor = 3, .head = 3 } }, 0);
-    _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "!" }});
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "!" }});
     try expectEdText(gpa, ed, "x! y!");
-    _ = try core.command.run(&host.commands, &host.ctx, "delete-backward", &.{});
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.delete-before", &.{});
     try expectEdText(gpa, ed, "x y");
 
     // A view grade refuses the whole multi-caret edit; nothing half-lands.
     ed.doc.my_grant = .view;
-    _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "?" }});
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "?" }});
     try expectEdText(gpa, ed, "x y");
 }
 
@@ -688,22 +725,22 @@ test "authority: a view grade refuses edits, forms no ghost, and echoes" {
     const before = host.editor().text().byteLen();
     // The user path (default principal) is refused; the replica is untouched
     // and an honest echo is set — no divergent local ghost.
-    _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "x" }});
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "x" }});
     try t.expectEqual(before, host.editor().text().byteLen());
-    try t.expectEqualStrings("read-only: view access", host.head.echo.items);
+    try t.expectEqualStrings("read-only: view access", host.head.echo.text());
 
     // With edit grade restored, the same command applies.
     host.editor().doc.my_grant = .own;
-    _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "x" }});
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "x" }});
     try t.expectEqual(before + 1, host.editor().text().byteLen());
 
     // A read-only buffer is refused by the same door, and says which refusal
     // it was — the builtin holds no permission check of its own.
-    host.buffers.active().read_only = true;
-    host.head.echo.clearRetainingCapacity();
-    _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "x" }});
+    host.buffers.active().read_only = core.Buffers.produced;
+    try host.head.echo.say(gpa, "");
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "x" }});
     try t.expectEqual(before + 1, host.editor().text().byteLen());
-    try t.expectEqualStrings("read-only buffer", host.head.echo.items);
+    try t.expectEqualStrings("read-only buffer", host.head.echo.text());
 }
 
 test "entries: a view carries no editor — text ops refuse politely, undo is a no-op" {
@@ -720,26 +757,26 @@ test "entries: a view carries no editor — text ops refuse politely, undo is a 
 
     // Typing, deleting, and moving the caret are echoed refusals, not errors —
     // the same door the grade gate and read-only flag report through.
-    for ([_][]const u8{ "delete-backward", "cursor-left" }) |cmd| {
-        host.head.echo.clearRetainingCapacity();
+    for ([_][]const u8{ "edit.delete-before", "cursor.left" }) |cmd| {
+        try host.head.echo.say(gpa, "");
         _ = try core.command.run(&host.commands, &host.ctx, cmd, &.{});
-        try t.expectEqualStrings("no text in this view", host.head.echo.items);
+        try t.expectEqualStrings("no text in this view", host.head.echo.text());
     }
-    host.head.echo.clearRetainingCapacity();
-    _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "x" }});
-    try t.expectEqualStrings("no text in this view", host.head.echo.items);
+    try host.head.echo.say(gpa, "");
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "x" }});
+    try t.expectEqualStrings("no text in this view", host.head.echo.text());
 
     // A mode transition can seal text undo without inventing a document for
     // an object entry or reporting an irrelevant refusal.
-    host.head.echo.clearRetainingCapacity();
-    _ = try core.command.run(&host.commands, &host.ctx, "undo-barrier", &.{});
-    try t.expectEqualStrings("", host.head.echo.items);
+    try host.head.echo.say(gpa, "");
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.seal-undo", &.{});
+    try t.expectEqualStrings("", host.head.echo.text());
 
     // Undo reports "nothing undone" instead of reaching a stand-in history.
-    host.head.echo.clearRetainingCapacity();
-    const undone = try core.command.run(&host.commands, &host.ctx, "undo", &.{});
+    try host.head.echo.say(gpa, "");
+    const undone = try core.command.run(&host.commands, &host.ctx, "edit.undo", &.{});
     try t.expect(undone.boolean == false);
-    try t.expectEqualStrings("no text in this view", host.head.echo.items);
+    try t.expectEqualStrings("no text in this view", host.head.echo.text());
 }
 
 // ── Syntax (milestone 7) ────────────────────────────────────────────
@@ -1356,39 +1393,39 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     const scratch_id = host.buffers.active().id;
 
     // Create+focus a second buffer; give it its own mode.
-    _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "*tool*" }});
+    _ = try run(&host.commands, &host.ctx, "buffer.create", &.{.{ .string = "*tool*" }});
     try t.expectEqual(@as(usize, 2), host.buffers.count());
     try t.expectEqualStrings("*tool*", host.buffers.active().name);
     try host.head.setModeRaw(gpa, "git");
 
     // Switching away saves "git" on the tool buffer and restores the
     // scratch buffer's "normal"; switching back restores "git".
-    _ = try run(&host.commands, &host.ctx, "buffer-switch", &.{.{ .integer = @intCast(scratch_id) }});
+    _ = try run(&host.commands, &host.ctx, "buffer.switch", &.{.{ .integer = @intCast(scratch_id) }});
     try t.expectEqualStrings("normal", host.head.currentMode());
-    _ = try run(&host.commands, &host.ctx, "buffer-next", &.{});
+    _ = try run(&host.commands, &host.ctx, "buffer.next", &.{});
     try t.expectEqualStrings("*tool*", host.buffers.active().name);
     try t.expectEqualStrings("git", host.head.currentMode());
 
     // Read-only swallows text commands but not others.
-    _ = try run(&host.commands, &host.ctx, "buffer-read-only", &.{.{ .boolean = true }});
-    _ = try run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "nope" }});
+    _ = try run(&host.commands, &host.ctx, "buffer.set-read-only", &.{.{ .boolean = true }});
+    _ = try run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "nope" }});
     try t.expectEqual(@as(usize, 0), host.editor().text().byteLen());
-    _ = try run(&host.commands, &host.ctx, "buffer-read-only", &.{.{ .boolean = false }});
-    _ = try run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "yes" }});
+    _ = try run(&host.commands, &host.ctx, "buffer.set-read-only", &.{.{ .boolean = false }});
+    _ = try run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "yes" }});
     try t.expectEqual(@as(usize, 3), host.editor().text().byteLen());
 
     // Dirty close refuses; a clean one proceeds and refocuses.
-    const res = try run(&host.commands, &host.ctx, "buffer-close", &.{});
+    const res = try run(&host.commands, &host.ctx, "buffer.close-unmodified", &.{});
     try t.expect(res == .string); // "dirty"
     // The explicit discard path closes even a dirty tool draft.
-    _ = try run(&host.commands, &host.ctx, "buffer-close-force", &.{});
+    _ = try run(&host.commands, &host.ctx, "buffer.close-force", &.{});
     try t.expectEqual(@as(usize, 1), host.buffers.count());
     try t.expectEqual(scratch_id, host.buffers.active().id);
     // A fresh scratch can still close normally. Closing the last buffer
     // replaces it with another scratch rather than leaving no focus.
-    _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "*tool*" }});
-    _ = try run(&host.commands, &host.ctx, "buffer-switch", &.{.{ .integer = @intCast(scratch_id) }});
-    _ = try run(&host.commands, &host.ctx, "buffer-close", &.{});
+    _ = try run(&host.commands, &host.ctx, "buffer.create", &.{.{ .string = "*tool*" }});
+    _ = try run(&host.commands, &host.ctx, "buffer.switch", &.{.{ .integer = @intCast(scratch_id) }});
+    _ = try run(&host.commands, &host.ctx, "buffer.close-unmodified", &.{});
     try t.expectEqual(@as(usize, 1), host.buffers.count());
     try t.expectEqualStrings("*tool*", host.buffers.active().name);
 
@@ -1403,10 +1440,10 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fs.path.resolve(gpa, &.{ @import("file.zig").processDirectory(&cwd_buf).?, relative });
     defer gpa.free(path);
-    const id1 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
-    const id2 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
+    const id1 = try run(&host.commands, &host.ctx, "file.open", &.{.{ .string = path }});
+    const id2 = try run(&host.commands, &host.ctx, "file.open", &.{.{ .string = path }});
     try t.expectEqual(id1.integer, id2.integer);
-    const id3 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = relative }});
+    const id3 = try run(&host.commands, &host.ctx, "file.open", &.{.{ .string = relative }});
     try t.expectEqual(id1.integer, id3.integer);
     try t.expectEqualStrings(path, host.buffers.active().textEditor().?.backingPath().?);
     // A document binds through the source layer its grammar DECLARED; with no
@@ -1429,18 +1466,18 @@ test "buffers: a fresh buffer opens in default_mode — a tool mode never leaks"
     try host.buffers.setDefaultMode(gpa, "normal");
 
     // Enter a tool buffer and put it in its own tool mode.
-    _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "*tool*" }});
+    _ = try run(&host.commands, &host.ctx, "buffer.create", &.{.{ .string = "*tool*" }});
     try host.head.setModeRaw(gpa, "tool");
     try t.expectEqualStrings("tool", host.head.currentMode());
 
     // Open a file FROM the tool buffer — a fresh buffer. Structurally it must
     // start in default_mode, never inherit "tool" (the bug this makes
     // impossible to express: a tool mode sticking after you open a file).
-    _ = try run(&host.commands, &host.ctx, "open", &.{.{ .string = "/tmp/weft-mode-test.zig" }});
+    _ = try run(&host.commands, &host.ctx, "file.open", &.{.{ .string = "/tmp/weft-mode-test.zig" }});
     try t.expectEqualStrings("normal", host.head.currentMode());
 
     // Going back to the tool buffer still restores its mode (per-buffer intact).
-    _ = try run(&host.commands, &host.ctx, "buffer-switch", &.{.{ .integer = 1 }});
+    _ = try run(&host.commands, &host.ctx, "buffer.switch", &.{.{ .integer = 1 }});
     try t.expectEqualStrings("tool", host.head.currentMode());
 }
 
@@ -1529,7 +1566,7 @@ test "completion UI: source-driven fold into the pick; accept replaces the prefi
     defer host.deinit(gpa);
 
     var comp: core.complete_ui.CompletionUi = .empty;
-    _ = try host.commands.bind(gpa, "complete", comp.commandSpec());
+    _ = try host.commands.bind(gpa, "complete.show", comp.commandSpec());
     try host.caps.register(.{
         .capability = "edit/completion",
         .id = "test.instant",
@@ -1539,14 +1576,14 @@ test "completion UI: source-driven fold into the pick; accept replaces the prefi
 
     // A word prefix at the cursor; the instant provider offers alpha/beta.
     try host.editor().insertText(gpa, "al");
-    _ = try core.command.run(&host.commands, &host.ctx, "complete", &.{});
+    _ = try core.command.run(&host.commands, &host.ctx, "complete.show", &.{});
     try t.expect(host.head.pick.active);
     // Instant-tier results were folded during fire (source path); the
     // pick already carries them, no bespoke tick needed.
     try t.expect(host.head.pick.items.items.len >= 2);
 
-    _ = try core.command.run(&host.commands, &host.ctx, "pick-input", &.{.{ .string = "alp" }});
-    _ = try core.command.run(&host.commands, &host.ctx, "pick-accept", &.{});
+    _ = try core.command.run(&host.commands, &host.ctx, "pick.input", &.{.{ .string = "alp" }});
+    _ = try core.command.run(&host.commands, &host.ctx, "pick.accept", &.{});
     try t.expect(!host.head.pick.active);
     const text = try host.editor().text().toOwnedSlice(gpa);
     defer gpa.free(text);
@@ -1560,7 +1597,7 @@ test "completion UI: switching buffers dismisses the originating session" {
     defer host.deinit(gpa);
 
     var comp: core.complete_ui.CompletionUi = .empty;
-    _ = try host.commands.bind(gpa, "complete", comp.commandSpec());
+    _ = try host.commands.bind(gpa, "complete.show", comp.commandSpec());
     try host.caps.register(.{
         .capability = "edit/completion",
         .id = "test.instant",
@@ -1570,7 +1607,7 @@ test "completion UI: switching buffers dismisses the originating session" {
 
     try host.head.setModeRaw(gpa, "normal");
     try host.editor().insertText(gpa, "al");
-    _ = try core.command.run(&host.commands, &host.ctx, "complete", &.{});
+    _ = try core.command.run(&host.commands, &host.ctx, "complete.show", &.{});
     try t.expect(host.head.pick.active);
     const origin = host.buffers.active().ref();
 
@@ -1904,7 +1941,7 @@ test "syntax: an outline over the caret's byte lists exactly what encloses it, t
 }
 
 test "syntax: re-registering a grammar replaces it instead of piling up" {
-    // `config-reload` re-runs every `grammar-add`. Appending would grow the
+    // `app.reload-config` re-runs every `syntax.add-grammar`. Appending would grow the
     // registry by the whole language set on each reload — invisible, because
     // `forPath` is last-wins, until the list is enormous.
     const gpa = t.allocator;

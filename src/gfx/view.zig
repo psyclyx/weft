@@ -25,6 +25,11 @@ pub const CaretPlace = hud_mod.CaretPlace;
 pub const MdInline = hud_mod.MdInline;
 pub const Tab = hud_mod.Tab;
 pub const ChromeHit = hud_mod.ChromeHit;
+pub const Hover = hud_mod.Hover;
+pub const TabPart = hud_mod.TabPart;
+
+/// How chrome looks: roles, states and the three styles (doc/chrome.md §3).
+pub const chrome = @import("view/chrome.zig");
 
 /// The view's color palette (data + role→color lookups), from `view/Theme.zig`.
 pub const Theme = @import("view/Theme.zig");
@@ -35,6 +40,9 @@ pub const Theme = @import("view/Theme.zig");
 /// `popup.layoutCaretSurface`/`popup.layoutDockSurface` directly, over a
 /// live `Pick` or plain text, without hand-building a `core.surface.Surface`.
 pub const popup = @import("view/popup.zig");
+/// The menu widget: every menu's look — the menubar's and the context menu's
+/// (doc/chrome.md §2).
+pub const menu = @import("view/menu.zig");
 pub const semantic = @import("view/semantic.zig");
 pub const semantic_data = @import("view/semantic_data.zig");
 
@@ -52,11 +60,13 @@ test {
     _ = View;
     _ = @import("view/Theme.zig");
     _ = @import("view/hud.zig");
+    _ = chrome;
     _ = @import("view/statusline.zig");
     _ = @import("view/popup.zig");
     _ = @import("view/decoration.zig");
     _ = @import("view/linelayout.zig");
     _ = @import("view/render.zig");
     _ = semantic;
+    _ = menu;
     _ = ui_mesh;
 }

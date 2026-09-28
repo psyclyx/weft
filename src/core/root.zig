@@ -82,6 +82,9 @@ pub const gutter = @import("gutter.zig");
 /// The status line's plugin exchange: the `ui/statusline-seg` slot's name
 /// and schema.
 pub const status_segment = @import("status_segment.zig");
+/// A context's status as a projection (`weft://here/status/primary`): the
+/// kind's producer, and which context an entry presents.
+pub const status_projection = @import("status_projection.zig");
 /// The transient highlight over what an operation just touched: a set of
 /// ranges anchored on its document.
 pub const flash = @import("flash.zig");
@@ -94,10 +97,23 @@ pub const designation = @import("designation.zig");
 pub const Clipboard = @import("clipboard.zig");
 pub const container = @import("container.zig");
 pub const catalog = @import("catalog.zig");
+/// The standard intention vocabulary (`std.<domain>.<verb>`).
+pub const intentions = @import("intentions.zig");
 /// The one selection model: extents of text or rows, and how a command maps
 /// over them (doc/model.md §2.6).
 pub const selection = @import("selection.zig");
+/// Focus and editing in structural views, and type-ahead over their rows
+/// (doc/chrome.md §5.2).
+pub const scene_edit = @import("scene_edit.zig");
+pub const type_ahead = @import("type_ahead.zig");
 pub const intent = @import("intent.zig");
+/// What a command, action or intention is called here (doc/chrome.md §1.2).
+pub const presentations = @import("presentations.zig");
+/// "Which key runs this, here" (doc/chrome.md §1.3).
+pub const keys_for = @import("keys_for.zig");
+/// Whether a name would run in a chosen context, why not, and by which keys
+/// (doc/chrome.md §2.1) — what a menu row shows.
+pub const standing = @import("standing.zig");
 pub const manifest = @import("manifest.zig");
 pub const ctx = @import("ctx.zig");
 pub const System = @import("System.zig");
@@ -117,6 +133,7 @@ pub const grants = @import("grants.zig");
 pub const session = @import("session.zig");
 pub const hub = @import("hub.zig");
 pub const place = @import("place.zig");
+pub const locus = @import("locus.zig");
 /// The membrane import tables, exported so a gate can compare the two
 /// surfaces as DATA rather than by scraping their source text.
 pub const membrane = struct {
@@ -133,6 +150,8 @@ pub const peer_fs = @import("peer_fs.zig");
 pub const Pick = pick.Pick;
 pub const file = @import("file.zig");
 pub const ShellFs = @import("ShellFs.zig");
+pub const ShellProvider = @import("ShellProvider.zig");
+pub const backing = @import("backing.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
@@ -141,6 +160,7 @@ test {
     // Core is its own module now, and a module owns its tests.
     _ = @import("target_open.zig");
     _ = @import("TextSnapshot.zig");
+    _ = @import("DocStore.zig");
     _ = @import("intentions.zig");
     _ = @import("tests.zig");
     _ = @import("markdown.zig");

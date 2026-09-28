@@ -4,7 +4,7 @@
 //! text) through a CRDT-anchored source range. Presentation match offsets are
 //! used only after the anchored row is verified unchanged, so edits above it
 //! move the target while edits to/deletion of the target make it stale rather
-//! than silently redirecting the jump. `consult-line` is the first source;
+//! than silently redirecting the jump. `consult.line` is the first source;
 //! grep/imenu/mark join as their inputs (proc, symbols) land.
 
 const std = @import("std");
@@ -16,7 +16,7 @@ const sym_pick = 1;
 const Target = struct {
     range: u32,
     digest: [32]u8,
-    /// `consult-line` anchors the terminating newline too, when present. It
+    /// `consult.line` anchors the terminating newline too, when present. It
     /// gives an otherwise-empty row a real identity and lets deletion collapse
     /// to a state we can reject. Imenu targets leave this false.
     has_terminator: bool = false,
@@ -52,13 +52,13 @@ fn digestRange(start: usize, end: usize) ?[32]u8 {
 /// replacement. `pickEnd` may otherwise cancel the old picker only after this
 /// plugin has overwritten its target table.
 fn beginTargets() void {
-    weft.run("pick-cancel");
+    weft.run("pick.cancel");
     releaseTargets();
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "consult-line", .arity = .one, .call = consultLine, .summary = "jump to a line by searching this buffer" },
-    .{ .name = "consult-imenu", .arity = .one, .call = consultImenu, .summary = "jump to a definition in this buffer" },
+    .{ .name = "consult.line", .arity = .one, .call = consultLine, .summary = "Jump to a line by searching this buffer.", .label = "Go to Line by Search", .menu = "Go", .group = "line", .order = 2, .prompts = true },
+    .{ .name = "consult.imenu", .arity = .one, .call = consultImenu, .summary = "Jump to a definition in this buffer.", .label = "Go to Symbol in Buffer", .menu = "Go", .group = "symbol", .order = 6, .prompts = true },
 };
 
 fn onPickAccept(pick_id: u32) void {

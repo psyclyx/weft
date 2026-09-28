@@ -19,7 +19,7 @@
 // owning its own buffer: `*debug*`, `*debug:2*`, … The buffer name IS the
 // session's identity (the repl/console/llm and git-repo idiom, weft.zig's
 // `Instances`). A command routes to the session whose buffer is FOCUSED, else
-// the most recent, so `debug-stop` stops the one you are looking at and leaves
+// the most recent, so `dap.stop` stops the one you are looking at and leaves
 // the other running. `program`/`source`/`line` are snapshotted from config at
 // START, never re-read: a session's target cannot change under it.
 
@@ -73,6 +73,13 @@ function retire(s) {
   const i = sessions.indexOf(s);
   if (i >= 0) sessions.splice(i, 1);
   if (recent === s) recent = sessions.length ? sessions[sessions.length - 1] : null;
+  published();
+}
+
+// `dap.session` names a live session while there is one, so a provider can
+// be offered only while there is something to step (ide.js's F10).
+function published() {
+  weft.contextSet("dap.session", sessions.length ? sessions[sessions.length - 1].buf : "", "global");
 }
 
 // Send a DAP request with Content-Length framing (bytes; ASCII bodies here).
@@ -154,7 +161,7 @@ weft.onOutput((h) => {
 });
 
 // ── Commands ──────────────────────────────────────────────────────────
-weft.command("debug-start", () => {
+weft.command("dap.start", () => {
   const cmd = weft.config("cmd");
   if (!cmd) {
     weft.echo('debug: set an adapter — weft.set("dap","cmd","…")');
@@ -177,6 +184,7 @@ weft.command("debug-start", () => {
     line: parseInt(weft.config("line") || "1", 10),
   };
   sessions.push(s);
+  published();
   recent = s;
   log(s, "debug: launching " + cmd + " → " + s.program + "\n", ST.muted);
   setStatus(s, "starting");
@@ -190,9 +198,18 @@ weft.command("debug-start", () => {
     supportsRunInTerminalRequest: false,
   });
   weft.echo("debug: started " + s.buf);
-}, "start a debug session", undefined, "whole");
+}, {
+  summary: "Start a debug session.",
+  arity: "whole",
+  label: "Start Debugging",
+  menu: "Run",
+  group: "debug",
+  order: 1,
+  icon: "bug",
+});
 
-function stepCmd(name, command, summary) {
+// `options` is the command's presentation; the arity is always "whole".
+function stepCmd(name, command, options) {
   weft.command(name, () => {
     const s = current();
     if (!s) {
@@ -200,15 +217,15 @@ function stepCmd(name, command, summary) {
       return;
     }
     send(s, command, { threadId: s.thread });
-  }, summary, undefined, "whole");
+  }, { ...options, arity: "whole", menu: "Run", group: "step" });
 }
-stepCmd("debug-continue", "continue", "let the program run on");
-stepCmd("debug-step-over", "next", "step over this line");
-stepCmd("debug-step-into", "stepIn", "step into the call");
-stepCmd("debug-step-out", "stepOut", "run to the end of this frame");
+stepCmd("dap.continue", "continue", { summary: "Let the program run on.", label: "Continue", order: 1, icon: "play" });
+stepCmd("dap.step-over", "next", { summary: "Step over this line.", label: "Step Over", order: 2, icon: "step-forward" });
+stepCmd("dap.step-into", "stepIn", { summary: "Step into the call.", label: "Step Into", order: 3, icon: "arrow-down-to-line" });
+stepCmd("dap.step-out", "stepOut", { summary: "Run to the end of this frame.", label: "Step Out", order: 4, icon: "arrow-up-from-line" });
 
 // Stop the FOCUSED session only — a second debugger keeps running.
-weft.command("debug-stop", () => {
+weft.command("dap.stop", () => {
   const s = current();
   if (!s) {
     weft.echo("debug: no session");
@@ -220,4 +237,12 @@ weft.command("debug-stop", () => {
   send(s, "disconnect", { terminateDebuggee: true });
   weft.status("○ " + s.buf + " · stopping");
   weft.echo("debug: stopping " + s.buf);
-}, "stop the focused debug session", undefined, "whole");
+}, {
+  summary: "Stop the focused debug session.",
+  arity: "whole",
+  label: "Stop Debugging",
+  menu: "Run",
+  group: "debug",
+  order: 2,
+  icon: "stop",
+});

@@ -12,7 +12,7 @@
 //! Here it is one declaration:
 //!
 //! ```zig
-//! const push = weft.transient("git-push", .{
+//! const push = weft.transient("git.push", .{
 //!     .title = "Push",
 //!     .switches = &.{
 //!         .{ .key = "f", .flag = "--force-with-lease" },
@@ -32,7 +32,7 @@
 //! plugin can have a different one without asking core's permission.
 //!
 //! The toggles are ORDINARY COMMANDS with readable names
-//! (`git-push-toggle-force-with-lease`), which means the palette can reach
+//! (`git.push-toggle-force-with-lease`), which means the palette can reach
 //! them and a keymap can bind them outside the menu. That falls out of not
 //! inventing a hidden-command concept to avoid it.
 
@@ -80,7 +80,19 @@ pub const Action = struct {
 };
 
 pub const Spec = struct {
+    /// What the menu is called, and the label its open command shows (`Push`,
+    /// read as `Push…`: opening it asks what to do).
     title: []const u8,
+    /// The open command's one-sentence summary; "Open the <title> menu." when
+    /// empty.
+    summary: []const u8 = "",
+    /// Where the open command sits in the menubar, its icon, its position
+    /// (doc/chrome.md §1.2). The generated switches, actions and cancel are
+    /// the menu's machinery and are never listed.
+    menu: []const u8 = "",
+    group: []const u8 = "",
+    order: ?i32 = null,
+    icon: []const u8 = "",
     switches: []const Switch = &.{},
     actions: []const Action = &.{},
     /// Keys that leave. `Escape` and `C-g` unless a plugin says otherwise.
@@ -89,8 +101,9 @@ pub const Spec = struct {
 
 /// Generate the commands and the install step for one transient.
 ///
-/// `name` is the OPEN COMMAND and the prefix every other generated name is
-/// built from; the keymap MODE is `name ++ "-menu"`. The two must differ, and
+/// `name` is the OPEN COMMAND, in the command id grammar (`git.push`), and the
+/// prefix every other generated name is built from; the keymap MODE is its dots
+/// as dashes plus `-menu` (`git-push-menu`). The two must differ, and
 /// not for tidiness: dispatch treats a key bound to a declared menu mode's NAME
 /// as a menu open (`dispatchSpec`'s `.run` case), so a mode sharing its name
 /// with a command shadows that command — the menu would open without the
@@ -134,7 +147,7 @@ pub fn transient(comptime name: []const u8, comptime spec: Spec) type {
 
         /// The keymap mode this menu IS. See `transient`'s doc for why it is
         /// not `name`.
-        pub const mode = name ++ "-menu";
+        pub const mode = modeOf(name) ++ "-menu";
         pub const open_command = name;
         pub const cancel_command = name ++ "-cancel";
 
@@ -146,7 +159,7 @@ pub fn transient(comptime name: []const u8, comptime spec: Spec) type {
 
         /// Close the overlay and go back to whatever the ENTRY rests in —
         /// never a mode name written here. A transient does not know what it
-        /// was opened over (`git-push` is reachable from the status projection
+        /// was opened over (`git.push` is reachable from the status projection
         /// and from an ordinary file), so any hardcoded return is the
         /// mode-leak: git's `gitMenuCancel` said `setMode("git")`, which
         /// stranded you in git's keymap if you had opened the menu anywhere
@@ -196,15 +209,27 @@ pub fn transient(comptime name: []const u8, comptime spec: Spec) type {
             var out: []const Entry = &.{
                 // Opening, leaving and toggling touch the menu, never the
                 // selection.
-                .{ .name = open_command, .call = openFn, .summary = spec.title, .arity = .whole },
-                .{ .name = cancel_command, .call = cancelFn, .arity = .whole },
+                .{
+                    .name = open_command,
+                    .call = openFn,
+                    .summary = if (spec.summary.len > 0) spec.summary else "Open the " ++ spec.title ++ " menu.",
+                    .arity = .whole,
+                    .label = spec.title,
+                    .prompts = true,
+                    .menu = spec.menu,
+                    .group = spec.group,
+                    .order = spec.order,
+                    .icon = spec.icon,
+                },
+                .{ .name = cancel_command, .call = cancelFn, .arity = .whole, .summary = "Close the " ++ spec.title ++ " menu.", .internal = true },
             };
             for (spec.switches, 0..) |s, i| {
                 out = out ++ [_]Entry{.{
                     .name = toggleName(s),
                     .call = toggleFn(i),
-                    .summary = "toggle " ++ s.flag ++ " for " ++ spec.title,
+                    .summary = "Toggle " ++ s.flag ++ " in the " ++ spec.title ++ " menu.",
                     .arity = .whole,
+                    .internal = true,
                 }};
             }
             for (spec.actions, 0..) |a, i| {
@@ -217,9 +242,10 @@ pub fn transient(comptime name: []const u8, comptime spec: Spec) type {
                 out = out ++ [_]Entry{.{
                     .name = actionName(a),
                     .call = actionFn(i),
-                    .summary = a.label,
+                    .summary = sentence(spec.title ++ ": " ++ a.label),
                     // A wrapper around a command only runs it: that one maps.
                     .arity = a.arity orelse .whole,
+                    .internal = true,
                 }};
             }
             break :blk out;
@@ -316,14 +342,26 @@ pub fn transient(comptime name: []const u8, comptime spec: Spec) type {
             return a.run != null or sticky;
         }
 
-        /// Does `label` just repeat the last dash-segment of the menu's name?
+        /// Does `label` just repeat the last word of the menu's name?
         fn restatesName(comptime label: []const u8) bool {
             comptime {
-                const cut = std.mem.lastIndexOfScalar(u8, name, '-') orelse return std.mem.eql(u8, name, label);
+                const cut = std.mem.lastIndexOfAny(u8, name, "-.") orelse return std.mem.eql(u8, name, label);
                 return std.mem.eql(u8, name[cut + 1 ..], label);
             }
         }
     };
+}
+
+/// `git.push` → `git.push`: a menu's mode is named for its open command.
+fn modeOf(comptime name: []const u8) []const u8 {
+    comptime {
+        var out: [name.len]u8 = name[0..name.len].*;
+        for (&out) |*c| if (c.* == '.') {
+            c.* = '-';
+        };
+        const frozen = out;
+        return &frozen;
+    }
 }
 
 /// `--force-with-lease` → `force-with-lease`, so a generated command name reads
@@ -332,6 +370,12 @@ fn stripDashes(comptime flag: []const u8) []const u8 {
     comptime var i: usize = 0;
     inline while (i < flag.len and flag[i] == '-') i += 1;
     return flag[i..];
+}
+
+/// `"Push: push elsewhere"` → `"Push: push elsewhere."` — a label read as the
+/// one-sentence summary a generated command carries.
+fn sentence(comptime text: []const u8) []const u8 {
+    return text ++ ".";
 }
 
 /// `"push elsewhere"` → `"push-elsewhere"`. Labels are prose; command names are

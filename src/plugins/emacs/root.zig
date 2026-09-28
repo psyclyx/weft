@@ -8,14 +8,12 @@
 //! `SPC f f` uses), not modes: `C-x` holds pending, which-key shows its
 //! completions, `C-x C-f` completes. The editor owns only intra-buffer
 //! motion/kill/yank here; the C-x/C-c tree that reaches other plugins
-//! (find-file, git, files) is the loading config's to bind — none of the
+//! (files.find, git, files) is the loading config's to bind — none of the
 //! configs shipped in `config/` loads this plugin today.
 //! Delete this plugin and weft is still modeless — `default` is the floor.
 
 const std = @import("std");
 const weft = @import("weft");
-
-const file_pick = 0;
 
 // ── Intra-buffer motion (drives core cursor + the `motions` plugin by name) ──
 
@@ -71,7 +69,7 @@ fn copyRegion() void {
     const s = weft.selection() orelse return;
     weft.yankRange(s.start, s.end, false);
     weft.flash(s.start, s.end); // confirm what was copied
-    weft.run("clear-selection"); // emacs deactivates the mark after M-w
+    weft.run("selection.clear"); // emacs deactivates the mark after M-w
 }
 
 /// C-y: yank (paste) the register at point, re-stamping any ferried id-spans so
@@ -86,49 +84,26 @@ fn yank() void {
     weft.jump(cur + n);
 }
 
-// ── find-file (like vim's: this editor owns the file picker) ──
-fn findFile() void {
-    weft.pickCategory("file");
-    weft.openFilePick("open", file_pick);
-}
-fn openChosen(choice: []const u8) void {
-    if (choice.len == 0) return;
-    weft.openTyped(choice);
-}
-
 // ── Command table (registration order == on_command id) ──
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "find-file", .call = findFile, .arity = .whole },
-    .{ .name = "beginning-of-line", .arity = weft.Arity.each_extent, .call = beginningOfLine },
-    .{ .name = "end-of-line", .arity = weft.Arity.each_extent, .call = endOfLine },
-    .{ .name = "beginning-of-buffer", .arity = weft.Arity.each_extent, .call = beginningOfBuffer },
-    .{ .name = "end-of-buffer", .arity = weft.Arity.each_extent, .call = endOfBuffer },
-    .{ .name = "forward-word", .arity = weft.Arity.each_extent, .call = moveByMotion("motion.word-fwd") },
-    .{ .name = "backward-word", .arity = weft.Arity.each_extent, .call = moveByMotion("motion.word-back") },
-    .{ .name = "kill-line", .arity = weft.Arity.each_extent, .call = killLine },
-    .{ .name = "kill-region", .arity = weft.Arity.each_extent, .call = killRegion },
-    .{ .name = "copy-region", .arity = weft.Arity.each_extent, .call = copyRegion },
-    .{ .name = "yank", .arity = weft.Arity.each_extent, .call = yank },
+    .{ .name = "emacs.line-start", .arity = weft.Arity.each_extent, .call = beginningOfLine, .summary = "Move to the beginning of the line.", .label = "Beginning of Line" },
+    .{ .name = "emacs.line-end", .arity = weft.Arity.each_extent, .call = endOfLine, .summary = "Move to the end of the line.", .label = "End of Line" },
+    .{ .name = "emacs.doc-start", .arity = weft.Arity.each_extent, .call = beginningOfBuffer, .summary = "Move to the beginning of the buffer.", .label = "Beginning of Buffer" },
+    .{ .name = "emacs.doc-end", .arity = weft.Arity.each_extent, .call = endOfBuffer, .summary = "Move to the end of the buffer.", .label = "End of Buffer" },
+    .{ .name = "emacs.word-next", .arity = weft.Arity.each_extent, .call = moveByMotion("motions.word-next"), .summary = "Move forward a word.", .label = "Forward Word" },
+    .{ .name = "emacs.word-prev", .arity = weft.Arity.each_extent, .call = moveByMotion("motions.word-prev"), .summary = "Move backward a word.", .label = "Backward Word" },
+    .{ .name = "emacs.kill-line", .arity = weft.Arity.each_extent, .call = killLine, .summary = "Kill from the cursor to the end of the line.", .label = "Kill Line" },
+    .{ .name = "emacs.kill-region", .arity = weft.Arity.each_extent, .call = killRegion, .summary = "Kill the region between the mark and the cursor.", .label = "Kill Region" },
+    .{ .name = "emacs.copy-region", .arity = weft.Arity.each_extent, .call = copyRegion, .summary = "Copy the region between the mark and the cursor without deleting it.", .label = "Copy Region" },
+    .{ .name = "emacs.yank", .arity = weft.Arity.each_extent, .call = yank, .summary = "Paste the most recently killed text at the cursor.", .label = "Yank" },
 };
-
-fn onPickAccept(pick_id: u32) void {
-    if (pick_id != file_pick) return;
-    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
-    defer outcome.deinit(weft.allocator);
-    const path = switch (outcome) {
-        .candidate => |candidate| candidate.text,
-        .input => |input| input,
-        .cancelled => return,
-    };
-    openChosen(path);
-}
 
 fn initExtra() void {
     // The one resting mode: `emacs` inherits the `default` editing floor's
     // BINDINGS (arrows/Backspace/C-s) and layers the emacs chords over it, and
     // declares that it commits typed text — a declaration, never inherited.
     weft.setFallback("emacs", "default");
-    weft.textInput("emacs", "insert-text");
+    weft.textInput("emacs", "edit.insert-text");
 
     // §10.4: a MODELESS grammar's resting mode commits text, so "the entry
     // takes no text" cannot be a state emacs is already in — it needs a
@@ -144,15 +119,17 @@ fn initExtra() void {
     weft.bindingVariant(.source, "emacs", "emacs-source");
     weft.restingPosture(.text, "emacs");
     weft.restingPosture(.structural, "emacs-structural");
+    // Editable listings: focusing a row edits its name (doc/chrome.md §5.2).
+    weft.runStr2("mode.set-structural-focus", "emacs", "text");
     // The break-out capture can never take away — retained in both resting
     // states (§10.4).
     for ([_][]const u8{ "emacs", "emacs-structural" }) |m|
         weft.bindKeys(m, "C-c C-backslash", &.{"std.input.break-out"});
 
     // Intra-buffer keys. Movement, kill/yank — the everyday editing chords. The
-    // C-x/C-c prefix TREE (find-file, save, buffers, windows, git, files) is
+    // C-x/C-c prefix TREE (files.find, save, buffers, windows, git, files) is
     // the loading config's data since it reaches other plugins; these are the
-    // editor's own. C-space (set-mark), C-g (keyboard-quit → clear-selection),
+    // editor's own. C-space (set-mark), C-g (keyboard-quit → selection.clear),
     // C-s (save), Backspace, and the arrows come from the `default` fallback —
     // so std.persistence.save (emacs's own convention is C-x C-s) and Return's
     // std.editing.insert-line-break arm both already resolve there; this
@@ -166,15 +143,15 @@ fn initExtra() void {
     // std.hierarchy.step-out is skipped for the same reason: emacs spells it
     // `^`, a printable this editor must keep as text.
     const binds = [_][2][]const u8{
-        .{ "C-f", "cursor-right" },        .{ "C-b", "cursor-left" },
-        .{ "C-n", "cursor-down" },         .{ "C-p", "cursor-up" },
-        .{ "C-a", "beginning-of-line" },   .{ "C-e", "end-of-line" },
-        .{ "M-f", "forward-word" },        .{ "M-b", "backward-word" },
-        .{ "M-<", "beginning-of-buffer" }, .{ "M->", "end-of-buffer" },
-        .{ "C-v", "scroll-page-down" },    .{ "M-v", "scroll-page-up" },
-        .{ "C-d", "delete-forward" },      .{ "C-k", "kill-line" },
+        .{ "C-f", "cursor.right" },        .{ "C-b", "cursor.left" },
+        .{ "C-n", "cursor.down" },         .{ "C-p", "cursor.up" },
+        .{ "C-a", "emacs.line-start" },    .{ "C-e", "emacs.line-end" },
+        .{ "M-f", "emacs.word-next" },     .{ "M-b", "emacs.word-prev" },
+        .{ "M-<", "emacs.doc-start" },     .{ "M->", "emacs.doc-end" },
+        .{ "C-v", "scroll.page-down" },    .{ "M-v", "scroll.page-up" },
+        .{ "C-d", "edit.delete-after" },   .{ "C-k", "emacs.kill-line" },
         .{ "C-/", "std.history.undo" },    .{ "C-_", "std.history.undo" },
-        .{ "C-space", "set-mark" },
+        .{ "C-space", "selection.start" },
     };
     for (binds) |b| weft.bindKey("emacs", b[0], b[1]);
 
@@ -182,19 +159,26 @@ fn initExtra() void {
     // name and keeps the region command as its fallback arm: the same three
     // chords capture a structured row where one is focused and a region of
     // text everywhere else.
-    weft.bindKeys("emacs", "M-w", &.{ "std.transfer.yank", "copy-region" });
-    weft.bindKeys("emacs", "C-w", &.{ "std.transfer.delete-to-register", "kill-region" });
-    weft.bindKeys("emacs", "C-y", &.{ "std.transfer.paste", "yank" });
+    weft.bindKeys("emacs", "M-w", &.{ "std.transfer.yank", "emacs.copy-region" });
+    weft.bindKeys("emacs", "C-w", &.{ "std.transfer.delete-to-register", "emacs.kill-region" });
+    weft.bindKeys("emacs", "C-y", &.{ "std.transfer.paste", "emacs.yank" });
+    // …and over text the transfer words MEAN those region commands: core
+    // offers std.transfer.* where a grammar provides the matching action, so
+    // the context menu over text has Cut, Copy and Paste — kill-region,
+    // kill-ring-save and yank, through the kill ring.
+    weft.provide("selection.cut", .{ .posture = "text" }, "emacs.kill-region", 0);
+    weft.provide("selection.copy", .{ .posture = "text" }, "emacs.copy-region", 0);
+    weft.provide("selection.paste-after", .{ .posture = "text" }, "emacs.yank", 0);
 
     // A bar caret (you're always between cells in a modeless editor).
-    weft.runStr2("set-cursor", "emacs", "bar");
-    weft.runStr2("cursor-blink", "emacs", "on");
+    weft.runStr2("cursor.set-style", "emacs", "bar");
+    weft.runStr2("cursor.set-blink", "emacs", "on");
 
     weft.setMode("emacs");
 }
 
 comptime {
     // Every emacs verb is a one-point program (the point, the region); each
-    // runs once per selection. `find-file` alone never reads one.
-    weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept }).exportAll();
+    // runs once per selection. `files.find` alone never reads one.
+    weft.plugin(&cmds, .{ .init = initExtra }).exportAll();
 }

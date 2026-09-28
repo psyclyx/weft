@@ -250,7 +250,7 @@ pub const Plugin = struct {
     }
 
     pub fn provideRowVerbs() void {
-        weft.provide("save", .{ .tool = "files" }, "files-apply", 0);
+        weft.provide("file.save", .{ .tool = "files" }, "view.apply", 0);
     }
 
     fn sessionForView(self: *Plugin, ref: semantic.view.Ref) ?*Session {
@@ -408,6 +408,9 @@ pub const Session = struct {
         try self.validateTarget();
         if (std.mem.eql(u8, request.action, semantic.action.standard.apply)) {
             if (self.apply_committed or !self.draft.hasPendingChanges()) return .declined;
+            // The draft says whether to ask (`Model.applyAsks`): a single
+            // name just typed applies as typed; the rest confirm first.
+            if (!self.draft.applyAsks()) return if (try self.applyConfirmed()) .handled else .declined;
             return .{ .interaction = self.applyConfirmation() };
         }
         if (std.mem.eql(u8, request.action, semantic.action.standard.confirm))
@@ -767,8 +770,8 @@ pub const Session = struct {
             .bindings = &.{
                 .{ .input = "y", .action = semantic.action.standard.confirm },
                 .{ .input = "n", .action = semantic.action.standard.cancel },
-                .{ .input = "enter", .action = semantic.action.standard.confirm },
-                .{ .input = "escape", .action = semantic.action.standard.cancel },
+                .{ .input = "Return", .action = semantic.action.standard.confirm },
+                .{ .input = "Escape", .action = semantic.action.standard.cancel },
             },
             .default_action = semantic.action.standard.confirm,
             .cancel_action = semantic.action.standard.cancel,

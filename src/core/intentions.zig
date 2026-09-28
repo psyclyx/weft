@@ -37,10 +37,10 @@ pub const std_intentions = [_]Intention{
     .{ .name = "std.transfer.paste", .doc = "Place the transfer register's content at the target.", .label = "Paste" },
     .{ .name = "std.transfer.delete-to-register", .doc = "Capture the target into the transfer register and remove it.", .label = "Cut" },
     .{ .name = "std.editing.insert-line-break", .doc = "Commit a line break at the editing point.", .label = "New Line" },
-    .{ .name = "std.navigation.word-previous", .doc = "Move the editing point to the word-previous boundary.", .label = "Previous Word" },
+    .{ .name = "std.navigation.word-prev", .doc = "Move the editing point to the word-previous boundary.", .label = "Previous Word" },
     .{ .name = "std.navigation.word-next", .doc = "Move the editing point to the word-next boundary.", .label = "Next Word" },
     .{ .name = "std.navigation.word-end", .doc = "Move the editing point to the word-end boundary.", .label = "Word End" },
-    .{ .name = "std.navigation.big-word-previous", .doc = "Move the editing point to the WORD-previous boundary.", .label = "Previous WORD" },
+    .{ .name = "std.navigation.big-word-prev", .doc = "Move the editing point to the WORD-previous boundary.", .label = "Previous WORD" },
     .{ .name = "std.navigation.big-word-next", .doc = "Move the editing point to the WORD-next boundary.", .label = "Next WORD" },
     .{ .name = "std.navigation.big-word-end", .doc = "Move the editing point to the WORD-end boundary.", .label = "WORD End" },
     .{ .name = "std.navigation.line-start", .doc = "Move the editing point to the line-start boundary.", .label = "Line Start" },
@@ -55,6 +55,10 @@ pub const std_intentions = [_]Intention{
     .{ .name = "std.navigation.right", .doc = "Move to the neighbour right on the horizontal axis.", .label = "Right" },
     .{ .name = "std.editing.insert-before", .doc = "Insert an editable item before the focused item.", .label = "Insert Before" },
     .{ .name = "std.editing.insert-after", .doc = "Insert an editable item after the focused item.", .label = "Insert After" },
+    // Focusing a row and editing its text are different states (doc/chrome.md
+    // §5.2): this is the step from one to the other. Committed by activating
+    // the edit, cancelled by `std.gesture.cancel`.
+    .{ .name = "std.editing.begin", .doc = "Start editing the focused item's text in place.", .label = "Edit" },
     .{ .name = "std.history.undo", .doc = "Reverse the most recent reversible change.", .label = "Undo" },
     .{ .name = "std.history.redo", .doc = "Reapply the most recently undone change.", .label = "Redo" },
     .{ .name = "std.persistence.save", .doc = "Commit pending changes to durable storage.", .label = "Save" },

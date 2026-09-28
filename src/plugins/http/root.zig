@@ -1,5 +1,5 @@
 //! http — a minimal HTTP/1.0 client (design: "HTTP is built in the guest over a
-//! Sock; only TLS is native"), a `.wasm` plugin (perms `{net}`). `http-get`
+//! Sock; only TLS is native"), a `.wasm` plugin (perms `{net}`). `http.get`
 //! parses a URL, dials it (TLS for https via the native transport), sends a GET,
 //! and streams the raw response into a buffer. This is what turns the
 //! `net.connect` transport into something an agent adapter can build on.
@@ -20,7 +20,7 @@ var conns: weft.Instances(u32) = .{};
 /// How many GETs may be outstanding at once. Unlike the instance tables this
 /// plugin's neighbours used to carry, this IS a policy, and it is not about the
 /// table: a GET is one-shot and nobody ever closes it, while the host reaps a
-/// net session only on close — so without a bound, `http-get` in a loop leaks
+/// net session only on close — so without a bound, `http.get` in a loop leaks
 /// one host connection per call. The bound therefore lives next to the resource
 /// it protects instead of riding on the height of a fixed array.
 const max_outstanding = 8;
@@ -40,7 +40,7 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "http-get", .arity = .whole, .call = get, .params = "url", .summary = "fetch a URL into its own buffer (http:// or https://)" },
+    .{ .name = "http.get", .arity = .whole, .call = get, .params = "url", .summary = "Fetch an http:// or https:// URL into its own buffer.", .label = "Fetch URL", .icon = "globe", .prompts = true },
 };
 
 fn describeExtra() void {

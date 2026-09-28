@@ -173,6 +173,21 @@ pub const Node = struct {
         return self.start + if (self.editable) |e| e.start else 0;
     }
 
+    /// What a person calls this row — what type-ahead matches. The same
+    /// reading as `restingOffset`: the last keyed part's text (the row's
+    /// subject, written last), else the part they may edit, else the row
+    /// itself with its indentation dropped. `modified   f.txt` is `f.txt`.
+    pub fn label(self: *const Node) []const u8 {
+        var last: ?Span = null;
+        for (self.spans.items) |s| {
+            if (s.key.len == 0) continue;
+            if (last == null or s.start > last.?.start) last = s;
+        }
+        const part: ?Edit = if (last) |s| .{ .start = s.start, .end = s.end } else self.editable;
+        if (part) |p| if (p.start < p.end and p.end <= self.text.len) return self.text[p.start..p.end];
+        return std.mem.trimStart(u8, self.text, " \t");
+    }
+
     fn deinit(self: *Node, gpa: Allocator) void {
         gpa.free(self.key);
         gpa.free(self.role);

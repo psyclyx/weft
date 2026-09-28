@@ -24,7 +24,7 @@ test "authoring: `:w` writes the buffer to disk (the ex command a vim user reach
     const ed = &app.ed;
 
     // Open a new file, type a line, escape — then save with `:w`, not a command.
-    ed.runStr("open", "index.html");
+    ed.runStr("file.open", "index.html");
     ed.press("i", "");
     ed.typeText("<!doctype html>\n");
     ed.press("Escape", "");
@@ -47,7 +47,7 @@ test "authoring: `:%s/old/new/g` renames every occurrence (the daily refactor mo
     defer app.deinit();
     const ed = &app.ed;
 
-    ed.runStr("open", "theme.css");
+    ed.runStr("file.open", "theme.css");
     ed.press("i", "");
     ed.typeText(".btn { color: teal; }\n.link { color: teal; }\n.hdr { color: navy; }\n");
     ed.press("Escape", "");
@@ -88,7 +88,7 @@ test "authoring: `gc` comments — gcc toggles a line, gcip a paragraph (composi
     // gcc on the first line comments it; gcc again toggles it back — a round-trip.
     ed.chord("g g"); // to the top
     ed.chord("g c c");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     {
         const disk = try core.file.readAlloc(gpa, "app.js");
@@ -98,7 +98,7 @@ test "authoring: `gc` comments — gcc toggles a line, gcip a paragraph (composi
     }
     ed.chord("g g");
     ed.chord("g c c"); // toggle off
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     {
         const disk = try core.file.readAlloc(gpa, "app.js");
@@ -110,7 +110,7 @@ test "authoring: `gc` comments — gcc toggles a line, gcip a paragraph (composi
     // knew about. gcip comments the inner paragraph — all three lines at once.
     ed.chord("g g");
     ed.chord("g c i p");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     {
         const disk = try core.file.readAlloc(gpa, "app.js");
@@ -141,7 +141,7 @@ test "authoring: visual `gc` comments the selected lines" {
     ed.press("j", ""); // extend down one line
     ed.chord("g c");
     try t.expectEqualStrings("normal", ed.mode()); // gc returns to normal
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
 
     const disk = try core.file.readAlloc(gpa, "s.css");
@@ -166,7 +166,7 @@ test "authoring: `gU`/`gu` case operators — line, motion, and visual" {
     // gUU uppercases the whole line; guu lowercases it back (doubled = line).
     ed.chord("g g");
     ed.chord("g U U");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     {
         const disk = try core.file.readAlloc(gpa, "c.js");
@@ -175,7 +175,7 @@ test "authoring: `gU`/`gu` case operators — line, motion, and visual" {
     }
     ed.chord("g g");
     ed.chord("g u u");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     {
         const disk = try core.file.readAlloc(gpa, "c.js");
@@ -186,7 +186,7 @@ test "authoring: `gU`/`gu` case operators — line, motion, and visual" {
     // gUw — the operator over a WORD motion: only the first word uppercases.
     ed.chord("g g");
     ed.chord("g U w");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     {
         const disk = try core.file.readAlloc(gpa, "c.js");
@@ -213,7 +213,7 @@ test "authoring: `>`/`<` indent operators — line, text object, visual" {
     ed.chord("g g");
     ed.press("j", ""); // to `return 1;`
     ed.chord("greater greater");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     {
         const disk = try core.file.readAlloc(gpa, "n.js");
@@ -221,7 +221,7 @@ test "authoring: `>`/`<` indent operators — line, text object, visual" {
         try t.expect(std.mem.indexOf(u8, disk, "  return 1;") != null);
     }
     ed.chord("less less");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     {
         const disk = try core.file.readAlloc(gpa, "n.js");
@@ -233,7 +233,7 @@ test "authoring: `>`/`<` indent operators — line, text object, visual" {
     // >ip indents the whole paragraph — the operator composing with a text object.
     ed.chord("g g");
     ed.chord("greater i p");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     {
         const disk = try core.file.readAlloc(gpa, "n.js");
@@ -253,7 +253,7 @@ test "files: editing a name field leaves you in the same object entry" {
 
     // Opening a directory creates a semantic workspace entry with no document.
     authorFile(ed, "note.txt", "hello\n");
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     const listing = ed.buffers.active_id;
     try t.expect(ed.buffers.get(listing).?.editor == null);
     try focusFilesRow(ed, gpa, "note.txt");
@@ -280,7 +280,7 @@ test "files: Return and minus follow the listing's own hierarchy" {
     const ed = &app.ed;
 
     try core.file.writeBytesMakingDirs(gpa, "child", "child/note.txt", "hello\n");
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     try focusFilesRow(ed, gpa, "child");
 
     // Vim supplies only its ordinary Return interaction (`std.target.activate`).
@@ -304,7 +304,7 @@ test "files: configured working-target action changes locus without opening a vi
 
     try core.file.writeBytesMakingDirs(gpa, "workspace/child", "workspace/child/.seed", "");
     core.file.deleteFile(gpa, "workspace/child/.seed");
-    ed.runStr("open", "workspace");
+    ed.runStr("file.open", "workspace");
     const listing = ed.buffers.active_id;
     try focusFilesRow(ed, gpa, "child");
     try t.expect(ed.head.working_target == null);
@@ -336,7 +336,7 @@ test "authoring: switching back to an open file lands in an editable mode" {
         \\gamma
         \\
     );
-    ed.runStr("open", "a.txt"); // switch BACK to the already-open buffer
+    ed.runStr("file.open", "a.txt"); // switch BACK to the already-open buffer
 
     // Before resting modes, this stranded you in `default` (baseMode overshot
     // normal→default), vim keys dead. Now it's normal — and genuinely editable:
@@ -344,7 +344,7 @@ test "authoring: switching back to an open file lands in an editable mode" {
     try t.expectEqualStrings("normal", ed.mode());
     ed.chord("g g");
     ed.chord("d d");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
 
     const disk = try core.file.readAlloc(gpa, "a.txt");
@@ -360,33 +360,34 @@ test "authoring: `f` snipes a char, `;` repeats it, `,` repeats reversed" {
     defer app.deinit();
     const ed = &app.ed;
 
-    // config.js binds f/;/, to snipe. Dots at indices 3, 7, 11 and a lone
-    // `q`. We navigate by find/repeat, then `x` deletes the char under the
-    // cursor — the deleted position is how we observe where we landed
-    // without poking cursor internals.
+    // config.js binds f/;/, to snipe (evil-snipe's override mode): `f` is a
+    // one-character snipe along the line, landing on the first match — no
+    // labels. Dots at indices 3, 7, 11 and a lone `q`. We navigate by
+    // find/repeat, then `x` deletes the char under the cursor — the deleted
+    // position is how we observe where we landed without poking cursor
+    // internals.
     authorFile(ed, "f.txt",
         \\foo.bar.baz.qux
         \\
     );
 
-    // One `q` in view: `f q` lands on it exactly, like vim's `f`.
+    // `f q` lands on the `q`, like vim's `f`.
     ed.chord("g g");
     ed.press("f", "");
     ed.typeText("q");
     try t.expectEqualStrings("normal", ed.mode());
     try t.expectEqual(@as(usize, 12), ed.buffers.active().textEditor().?.cursorOffset());
 
-    // Three dots: each gets a label, nearest first (a, s, d).
+    // Three dots: `f .` takes the nearest; `;`/`,` walk on and back.
     ed.chord("g g");
     ed.press("f", ""); // f<char>
-    ed.typeText("."); // three hits → labels
-    try t.expectEqualStrings("snipe-label", ed.mode());
-    ed.typeText("a"); // → the nearest dot (index 3)
+    ed.typeText("."); // → the nearest dot (index 3)
+    try t.expectEqualStrings("normal", ed.mode());
     ed.press("semicolon", ""); // ; → next dot (index 7)
     ed.press("semicolon", ""); // ; → next dot (index 11)
     ed.press("comma", ""); // , → reversed, back to the dot at index 7
     ed.press("x", ""); // delete the char there
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
 
     const disk = try core.file.readAlloc(gpa, "f.txt");
@@ -412,7 +413,7 @@ test "authoring: `~` toggles case under the cursor and advances (count-aware)" {
     ed.chord("g g");
     ed.press("5", "");
     ed.press("asciitilde", "");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
 
     const disk = try core.file.readAlloc(gpa, "tilde.txt");
@@ -436,7 +437,7 @@ test "authoring: `r` replaces the char under the cursor; `3r` replaces a run" {
     ed.chord("g g");
     ed.press("r", "");
     ed.typeText("J"); // 'h' → 'J'
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     {
         const disk = try core.file.readAlloc(gpa, "r.txt");
@@ -449,7 +450,7 @@ test "authoring: `r` replaces the char under the cursor; `3r` replaces a run" {
     ed.press("3", ""); // count
     ed.press("r", "");
     ed.typeText("x"); // J,e,l → x,x,x
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     {
         const disk = try core.file.readAlloc(gpa, "r.txt");
@@ -465,14 +466,14 @@ test "authoring: `C-n` completes a word already in the buffer" {
     defer app.deinit();
     const ed = &app.ed;
 
-    ed.runStr("open", "app.js");
+    ed.runStr("file.open", "app.js");
     ed.press("i", "");
     // Establish a distinctive word, then start typing its prefix and complete.
     ed.typeText("const greeting = 1;\n");
     ed.typeText("gre");
     ed.press("C-n", ""); // opens the buffer-word completion pick (mode → pick)
     ed.settle(30); // let the async candidate source stream in
-    ed.press("Return", ""); // pick-accept: commit the selected candidate
+    ed.press("Return", ""); // pick.accept: commit the selected candidate
     ed.press("Escape", ""); // leave insert
 
     // Save and read back: if completion committed, "greeting" appears twice.
@@ -495,13 +496,13 @@ test "authoring: fix a typo with `cw` — vim's ce special case, not dw" {
     const ed = &app.ed;
 
     // Type a line with a typo in the first word ("cnst" → "const").
-    ed.runStr("open", "app.js");
+    ed.runStr("file.open", "app.js");
     ed.press("i", "");
     ed.typeText("cnst x = 1;");
     ed.press("Escape", "");
 
     // Fix it the vim way: line-start, change the word, retype it.
-    ed.press("0", ""); // motion.line-start → cursor on the 'c'
+    ed.press("0", ""); // motions.line-start → cursor on the 'c'
     ed.press("c", ""); // operator: change
     ed.press("w", ""); // vim's cw = ce: change the WHOLE word "cnst", KEEP the space
     try t.expectEqualStrings("insert", ed.mode());
@@ -530,7 +531,7 @@ test "authoring: Esc seals the undo unit — dd then u restores the whole line" 
     defer app.deinit();
     const ed = &app.ed;
 
-    ed.runStr("open", "note.txt");
+    ed.runStr("file.open", "note.txt");
     ed.press("i", "");
     ed.typeText("const x = 1;");
     ed.press("Escape", ""); // seals the insert unit (the fix)
@@ -560,7 +561,7 @@ test "authoring: `.` repeats the last change (dot-repeat, via keystroke replay)"
     defer app.deinit();
     const ed = &app.ed;
 
-    ed.runStr("open", "words.txt");
+    ed.runStr("file.open", "words.txt");
     ed.press("i", "");
     ed.typeText("one two three four");
     ed.press("Escape", "");
@@ -591,7 +592,7 @@ test "authoring: `.` repeats a CHANGE with inserted text (cw), keystroke-faithfu
     defer app.deinit();
     const ed = &app.ed;
 
-    ed.runStr("open", "c.txt");
+    ed.runStr("file.open", "c.txt");
     ed.press("i", "");
     ed.typeText("foo bar baz");
     ed.press("Escape", "");
@@ -625,7 +626,7 @@ test "authoring: a count repeats an operator (3dw) and a motion (3w)" {
     const ed = &app.ed;
 
     // Operator count: `3dw` deletes three words.
-    ed.runStr("open", "cn.txt");
+    ed.runStr("file.open", "cn.txt");
     ed.press("i", "");
     ed.typeText("one two three four five");
     ed.press("Escape", "");
@@ -671,7 +672,7 @@ test "authoring: `.` repeats a COUNTED change (3dw then . deletes three more)" {
     defer app.deinit();
     const ed = &app.ed;
 
-    ed.runStr("open", "cd.txt");
+    ed.runStr("file.open", "cd.txt");
     ed.press("i", "");
     ed.typeText("a b c d e f g");
     ed.press("Escape", "");
@@ -702,7 +703,7 @@ test "authoring: typing balanced code with autopair stays balanced (type-over)" 
     // type-over, autopair orphaned each auto-closer and this became
     // `...name; }})`. With type-over, typing `)`/`}`/`"` steps over the
     // auto-inserted one, so what you typed is what you get.
-    ed.runStr("open", "t.js");
+    ed.runStr("file.open", "t.js");
     ed.press("i", "");
     ed.typeText("function greet(name) { return \"hi\"; }");
     ed.press("Escape", "");
@@ -724,8 +725,8 @@ test "authoring: format the buffer (SPC c f) — zig fmt via the format action" 
     const ed = &app.ed;
 
     // Write badly-spaced but valid zig, then format it. `SPC c f` → the `format`
-    // action → format-buffer, which filters .zig through `zig fmt`.
-    ed.runStr("open", "fmt_me.zig");
+    // action → fmt.format-buffer, which filters .zig through `zig fmt`.
+    ed.runStr("file.open", "fmt_me.zig");
     ed.press("i", "");
     ed.typeText("const    x=1;");
     ed.press("Escape", "");
@@ -779,7 +780,7 @@ test "lsp: hover + goto-definition via the lsp plugin — real zls" {
         );
         gpa.free(out);
     }
-    ed.runStr("open", "add.zig");
+    ed.runStr("file.open", "add.zig");
 
     // Put the cursor on the `add` call (line 5), then hover: zls answers with the
     // function's signature once its handshake completes.
@@ -792,14 +793,14 @@ test "lsp: hover + goto-definition via the lsp plugin — real zls" {
     // Rendering P2: hover is a live caret-popup producer now, not an echo
     // (the popup-layout gate covers the layout; this proves the real `lsp`
     // plugin's round-trip actually reaches the surface membrane).
-    try t.expect(h.drainSurfaceText(ed, "hover", "i32")); // the popup shows add's signature
+    try t.expect(h.drainSurfaceText(ed, "lsp.hover", "i32")); // the popup shows add's signature
 
     // goto-definition from the call jumps to `fn add` on line 1; deleting the
     // current line then proves we landed on the definition, not the call.
-    ed.run("goto-definition");
+    ed.run("lsp.goto-definition");
     ed.settle(300); // server's ready now (hover spawned it) — one round-trip + jump
     ed.chord("d d");
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
     const disk = try core.file.readAlloc(gpa, "add.zig");
     defer gpa.free(disk);
@@ -839,7 +840,7 @@ test "lsp: hover popup auto-expires once the cursor leaves its anchor's line —
         );
         gpa.free(out);
     }
-    ed.runStr("open", "hover_expiry.zig");
+    ed.runStr("file.open", "hover_expiry.zig");
 
     ed.chord("g g");
     ed.press("4", "");
@@ -847,7 +848,7 @@ test "lsp: hover popup auto-expires once the cursor leaves its anchor's line —
     ed.press("0", "");
     ed.press("f", "");
     ed.typeText("a"); // f a → onto the `a` of `add`
-    try t.expect(h.drainSurfaceText(ed, "hover", "i32")); // popup visible, anchored on line 5
+    try t.expect(h.drainSurfaceText(ed, "lsp.hover", "i32")); // popup visible, anchored on line 5
 
     // Move the cursor to a different line through REAL application input —
     // the same motion a person makes after reading the popup, not a synthetic
@@ -893,7 +894,7 @@ test "lsp: completion via the lsp plugin — async caps provider commits real zl
         );
         gpa.free(out);
     }
-    ed.runStr("open", "comp.zig");
+    ed.runStr("file.open", "comp.zig");
     ed.settle(120); // let the plugin spawn zls + finish the initialize handshake
 
     // Place the cursor right after `answ` (the main-body usage, matched by the
@@ -919,7 +920,7 @@ test "complete: the caret popup narrows as you type" {
     // trailing `al`, which is the completion prefix.
     const core_ed = ed.buffers.active().textEditor().?;
     try core_ed.insertText(gpa, "alphabet alpine beta al");
-    ed.run("complete");
+    ed.run("complete.show");
     try t.expect(ed.pick.active); // the popup opened (in "pick" mode)
     const before = ed.pick.filtered.items.len;
     try t.expect(before >= 2); // alphabet, alpine
@@ -955,7 +956,7 @@ test "lsp: didChange — an edit after open syncs, so completion sees new symbol
         );
         gpa.free(out);
     }
-    ed.runStr("open", "dc.zig");
+    ed.runStr("file.open", "dc.zig");
     ed.settle(120); // handshake + didOpen (the snapshot has no zqx*)
 
     // Introduce a top-level decl with a real edit — this bumps the commit count,
@@ -995,16 +996,16 @@ test "lsp: real zls diagnostics — a bad file reports an error we can jump to" 
         );
         gpa.free(out);
     }
-    ed.runStr("open", "bad.zig");
+    ed.runStr("file.open", "bad.zig");
 
     // The server reports diagnostics (rendered as underlines/gutter). Then a
     // vim user's `]d` jumps to the next one and echoes it — proof the diagnostic
     // is both received and navigable.
-    ed.run("hover"); // kick the plugin's server (also didOpens → diagnostics flow)
+    ed.run("lsp.hover"); // kick the plugin's server (also didOpens → diagnostics flow)
     ed.settle(80);
     // The plugin received publishDiagnostics (gutter-marked); `]d` navigates to
     // one and echoes it — diagnostics received + navigable, all in the plugin.
-    try t.expect(h.drainEcho(ed, "next-diagnostic", "error"));
+    try t.expect(h.drainEcho(ed, "lsp.next-diagnostic", "error"));
 }
 
 test "lsp: rename via the lsp plugin — prompt, then apply the WorkspaceEdit — real zls" {
@@ -1027,13 +1028,13 @@ test "lsp: rename via the lsp plugin — prompt, then apply the WorkspaceEdit �
         );
         gpa.free(out);
     }
-    ed.runStr("open", "r.zig");
+    ed.runStr("file.open", "r.zig");
 
     // Rename `foo` → `bar`: cursor on the definition, name given as the arg (the
     // interactive path prompts instead).
     ed.chord("g g");
     ed.press("w", ""); // `fn ` → `foo`
-    ed.runStr("rename", "bar");
+    ed.runStr("lsp.rename", "bar");
 
     // The rename is deferred until the server initializes; wait for the applied echo.
     var ok = false;
@@ -1046,7 +1047,7 @@ test "lsp: rename via the lsp plugin — prompt, then apply the WorkspaceEdit �
         }
     }
     try t.expect(ok);
-    ed.run("save");
+    ed.run("file.save");
     ed.waitSave();
 
     const disk = try core.file.readAlloc(gpa, "r.zig");
@@ -1076,8 +1077,8 @@ test "lsp: code actions via the lsp plugin — request/response round-trip — r
         );
         gpa.free(out);
     }
-    ed.runStr("open", "act.zig");
-    ed.run("hover"); // kick the server + didOpen
+    ed.runStr("file.open", "act.zig");
+    ed.run("lsp.hover"); // kick the server + didOpen
     ed.settle(60);
 
     // Request code actions for the line; the plugin echoes the outcome — an
@@ -1085,7 +1086,7 @@ test "lsp: code actions via the lsp plugin — request/response round-trip — r
     // codeAction request/response path. (A quick-fix that actually edits needs
     // zls build-on-save + a build.zig to produce a fixable diagnostic — an
     // environment requirement, not a code gap.)
-    try t.expect(h.drainEcho(ed, "code-actions", "code action"));
+    try t.expect(h.drainEcho(ed, "lsp.code-actions", "code action"));
 }
 
 test "lsp: signature help + inlay hints via the lsp plugin — real zls" {
@@ -1111,7 +1112,7 @@ test "lsp: signature help + inlay hints via the lsp plugin — real zls" {
         );
         gpa.free(out);
     }
-    ed.runStr("open", "g.zig");
+    ed.runStr("file.open", "g.zig");
 
     // signature help inside the call `add(2, 3)` → echoes add's signature.
     ed.chord("g g");
@@ -1119,10 +1120,10 @@ test "lsp: signature help + inlay hints via the lsp plugin — real zls" {
     ed.press("j", ""); // line 5
     ed.press("f", "");
     ed.typeText("2"); // onto the first argument, inside the parens
-    try t.expect(h.drainEcho(ed, "signature-help", "i32"));
+    try t.expect(h.drainEcho(ed, "lsp.signature-help", "i32"));
 
     // inlay hints over the document → the plugin echoes the count (round-trip).
-    try t.expect(h.drainEcho(ed, "inlay-hints", "inlay hints"));
+    try t.expect(h.drainEcho(ed, "lsp.toggle-inlay-hints", "inlay hints"));
 }
 
 test "lsp: format via the lsp plugin applies the server's edits — real zls" {
@@ -1146,11 +1147,11 @@ test "lsp: format via the lsp plugin applies the server's edits — real zls" {
         );
         gpa.free(out);
     }
-    ed.runStr("open", "f.zig");
+    ed.runStr("file.open", "f.zig");
 
     // Format through the plugin: request → TextEdit[] → applied via the edit door.
-    try t.expect(h.drainEcho(ed, "lsp-format", "formatted"));
-    ed.run("save");
+    try t.expect(h.drainEcho(ed, "lsp.format", "formatted"));
+    ed.run("file.save");
     ed.waitSave();
 
     const disk = try core.file.readAlloc(gpa, "f.zig");
@@ -1182,10 +1183,10 @@ test "lsp: references + symbols via the lsp plugin — real zls" {
         );
         gpa.free(out);
     }
-    ed.runStr("open", "s.zig");
+    ed.runStr("file.open", "s.zig");
 
     // symbols: the plugin opens a pick of the document's symbols (add, main).
-    try t.expect(h.drainPick(ed, "symbols"));
+    try t.expect(h.drainPick(ed, "lsp.pick-symbol"));
     {
         var has_add = false;
         var has_main = false;
@@ -1201,7 +1202,7 @@ test "lsp: references + symbols via the lsp plugin — real zls" {
     // declaration plus the call, at least two locations.
     ed.chord("g g");
     ed.press("w", ""); // onto `add`
-    try t.expect(h.drainPick(ed, "references"));
+    try t.expect(h.drainPick(ed, "lsp.references"));
     try t.expect(ed.pick.items.items.len >= 2);
 }
 
@@ -1233,7 +1234,7 @@ test "lsp: open returns immediately, before the server's handshake — real zls"
     // wait on this path would blow way past even this bound, since it would
     // be waiting on zls's real startup, not a scheduling hiccup.
     const start = core.task.nowNs();
-    ed.runStr("open", "quick.zig");
+    ed.runStr("file.open", "quick.zig");
     const elapsed = core.task.nowNs() - start;
     try t.expect(elapsed < 2 * std.time.ns_per_s);
 
@@ -1271,7 +1272,7 @@ test "lsp: a configured server binary that doesn't exist degrades silently — n
     }
 
     const start = core.task.nowNs();
-    ed.runStr("open", "missing.noexist");
+    ed.runStr("file.open", "missing.noexist");
     const elapsed = core.task.nowNs() - start;
     try t.expect(elapsed < 2 * std.time.ns_per_s); // generous hang backstop, not a perf gate
 
@@ -1285,7 +1286,7 @@ test "lsp: a configured server binary that doesn't exist degrades silently — n
     // spams the echo line repeatedly; `ensureServer` only attempts the spawn
     // once per language, not once per keystroke).
     ed.settle(20);
-    ed.run("hover");
+    ed.run("lsp.hover");
     ed.settle(20);
     for (ed.plugins.items) |pl| try t.expect(!pl.surface.active); // nothing ever rendered
 }
@@ -1314,13 +1315,13 @@ test "debug: a real DAP session — launch, hit a breakpoint, see the stack, con
 
     // Start a debug session. The client drives initialize → launch →
     // setBreakpoints → configurationDone; the adapter stops at the breakpoint.
-    ed.run("debug-start");
+    ed.run("dap.start");
     try t.expect(drainToolContains(ed, "*debug*", "stopped: breakpoint"));
     // ... and the client requested the stack and rendered where we are.
     try t.expect(drainToolContains(ed, "*debug*", "program:7"));
 
     // Continue → the program runs to completion.
-    ed.run("debug-continue");
+    ed.run("dap.continue");
     try t.expect(drainToolContains(ed, "*debug*", "terminated"));
 }
 
@@ -1373,12 +1374,12 @@ test "debug: a REAL lldb-dap session — compile C, break on a line, stop, conti
     try ed.loadJs("dap", js);
 
     // A real debugger: launch → stop at the breakpoint → report the stack line.
-    ed.run("debug-start");
+    ed.run("dap.start");
     try t.expect(drainToolContains(ed, "*debug*", "stopped"));
     try t.expect(drainToolContains(ed, "*debug*", "main.c:5"));
 
     // Continue → the program runs to completion.
-    ed.run("debug-continue");
+    ed.run("dap.continue");
     try t.expect(drainToolContains(ed, "*debug*", "terminated"));
 }
 
@@ -1417,10 +1418,10 @@ test "debug: the gutter breakpoint IS the DAP breakpoint — mark a line, stop t
     try ed.grant("dap", "proc"); // what `weft.grant("dap", "proc")` mints in config
     try ed.loadJs("dap", src);
 
-    ed.run("debug-start");
+    ed.run("dap.start");
     try t.expect(drainToolContains(ed, "*debug*", "stopped: breakpoint"));
     try t.expect(drainToolContains(ed, "*debug*", "program:3")); // the MARKED line, not the fallback
-    ed.run("debug-continue");
+    ed.run("dap.continue");
     try t.expect(drainToolContains(ed, "*debug*", "terminated"));
 }
 
@@ -1454,7 +1455,7 @@ test "debug: set a breakpoint on a line — gutter marker, list, toggle off" {
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "0 breakpoint") != null);
 }
 
-test "authoring/files: rename a semantic field, apply its dialog, and verify disk" {
+test "authoring/files: rename a semantic field, apply it, and verify disk" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -1465,7 +1466,7 @@ test "authoring/files: rename a semantic field, apply its dialog, and verify dis
     // provider-aware command. The semantic scene is the files plugin's public
     // surface, not a legacy `*files*` text buffer.
     authorFile(ed, "old.txt", "keep me\n");
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     const view_ref = ed.toolView().?;
     const view = ed.session.system.semantic.views.get(view_ref).?;
     try t.expectEqualStrings("files", view.scene.role);
@@ -1516,13 +1517,10 @@ test "authoring/files: rename a semantic field, apply its dialog, and verify dis
     ed.press("Escape", "");
     try t.expect(try rowDraftEnds(ed, gpa, "new.txt"));
 
-    // Apply is an advertised semantic action. Its provider opens a head-local
-    // interaction; the dialog owns `y`, rather than introducing a files mode or
-    // polluting which-key/global bindings.
+    // Apply is an advertised semantic action. One name typed is applied as
+    // typed; the provider's dialog is for what could lose something (a delete,
+    // several rows, an overwrite).
     ed.chord("SPC v a");
-    try t.expectEqualStrings("which-key-like", ed.head.interactions.active().?.descriptor.presentation);
-    try t.expectEqualStrings(semantic.action.standard.confirm, ed.head.interactions.actionForInput("y").?.id);
-    ed.press("y", "y");
     try t.expect(ed.head.interactions.active() == null);
 
     // On disk: the provider applied the immutable plan as a rename, preserving
@@ -1548,7 +1546,7 @@ test "authoring/files: refresh reconciles external churn without retargeting a d
     authorFile(ed, "removed.txt", "removed\n");
     authorFile(ed, "dirty.txt", "dirty\n");
     _ = try app.proj.oracle("mkdir clean-dir");
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
 
     var view_ref = ed.toolView().?;
     var view = ed.session.system.semantic.views.get(view_ref).?;
@@ -1643,7 +1641,7 @@ test "authoring/files: refresh rollback restores retained fields after an interl
     // order or a platform-specific sort policy.
     const fixture_names = [_][]const u8{ "first.txt", "second.txt", "third.txt" };
     for (fixture_names) |name| authorFile(ed, name, name);
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
 
     const view_ref = ed.toolView().?;
     const view = ed.session.system.semantic.views.get(view_ref).?;
@@ -1723,7 +1721,7 @@ test "authoring/files: a durable raw-name copy survives rename, deletion, and a 
     try core.file.writeBytesMakingDirs(gpa, "destination", "destination/.seed", "");
     core.file.deleteFile(gpa, "destination/.seed");
 
-    ed.runStr("open", "source");
+    ed.runStr("file.open", "source");
     const source_view_ref = ed.toolView().?;
     const source_view = ed.session.system.semantic.views.get(source_view_ref).?;
     const source_row = source_view.scene.content.container.children[0];
@@ -1753,7 +1751,7 @@ test "authoring/files: a durable raw-name copy survives rename, deletion, and a 
     });
     core.file.deleteFile(gpa, source_path);
 
-    ed.runStr("open", "destination");
+    ed.runStr("file.open", "destination");
     const destination_view_ref = ed.toolView().?;
     try t.expect(!destination_view_ref.eql(source_view_ref));
     const empty_view = ed.session.system.semantic.views.get(destination_view_ref).?;
@@ -1788,7 +1786,7 @@ test "authoring/files: symlink rows stay links through generic copy, delete, and
     // directory, while the focus walk below remains independent of ordering.
     try core.file.writeBytesMakingDirs(gpa, "z-referents", "z-referents/target.txt", "referent survives\n");
     _ = try app.proj.oracle("mkdir destination && ln -s -- z-referents/target.txt a-link");
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     const source_view_ref = ed.toolView().?;
     const source_view = ed.session.system.semantic.views.get(source_view_ref).?;
     const source_rows = source_view.scene.content.container.children;
@@ -1815,7 +1813,7 @@ test "authoring/files: symlink rows stay links through generic copy, delete, and
             else => return error.SymlinkAdvertisedEditableMode,
         }
         for (row.actions) |action| {
-            try t.expect(!std.mem.eql(u8, action.id, "fs.permissions.edit"));
+            try t.expect(!std.mem.eql(u8, action.id, "fs.edit-permissions"));
         }
     }
     try t.expect(found_link);
@@ -1860,7 +1858,7 @@ test "authoring/files: symlink rows stay links through generic copy, delete, and
     // Paste in an independent files instance after the source link has been
     // removed. The retained transfer must recreate a symlink with identical
     // raw link text; the referent remains an ordinary untouched file.
-    ed.runStr("open", "destination");
+    ed.runStr("file.open", "destination");
     const destination_view_ref = ed.toolView().?;
     const empty = ed.session.system.semantic.views.get(destination_view_ref).?;
     try t.expectEqual(@as(usize, 0), empty.scene.content.container.children.len);
@@ -1904,7 +1902,7 @@ test "authoring/files: Vim named semantic register crosses delete and another vi
     try core.file.writeBytesMakingDirs(gpa, "destination", "destination/.seed", "");
     core.file.deleteFile(gpa, "destination/.seed");
 
-    ed.runStr("open", "source");
+    ed.runStr("file.open", "source");
     // Real Vim grammar: `"ayy` captures the focused semantic row into `a`.
     ed.press("quotedbl", "");
     ed.press("a", "");
@@ -1914,7 +1912,7 @@ test "authoring/files: Vim named semantic register crosses delete and another vi
     ed.press("d", "");
     ed.press("d", "");
 
-    ed.runStr("open", "destination");
+    ed.runStr("file.open", "destination");
     // `"ap` reads `a` in a fresh files view, then apply through its dialog.
     ed.press("quotedbl", "");
     ed.press("a", "");
@@ -1936,7 +1934,7 @@ test "authoring/files: generic create and permissions actions apply from an empt
 
     try core.file.writeBytesMakingDirs(gpa, "workspace", "workspace/.seed", "");
     core.file.deleteFile(gpa, "workspace/.seed");
-    ed.runStr("open", "workspace");
+    ed.runStr("file.open", "workspace");
     const view_ref = ed.toolView().?;
     try t.expectEqual(@as(usize, 0), ed.session.system.semantic.views.get(view_ref).?.scene.content.container.children.len);
 
@@ -2012,26 +2010,27 @@ test "authoring: visual mode — select with a motion, then delete and change" {
     defer app.deinit();
     const ed = &app.ed;
 
-    ed.runStr("open", "v.txt");
+    ed.runStr("file.open", "v.txt");
     ed.press("i", "");
     ed.typeText("hello world foo");
     ed.press("Escape", "");
 
-    // Visual DELETE: v selects, w extends over a word, d deletes it.
+    // Visual DELETE: v selects, w extends onto the next word's first
+    // character — covered, as the cursor's character always is — d deletes.
     ed.press("0", "");
     ed.press("v", "");
-    ed.press("w", ""); // select "hello "
+    ed.press("w", ""); // select "hello w"
     try t.expectEqualStrings("visual", ed.mode());
-    ed.press("d", ""); // → "world foo"
+    ed.press("d", ""); // → "orld foo"
 
-    // Visual CHANGE: v, w selects "world ", c deletes it and enters insert.
+    // Visual CHANGE: v, w selects "orld f", c deletes it and enters insert.
     ed.press("0", "");
     ed.press("v", "");
-    ed.press("w", ""); // select "world "
+    ed.press("w", ""); // select "orld f"
     ed.press("c", ""); // was unbound in visual — now change
     try t.expectEqualStrings("insert", ed.mode());
     ed.typeText("X");
-    ed.press("Escape", ""); // → "Xfoo"
+    ed.press("Escape", ""); // → "Xoo"
 
     ed.press("colon", "");
     ed.typeText("w");
@@ -2040,7 +2039,128 @@ test "authoring: visual mode — select with a motion, then delete and change" {
 
     const disk = try core.file.readAlloc(gpa, "v.txt");
     defer gpa.free(disk);
-    try t.expectEqualStrings("Xfoo", disk);
+    try t.expectEqualStrings("Xoo", disk);
+}
+
+fn expectSelected(text: anytype, start: usize, end: usize) !void {
+    const r = text.selectedRange() orelse return error.NothingSelected;
+    if (r.start != start or r.end != end) {
+        std.debug.print("[authoring] selected {d}..{d}, expected {d}..{d}\n", .{ r.start, r.end, start, end });
+        return error.TestUnexpectedSelection;
+    }
+}
+
+fn expectBuffer(ed: *h.Editor, want: []const u8) !void {
+    const got = try ed.textAlloc();
+    defer ed.gpa.free(got);
+    try t.expectEqualStrings(want, got);
+}
+
+test "authoring: charwise visual covers the character under the cursor — both ends, every operator, every caret" {
+    // Vim's `v` selects from the character the anchor is on through the one
+    // the cursor is on: `v e y` yanks "one", not "on". What is drawn and
+    // what an operator acts on are one range.
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    ed.runStr("file.open", "vi.txt");
+    ed.press("i", "");
+    ed.typeText("one two three");
+    ed.press("Escape", "");
+    const text = ed.buffers.active().textEditor().?;
+
+    // Forward: the cursor sits on `e`, the selection covers it.
+    ed.chord("g g");
+    ed.press("v", "");
+    try t.expectEqual(@as(usize, 0), text.cursorOffset());
+    try expectSelected(text, 0, 1);
+    ed.press("e", "");
+    try t.expectEqual(@as(usize, 2), text.cursorOffset());
+    try expectSelected(text, 0, 3);
+    ed.press("y", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    try t.expectEqual(@as(usize, 0), text.cursorOffset());
+    ed.press("dollar", "");
+    ed.press("p", "");
+    try expectBuffer(ed, "one two threeone");
+    ed.press("u", "");
+
+    // Backward: the anchor's character stays covered as the cursor goes
+    // left of it.
+    ed.chord("g g");
+    ed.press("w", "");
+    ed.press("e", ""); // the `o` of two
+    ed.press("v", "");
+    ed.press("b", ""); // back to its `t`
+    try t.expectEqual(@as(usize, 4), text.cursorOffset());
+    try expectSelected(text, 4, 7);
+    ed.press("d", "");
+    try expectBuffer(ed, "one  three");
+    try t.expectEqual(@as(usize, 4), text.cursorOffset());
+    ed.press("u", "");
+
+    // `v` on its own covers one character; `o` swaps the ends, both still
+    // covered.
+    ed.chord("g g");
+    ed.press("v", "");
+    ed.press("e", "");
+    ed.press("o", "");
+    try t.expectEqual(@as(usize, 0), text.cursorOffset());
+    try expectSelected(text, 0, 3);
+    ed.press("o", "");
+    try t.expectEqual(@as(usize, 2), text.cursorOffset());
+    // V and back to v: the charwise range is the one it was.
+    ed.press("V", "");
+    ed.press("v", "");
+    try t.expectEqualStrings("visual", ed.mode());
+    try expectSelected(text, 0, 3);
+    // U, gU/gu and ~ act on the whole of it.
+    ed.press("U", "");
+    try expectBuffer(ed, "ONE two three");
+    ed.chord("g g");
+    ed.press("v", "");
+    ed.press("e", "");
+    ed.chord("g u");
+    try expectBuffer(ed, "one two three");
+    ed.chord("g g");
+    ed.press("v", "");
+    ed.press("e", "");
+    ed.chord("g U");
+    try expectBuffer(ed, "ONE two three");
+    ed.chord("g g");
+    ed.press("v", "");
+    ed.press("e", "");
+    ed.press("asciitilde", "");
+    try expectBuffer(ed, "one two three");
+    // Leaving with Escape puts the cursor on the character it was on.
+    ed.chord("g g");
+    ed.press("v", "");
+    ed.press("e", "");
+    ed.press("Escape", "");
+    try t.expectEqual(@as(usize, 2), text.cursorOffset());
+    try t.expect(text.selectedRange() == null);
+    // Every caret: `v e d` at two carets deletes both words whole.
+    try text.setSelections(gpa, &.{ .{ .anchor = 0, .head = 0 }, .{ .anchor = 8, .head = 8 } }, 0);
+    ed.press("v", "");
+    ed.press("e", "");
+    try t.expectEqual(@as(usize, 2), text.selectionCount());
+    try t.expectEqual(@as(usize, 3), text.selectionEnds(0).head);
+    try t.expectEqual(@as(usize, 13), text.selectionEnds(1).head);
+    ed.press("d", "");
+    try expectBuffer(ed, " two ");
+    ed.press("u", "");
+    try expectBuffer(ed, "one two three");
+
+    // `c` changes the whole of it.
+    ed.chord("g g");
+    ed.press("v", "");
+    ed.press("e", "");
+    ed.press("c", "");
+    ed.typeText("ONE");
+    ed.press("Escape", "");
+    try expectBuffer(ed, "ONE two three");
 }
 
 test "authoring: `V` linewise visual — select whole lines and delete them" {
@@ -2050,7 +2170,7 @@ test "authoring: `V` linewise visual — select whole lines and delete them" {
     defer app.deinit();
     const ed = &app.ed;
 
-    ed.runStr("open", "vl.txt");
+    ed.runStr("file.open", "vl.txt");
     ed.press("i", "");
     ed.typeText("line1\nline2\nline3");
     ed.press("Escape", "");
@@ -2074,6 +2194,81 @@ test "authoring: `V` linewise visual — select whole lines and delete them" {
     try t.expectEqualStrings("line3", disk);
 }
 
+test "authoring: the `:` line reads a short name, then a label, lists an ambiguous one, and Tab completes — `:w` stays vim's" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    const names = h.ShortNames;
+    try names.bind(ed);
+
+    // The part after the namespace, when only one command has it.
+    names.ex(ed, "frob-widget", "Return");
+    try t.expectEqual(@as(usize, 1), names.ran[0]);
+    // The label, case aside, spaces as dashes.
+    names.ex(ed, "polish-the-gadget", "Return");
+    try t.expectEqual(@as(usize, 2), names.ran[0]);
+    // Two commands answer `twin`: neither runs, both are named.
+    names.ex(ed, "twin", "Return");
+    try t.expectEqual(@as(usize, 0), names.ran[1] + names.ran[2]);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zzt.twin") != null);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zzq.twin") != null);
+    // The full id still runs, as it always did.
+    names.ex(ed, "zzq.twin", "Return");
+    try t.expectEqual(@as(usize, 1), names.ran[2]);
+
+    // Tab completes a name being typed to the one it can mean.
+    ed.press("colon", "");
+    ed.typeText("frob-w");
+    ed.press("Tab", "");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), ":zzt.frob-widget") != null);
+    ed.press("Return", "");
+    try t.expectEqual(@as(usize, 3), names.ran[0]);
+    // …and lists them when it can mean several.
+    ed.press("colon", "");
+    ed.typeText("twi");
+    ed.press("Tab", "");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zzt.twin") != null);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zzq.twin") != null);
+    ed.press("Escape", "");
+
+    // Vim's own words are vim's: `:w` writes.
+    ed.runStr("file.open", "short.txt");
+    ed.press("i", "");
+    ed.typeText("kept");
+    ed.press("Escape", "");
+    names.ex(ed, "w", "Return");
+    ed.waitSave();
+    const disk = try core.file.readAlloc(gpa, "short.txt");
+    defer gpa.free(disk);
+    try t.expectEqualStrings("kept", disk);
+}
+
+test "authoring: a short name the `:` line read once is read again after the registry changes — a second `frob-widget` makes it ambiguous" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    const names = h.ShortNames;
+    try names.bind(ed);
+
+    names.ex(ed, "frob-widget", "Return");
+    try t.expectEqual(@as(usize, 1), names.ran[0]);
+    // A plugin loaded later registers another command with that short name:
+    // the word no longer names one command, so it runs neither.
+    _ = try ed.ctx.commands.bind(gpa, "zzq.frob-widget", core.command.define("zzq.frob-widget", "Another.", names.twinB).present(.{ .label = "Another Gadget" }));
+    names.ex(ed, "frob-widget", "Return");
+    try t.expectEqual(@as(usize, 1), names.ran[0]);
+    try t.expectEqual(@as(usize, 0), names.ran[2]);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zzq.frob-widget") != null);
+    // …and once it is gone again, the word is the first one's once more.
+    ed.ctx.commands.unbind(ed.ctx.commands.find("zzq.frob-widget").?);
+    names.ex(ed, "frob-widget", "Return");
+    try t.expectEqual(@as(usize, 2), names.ran[0]);
+}
+
 test "authoring: `/` searches in the buffer and jumps to the match" {
     const gpa = t.allocator;
     var app: App = undefined;
@@ -2081,7 +2276,7 @@ test "authoring: `/` searches in the buffer and jumps to the match" {
     defer app.deinit();
     const ed = &app.ed;
 
-    ed.runStr("open", "doc.txt");
+    ed.runStr("file.open", "doc.txt");
     ed.press("i", "");
     ed.typeText("alpha\nbravo\ncharlie\ndelta");
     ed.press("Escape", "");
@@ -2116,7 +2311,7 @@ test "authoring: `/` lands on the byte match, so cw preserves indentation" {
     defer app.deinit();
     const ed = &app.ed;
 
-    ed.runStr("open", "indented.txt");
+    ed.runStr("file.open", "indented.txt");
     ed.press("i", "");
     ed.typeText("header\n    ALICE_SLOT tail");
     ed.press("Escape", "");
@@ -2147,7 +2342,7 @@ test "authoring: switch between two files with the fuzzy buffer picker" {
     const ed = &app.ed;
 
     // Author two files.
-    ed.runStr("open", "alpha.js");
+    ed.runStr("file.open", "alpha.js");
     ed.press("i", "");
     ed.typeText("// alpha");
     ed.press("Escape", "");
@@ -2156,7 +2351,7 @@ test "authoring: switch between two files with the fuzzy buffer picker" {
     ed.press("Return", "");
     ed.waitSave();
 
-    ed.runStr("open", "bravo.js");
+    ed.runStr("file.open", "bravo.js");
     ed.press("i", "");
     ed.typeText("// bravo");
     ed.press("Escape", "");
@@ -2166,14 +2361,14 @@ test "authoring: switch between two files with the fuzzy buffer picker" {
     ed.waitSave();
     try t.expectEqualStrings("bravo.js", ed.bufferName()); // we're on bravo now
 
-    // Jump back to alpha.js through the fuzzy picker (SPC b b → buf-pick),
+    // Jump back to alpha.js through the fuzzy picker (SPC b b → buffer.pick),
     // filtering by name, then accept — the natural "switch buffer" motion.
     ed.chord("SPC b b"); // opens the buffer pick (mode → pick)
     ed.settle(10); // let the candidate list populate
     try t.expectEqualStrings("pick", ed.mode());
     ed.typeText("alpha"); // narrow the query
     ed.settle(10);
-    ed.press("Return", ""); // pick-accept → switch buffers
+    ed.press("Return", ""); // pick.accept → switch buffers
     try t.expectEqualStrings("alpha.js", ed.bufferName());
 }
 
@@ -2190,7 +2385,7 @@ test "input: an unbound key commits nothing in a structural mode, and commits in
     defer app.deinit();
     const ed = &app.ed;
 
-    ed.runStr("open", "note.txt");
+    ed.runStr("file.open", "note.txt");
     try t.expectEqualStrings("normal", ed.mode());
     // `&` is genuinely unbound in normal — not a binding, not a chord prefix.
     try t.expect(ed.keymap.lookup("normal", "ampersand") == null);
@@ -2219,7 +2414,7 @@ test "input: a tool entry's field takes commits only — an unbound key and Tab 
     const ed = &app.ed;
 
     authorFile(ed, "note.txt", "hello\n");
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     const view_ref = ed.toolView().?;
     // The field provider owns the draft. A listing row is edited in place, so what the
     // rename currently says is what the row currently says — read from the
@@ -2280,7 +2475,7 @@ test "authoring/files: Vim Tab folds a directory open in place and back shut" {
 
     try core.file.writeBytesMakingDirs(gpa, "nest", "nest/inner.txt", "inner\n");
     authorFile(ed, "beside.txt", "beside\n");
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     const view_ref = ed.toolView().?;
 
     // A rename staged beside the directory about to be folded. Vim supplies
@@ -2332,7 +2527,7 @@ test "authoring/files: Vim Return on a file row opens it as an ordinary buffer" 
     const ed = &app.ed;
 
     try core.file.writeBytes(gpa, "note.txt", "hello\n");
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     const view_ref = ed.toolView().?;
     const browser = ed.buffers.active().id;
 
@@ -2384,7 +2579,7 @@ test "debug: two DAP sessions — own buffers, own programs, stopping one leaves
     try ed.setConfig("dap", "cmd", mock);
     try ed.setConfig("dap", "program", "alpha");
     try ed.setConfig("dap", "line", "7");
-    ed.run("debug-start");
+    ed.run("dap.start");
     try t.expect(drainToolContains(ed, "*debug*", "stopped: breakpoint"));
     try t.expect(drainToolContains(ed, "*debug*", ":7"));
 
@@ -2392,7 +2587,7 @@ test "debug: two DAP sessions — own buffers, own programs, stopping one leaves
     // first — it lands in its own buffer and the first is still there.
     try ed.setConfig("dap", "program", "beta");
     try ed.setConfig("dap", "line", "11");
-    ed.run("debug-start");
+    ed.run("dap.start");
     try t.expect(drainToolContains(ed, "*debug:2*", "stopped: breakpoint"));
     try t.expect(drainToolContains(ed, "*debug:2*", ":11"));
     try t.expect(ed.buffers.findByName("*debug*") != null);
@@ -2414,14 +2609,14 @@ test "debug: two DAP sessions — own buffers, own programs, stopping one leaves
     // Stop the FOCUSED session (one) — routing is by the buffer you are
     // looking at, not by "the last one started".
     try h.focusBuffer(ed, "*debug*");
-    ed.run("debug-stop");
+    ed.run("dap.stop");
     try t.expect(drainToolContains(ed, "*debug*", "terminated"));
 
     // Session two is untouched: it still steps, and its own transcript grows.
     try h.focusBuffer(ed, "*debug:2*");
-    ed.run("debug-step-over");
+    ed.run("dap.step-over");
     try t.expect(drainToolContains(ed, "*debug:2*", "stopped: step"));
-    ed.run("debug-continue");
+    ed.run("dap.continue");
     try t.expect(drainToolContains(ed, "*debug:2*", "terminated"));
 }
 
@@ -2471,7 +2666,7 @@ test "debug: an edit above a breakpoint moves it — the session arms on the mar
 
     // The mock stops on the first breakpoint line it is sent: 4, the line the
     // marked text moved to — not 3 (where it was marked) or 9 (the fallback).
-    ed.run("debug-start");
+    ed.run("dap.start");
     try t.expect(drainToolContains(ed, "*debug*", "stopped: breakpoint"));
     try t.expect(drainToolContains(ed, "*debug*", "program:4"));
     {
@@ -2479,7 +2674,7 @@ test "debug: an edit above a breakpoint moves it — the session arms on the mar
         defer gpa.free(text);
         try t.expect(std.mem.indexOf(u8, text, "program:3") == null);
     }
-    ed.run("debug-continue");
+    ed.run("dap.continue");
     try t.expect(drainToolContains(ed, "*debug*", "terminated"));
 }
 
@@ -2490,7 +2685,7 @@ test "files: vim motions selection insertion and search use the semantic view" {
     defer app.deinit();
     const ed = &app.ed;
     authorFile(ed, "alpha.txt", "hello\n");
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     const listing = ed.buffers.active_id;
     try focusFilesRow(ed, gpa, "alpha.txt");
     ed.press("dollar", "");

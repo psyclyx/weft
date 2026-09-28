@@ -52,7 +52,7 @@ test "e2e/clipboard: vim's \"+ yanks into the head's clipboard and pastes from i
     ed.press("i", "");
     ed.typeText("one\ntwo");
     ed.press("Escape", "");
-    ed.run("vim-goto-top");
+    ed.run("vim.goto-top");
 
     // `"+yy` — the line, with its line break, is on the desktop clipboard.
     clip(&ed, "y y");
@@ -77,7 +77,7 @@ test "e2e/clipboard: vim's \"+ yanks into the head's clipboard and pastes from i
     try expectText(&ed, "L\nXYone\ntwo\ntwo");
 
     // `"*` names the same clipboard.
-    ed.run("vim-goto-top");
+    ed.run("vim.goto-top");
     ed.press("quotedbl", "");
     ed.press("asterisk", "");
     ed.chord("y y");
@@ -111,7 +111,7 @@ test "e2e/clipboard: without a config grant, declaring the capability confers no
     defer gpa.free(got);
     try t.expect(std.mem.indexOf(u8, got, "secret") == null);
     // The refusal cost the guest nothing else: vim still edits.
-    ed.run("vim-goto-top");
+    ed.run("vim.goto-top");
     ed.press("x", "");
     try t.expect(ed.buffers.active().textEditor().?.text().byteLen() < got.len);
 }
@@ -123,22 +123,22 @@ test "e2e/clipboard: a JS plugin without the grant is refused, with it reads the
     defer ed.deinit();
     try ed.head.clipboard.set(gpa, "desk");
     try ed.loadJs("peeker",
-        \\weft.command("peek-ungranted", function () {
+        \\weft.command("peeker.peek", function () {
         \\  try { weft.echo("got:" + weft.clipboardGet()); }
         \\  catch (e) { weft.echo("refused"); }
         \\});
     );
-    ed.run("peek-ungranted");
+    ed.run("peeker.peek");
     try t.expectEqualStrings("refused", ed.echoText());
 
     try ed.grant("granted", "clipboard");
     try ed.loadJs("granted",
-        \\weft.command("peek-granted", function () { weft.echo("got:" + weft.clipboardGet()); });
-        \\weft.command("put-granted", function () { weft.clipboardSet("from js"); });
+        \\weft.command("granted.peek", function () { weft.echo("got:" + weft.clipboardGet()); });
+        \\weft.command("granted.put", function () { weft.clipboardSet("from js"); });
     );
-    ed.run("peek-granted");
+    ed.run("granted.peek");
     try t.expectEqualStrings("got:desk", ed.echoText());
-    ed.run("put-granted");
+    ed.run("granted.put");
     try t.expectEqualStrings("from js", ed.head.clipboard.text());
 }
 
@@ -155,25 +155,25 @@ test "e2e/jumplist: vim's jumps go back and forward, and ride edits" {
     ed.typeText("l1\nl2\nl3\nl4");
     ed.press("Escape", "");
     const typed_end = cursor(&ed);
-    ed.run("vim-goto-top"); // a jump: remembers the end
+    ed.run("vim.goto-top"); // a jump: remembers the end
     ed.chord("j j"); // plain motions: not jumps
     const on_l3 = cursor(&ed);
     ed.press("G", ""); // a jump: remembers l3
 
-    ed.run("jump-back");
+    ed.run("jump.back");
     try t.expectEqual(on_l3, cursor(&ed));
-    ed.run("jump-back");
+    ed.run("jump.back");
     try t.expectEqual(typed_end, cursor(&ed));
-    ed.run("jump-forward");
+    ed.run("jump.forward");
     try t.expectEqual(on_l3, cursor(&ed));
 
     // An edit above a remembered spot carries it along. (`gg` from l3 pushes
     // nothing new: l3 is where the list already stands.)
-    ed.run("vim-goto-top");
+    ed.run("vim.goto-top");
     ed.press("O", "");
     ed.typeText("new");
     ed.press("Escape", "");
-    ed.run("jump-back"); // l3, four bytes further on now
+    ed.run("jump.back"); // l3, four bytes further on now
     try t.expectEqual(on_l3 + 4, cursor(&ed));
     try t.expectEqual(@as(u8, 'l'), ed.buffers.active().textEditor().?.text().byteAt(cursor(&ed)));
 }
@@ -193,11 +193,11 @@ test "e2e/jumplist: moving between entries is recorded; a closed file is opened 
     authorFile(&ed, "c.txt", "charlie\n");
     try t.expectEqualStrings("c.txt", ed.bufferName());
 
-    ed.run("jump-back");
+    ed.run("jump.back");
     try t.expectEqualStrings("b.txt", ed.bufferName());
-    ed.run("jump-back");
+    ed.run("jump.back");
     try t.expectEqualStrings("a.txt", ed.bufferName());
-    ed.run("jump-forward");
+    ed.run("jump.forward");
     try t.expectEqualStrings("b.txt", ed.bufferName());
 
     // Close b, and let an unrelated entry take its slot. The jump into b
@@ -205,13 +205,13 @@ test "e2e/jumplist: moving between entries is recorded; a closed file is opened 
     // back there opens b.txt again from disk, and the stranger in b's old
     // slot is never landed on.
     const b_slot = ed.buffers.active_id;
-    ed.run("buffer-close");
+    ed.run("buffer.close-unmodified");
     try t.expect(!std.mem.eql(u8, "b.txt", ed.bufferName()));
     // Created, not visited: making it is not a jump.
     try t.expectEqual(b_slot, try ed.buffers.create(gpa, "*stranger*"));
-    ed.run("jump-back");
+    ed.run("jump.back");
     try t.expectEqualStrings("a.txt", ed.bufferName());
-    ed.run("jump-forward");
+    ed.run("jump.forward");
     try t.expectEqualStrings("b.txt", ed.bufferName());
     try t.expect(ed.buffers.active_id != b_slot);
     const text = try ed.textAlloc();
@@ -220,7 +220,7 @@ test "e2e/jumplist: moving between entries is recorded; a closed file is opened 
 
     // The picker lists every position, a closed one by what it names, and
     // accepting a row lands there.
-    ed.run("jumplist-pick");
+    ed.run("jump.pick");
     try t.expect(ed.head.pick.active);
     var saw_b = false;
     for (ed.head.pick.items.items) |row| saw_b = saw_b or std.mem.indexOf(u8, row, "b.txt") != null;
@@ -234,7 +234,7 @@ fn vimWith(ed: *Editor, text: []const u8) void {
     ed.press("i", "");
     ed.typeText(text);
     ed.press("Escape", "");
-    ed.run("vim-goto-top");
+    ed.run("vim.goto-top");
 }
 
 test "e2e/macros: q records, @ plays with a count, @@ replays, each change undoes alone" {
@@ -270,7 +270,7 @@ test "e2e/macros: q records, @ plays with a count, @@ replays, each change undoe
     try expectText(&ed, "x1\nx1\nx1\nx1\nx1\nx");
 
     // `.` after a replay repeats the macro's last change, not the macro.
-    ed.run("repeat-change"); // `.` (config.js binds it; bare vim does not)
+    ed.run("edit.repeat"); // `.` (config.js binds it; bare vim does not)
     try expectText(&ed, "x1\nx1\nx1\nx1\nx1\nx1");
 
     // Each replayed change is its own undo unit, as when it was typed.
@@ -316,12 +316,12 @@ test "e2e/macros: pointer gestures are not recorded; the recording state is a do
     try loadVim(&ed);
     vimWith(&ed, "z");
 
-    ed.run("macro-record-toggle"); // no register named: `@`
+    ed.run("macro.record-toggle"); // no register named: `@`
     try t.expectEqual(@as(?u8, '@'), ed.head.macros.recording);
     ed.press("mouse-1", "");
     ed.press("wheel-down", "");
     ed.press("x", "");
-    ed.run("macro-record-toggle");
+    ed.run("macro.record-toggle");
     const reg = ed.head.macros.regs['@'].items;
     try t.expectEqual(@as(usize, 1), reg.len);
     try t.expectEqualStrings("x", reg[0].spec[0..reg[0].slen]);
@@ -345,13 +345,13 @@ test "e2e/config: config.js binds the jumplist, grants vim the clipboard, and ma
     try t.expect(loader.failed.items.len == 0);
 
     const back = ed.keymap.resolveExactArms("normal", "C-o").?;
-    try t.expectEqualStrings("jump-back", back[back.len - 1]);
-    try t.expectEqualStrings("jump-forward", ed.keymap.resolveExact("normal", "C-i").?);
-    try t.expectEqualStrings("jumplist-pick", ed.keymap.resolveExact("normal", "space s j").?);
+    try t.expectEqualStrings("jump.back", back[back.len - 1]);
+    try t.expectEqualStrings("jump.forward", ed.keymap.resolveExact("normal", "C-i").?);
+    try t.expectEqualStrings("jump.pick", ed.keymap.resolveExact("normal", "space s j").?);
     try t.expect(core.wasm_host.hasPerm(pluginNamed(&ed, "vim").?, .clipboard));
 
     authorFile(&ed, "notes.txt", "first\nsecond\n");
-    ed.run("vim-goto-top");
+    ed.run("vim.goto-top");
     clip(&ed, "y y");
     try t.expectEqualStrings("first\n", ed.head.clipboard.text());
 
@@ -363,7 +363,7 @@ test "e2e/config: config.js binds the jumplist, grants vim the clipboard, and ma
     try t.expectEqualStrings("other.txt", ed.bufferName());
 
     // A macro through the configured grammar.
-    ed.run("vim-goto-top");
+    ed.run("vim.goto-top");
     ed.chord("q c");
     ed.press("A", "");
     ed.typeText("!");

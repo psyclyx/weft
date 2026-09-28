@@ -21,11 +21,11 @@ const weft = @import("weft");
 const bogus = [_]u32{ 0x8000_0000, 0xFFFF_FFFF, 0x7FFF_FFFF, 9999, 1 };
 
 fn describe() callconv(.c) void {
-    weft.declareCommand("hostile-handles");
+    weft.declareCommand("hostile-handle.run");
 }
 
 fn init() callconv(.c) void {
-    _ = weft.register("hostile-handles");
+    _ = weft.register("hostile-handle.run");
 }
 
 fn on_command(id: u32) callconv(.c) void {

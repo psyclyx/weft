@@ -5,6 +5,6 @@
 //! advertise them; config declares matching command trampolines, while the
 //! owning view provider decides what they mean for its draft.
 
-pub const permissions_edit = "fs.permissions.edit";
-pub const entry_create_file = "fs.entry.create-file";
-pub const entry_create_directory = "fs.entry.create-directory";
+pub const permissions_edit = "fs.edit-permissions";
+pub const entry_create_file = "fs.create-file";
+pub const entry_create_directory = "fs.create-directory";

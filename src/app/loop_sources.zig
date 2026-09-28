@@ -29,6 +29,7 @@ const wayland = @import("weft_platform").wayland;
 const cursor_config = @import("cursor_config.zig");
 const frame = @import("frame.zig");
 const collab = @import("collab.zig");
+const pointer = @import("pointer.zig");
 
 /// A source that never mutates, only marks readiness on an fd `step`
 /// already knows how to drain by itself (`onReady = null`, see
@@ -83,6 +84,16 @@ pub fn whichKeyDue(ctx: ?*anyopaque, now: u64) ?u64 {
     return self.menu.open_ns + self.delay_ns;
 }
 
+// ── 3b. Tooltip delay — no old site: hover is new frame input
+// (`pointer.Hover`). Due once the pointer has rested on a target for the
+// delay; `Application.tickAsync` ripens it on that wake. ──
+
+pub fn tooltipDue(ctx: ?*anyopaque, now: u64) ?u64 {
+    _ = now;
+    const hover: *const pointer.Hover = @ptrCast(@alignCast(ctx.?));
+    return hover.dueAt();
+}
+
 // ── 4. Backing poll cadence — old site: `frame.tickAsync`'s
 // `next_backing_poll_ns` compare (unconditional 2s cadence; unchanged). ──
 
@@ -92,24 +103,24 @@ pub fn backingPollDue(ctx: ?*anyopaque, now: u64) ?u64 {
     return next.*;
 }
 
-// ── 5. vim-goggles flash expiry — old site: main.zig's inline flash block
-// inside `frame_builder.zig`'s `buildFrame` (`flash_start_ns +
-// flash_duration_ns` compare, previously only re-checked because vsync
-// forced a rebuild every frame regardless of damage). ──
+// ── 5. vim-goggles flash expiry — timed at the wake's boundary
+// (`frame.FlashTiming.note`, `Application.observe`), never by the frame. ──
 
-pub const FlashCtx = struct {
-    flash: *const core.flash.Flash,
-    flash_start_ns: *const u64,
-    /// Live: the frame re-reads `editor/flash-ms` into it per flash.
-    flash_duration_ns: *const u64,
-};
-
+/// The flash showing now lapses (`frame.FlashTiming`, noted at the wake's
+/// boundary): wake then, so the frame redraws without it.
 pub fn flashDue(ctx: ?*anyopaque, now: u64) ?u64 {
-    const self: *const FlashCtx = @ptrCast(@alignCast(ctx.?));
-    if (self.flash.gen == 0) return null;
-    const due = self.flash_start_ns.* + self.flash_duration_ns.*;
-    if (due <= now) return null; // already expired; the body clears it on this wake
-    return due;
+    const timing: *const @import("frame.zig").FlashTiming = @ptrCast(@alignCast(ctx.?));
+    return timing.due(now);
+}
+
+// ── 5b. A message's lapse — an echo's or a notice's, timed at the wake's boundary
+// (`frame.EchoTiming.note`); this
+// wakes the loop when the one showing lapses, so the line redraws without
+// it. ──
+
+pub fn echoDue(ctx: ?*anyopaque, now: u64) ?u64 {
+    const timing: *const @import("frame.zig").EchoTiming = @ptrCast(@alignCast(ctx.?));
+    return timing.due(now);
 }
 
 // ── 6. Client reconnect backoff — old site: `collab.tickCollab`'s

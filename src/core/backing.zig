@@ -3,7 +3,8 @@
 //! backing file IS a peer).
 //!
 //! `Backing` is the three-case authority: a local path, a remote path
-//! over a persistent shell, or nothing (scratch — including a projection
+//! on another tier (a shell's coreutils, a peer's shared tree — one `Remote`
+//! seam), or nothing (scratch — including a projection
 //! whose bytes a plugin peer regenerates, named by the entry's `tool`).
 //! `Sync` is the engine shared by the two file-shaped cases: a Document
 //! peer whose replica always mirrors the last-known disk content.
@@ -47,8 +48,136 @@ pub const Backing = union(enum) {
     none,
     /// A local file (task-pool atomic writes).
     file: struct { path: []u8, sync: Sync },
-    /// A remote file over a persistent shell (coreutils tier).
-    shell: struct { fs: *ShellFs, path: []u8, sync: Sync },
+    /// A file somewhere else — over a shell's coreutils (`ShellRemote`), in a
+    /// peer's shared tree — reached through its tier's `Remote`. One guarded
+    /// save and one external-change merge for every tier: what differs is
+    /// only how bytes and tokens cross, never the discipline around them.
+    remote: struct { remote: Remote, sync: Sync },
+};
+
+/// The bytes a fetch brought back and the content token they carry.
+pub const Fetched = @import("file.zig").Fetched;
+
+/// How a remote tier fails. `Stale` is the guard (merge, then retry);
+/// `Unreachable` the transport; `NotPermitted` the far side's refusal to be
+/// written (a peer that granted no write surface).
+pub const RemoteError = error{ Stale, Unreachable, NotPermitted, Failed, OutOfMemory };
+
+/// A file on another tier: the two operations the backing peer needs,
+/// behind one seam. `fetch` answers the bytes and token iff the token moved
+/// from `expected` (null: unconditionally — the open); `write` is the
+/// guarded test-and-set of substrate §2 (upload beside, move iff the target
+/// still has `expected`'s content — null: iff there is none — else `Stale`)
+/// and answers the written content's token. Tokens are opaque, compared for
+/// equality only, and each tier's own.
+pub const Remote = struct {
+    ctx: *anyopaque,
+    vtable: *const VTable,
+
+    /// Where the tier's calls may run: on a pool worker (a shell channel
+    /// serializes itself; a peer's tree hands its requests to the tick of
+    /// the connection the frame thread owns), or on the thread that asked.
+    pub const Affinity = enum { worker, caller };
+
+    pub const VTable = struct {
+        /// Status-chip word for the tier ("shell", "peer").
+        label: []const u8,
+        affinity: Affinity,
+        /// Run on the thread that asks, before a call is handed to a worker
+        /// (and before an open's fetch): resolve whatever the tier reads out
+        /// of state only that thread may touch, so the worker never does.
+        prepare: ?*const fn (ctx: *anyopaque) RemoteError!void = null,
+        /// The path on the far side, for display. Borrowed.
+        path: *const fn (ctx: *anyopaque) []const u8,
+        fetch: *const fn (ctx: *anyopaque, gpa: Allocator, expected: ?[]const u8) RemoteError!?Fetched,
+        write: *const fn (ctx: *anyopaque, gpa: Allocator, bytes: []const u8, expected: ?[]const u8) RemoteError![]u8,
+        /// Free the tier's state; the backing is going.
+        deinit: *const fn (ctx: *anyopaque, gpa: Allocator) void,
+    };
+
+    pub fn path(self: Remote) []const u8 {
+        return self.vtable.path(self.ctx);
+    }
+    /// `VTable.prepare`, on the calling thread.
+    pub fn prepare(self: Remote) RemoteError!void {
+        if (self.vtable.prepare) |f| try f(self.ctx);
+    }
+    pub fn fetch(self: Remote, gpa: Allocator, expected: ?[]const u8) RemoteError!?Fetched {
+        return self.vtable.fetch(self.ctx, gpa, expected);
+    }
+    pub fn write(self: Remote, gpa: Allocator, bytes: []const u8, expected: ?[]const u8) RemoteError![]u8 {
+        return self.vtable.write(self.ctx, gpa, bytes, expected);
+    }
+    pub fn deinit(self: Remote, gpa: Allocator) void {
+        self.vtable.deinit(self.ctx, gpa);
+    }
+};
+
+/// The coreutils tier as a `Remote`: a path over a persistent shell.
+pub const ShellRemote = struct {
+    fs: *ShellFs,
+    path: []u8,
+
+    pub fn create(gpa: Allocator, fs: *ShellFs, remote_path: []const u8) Allocator.Error!Remote {
+        const self = try gpa.create(ShellRemote);
+        errdefer gpa.destroy(self);
+        self.* = .{ .fs = fs, .path = try gpa.dupe(u8, remote_path) };
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    /// The shell file behind `remote`, if it is one.
+    pub fn of(remote: Remote) ?*ShellRemote {
+        return if (remote.vtable == &vtable) @ptrCast(@alignCast(remote.ctx)) else null;
+    }
+
+    const vtable: Remote.VTable = .{
+        .label = "shell",
+        .affinity = .worker,
+        .path = pathOf,
+        .fetch = fetchShell,
+        .write = writeShell,
+        .deinit = deinitShell,
+    };
+
+    fn cast(ctx: *anyopaque) *ShellRemote {
+        return @ptrCast(@alignCast(ctx));
+    }
+
+    fn pathOf(ctx: *anyopaque) []const u8 {
+        return cast(ctx).path;
+    }
+
+    fn mapError(err: ShellFs.WriteError) RemoteError {
+        return switch (err) {
+            error.Stale => error.Stale,
+            error.Shell => error.Unreachable,
+            error.Failed => error.Failed,
+            error.OutOfMemory => error.OutOfMemory,
+        };
+    }
+
+    fn fetchShell(ctx: *anyopaque, gpa: Allocator, expected: ?[]const u8) RemoteError!?Fetched {
+        const self = cast(ctx);
+        const token = self.fs.hashToken(gpa, self.path) catch |err| return mapError(err);
+        if (expected) |e| if (std.mem.eql(u8, token, e)) {
+            gpa.free(token);
+            return null;
+        };
+        errdefer gpa.free(token);
+        const bytes = self.fs.readAll(gpa, self.path) catch |err| return mapError(err);
+        return .{ .bytes = bytes, .token = token };
+    }
+
+    fn writeShell(ctx: *anyopaque, gpa: Allocator, bytes: []const u8, expected: ?[]const u8) RemoteError![]u8 {
+        const self = cast(ctx);
+        return self.fs.writeGuarded(gpa, self.path, bytes, expected) catch |err| mapError(err);
+    }
+
+    fn deinitShell(ctx: *anyopaque, gpa: Allocator) void {
+        const self = cast(ctx);
+        gpa.free(self.path);
+        gpa.destroy(self);
+    }
 };
 
 /// The backing peer: mirror of the last-known disk content.

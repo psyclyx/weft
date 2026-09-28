@@ -324,8 +324,8 @@ pub fn splitLines() void {
 // (the sets `A-o` replaced), and only once that trail is spent asks the tree
 // for a child. The trail is a fact about the WHOLE set — only valid while
 // the set is still exactly what the last `A-o` left — so these two verbs are
-// `.whole`, and the per-selection step they take is `hx-ts-expand` /
-// `hx-ts-shrink`, which dispatch maps.
+// `.whole`, and the per-selection step they take is `helix.ts-expand` /
+// `helix.ts-shrink`, which dispatch maps.
 
 const trail_depth = 8;
 const Snapshot = struct { n: usize, primary: usize, items: [max]Sel };
@@ -353,7 +353,7 @@ pub fn expand() void {
     slot.primary = primary;
     @memcpy(slot.items[0..n], items[0..n]);
     trail_len += 1;
-    weft.run("hx-ts-expand");
+    weft.run("helix.ts-expand");
     _ = load();
     trail_mark = fingerprint();
 }
@@ -373,10 +373,10 @@ pub fn shrink() void {
         return;
     }
     trail_len = 0;
-    weft.run("hx-ts-shrink");
+    weft.run("helix.ts-shrink");
 }
 
-/// `hx-ts-expand` / `hx-ts-shrink`: one selection a node out, or in.
+/// `helix.ts-expand` / `helix.ts-shrink`: one selection a node out, or in.
 pub fn tsExpand() void {
     applyRangeCommand("ts.expand", .move);
 }

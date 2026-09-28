@@ -3,8 +3,9 @@
 //! time. Referencing a name before anything is bound to it is fine (it
 //! resolves to null until someone binds it), and rebinding is visible
 //! through every previously interned handle — the property that lets
-//! config reference commands that plugins provide later, and lets a
-//! plugin shadow a built-in by rebinding its name.
+//! config reference commands that plugins provide later. Who may bind a
+//! name is the bound type's rule (`admit`): a command is its owner's, and
+//! no plugin shadows another's — core's included — by binding its id.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -17,6 +18,18 @@ pub fn Registry(comptime T: type) type {
         /// stable and never removed, so a `Name` (an index) stays valid
         /// for the registry's lifetime; only the *binding* changes.
         map: std.StringArrayHashMapUnmanaged(?T) = .empty,
+        /// How many binds found the name ALREADY bound — a second registration
+        /// shadowing the first — and the first name that happened to. Late
+        /// binding allows it (a plugin may shadow a built-in); a shipped
+        /// configuration registering one id twice is the duplicate-command
+        /// class, and the e2e id gate refuses it by reading this.
+        rebinds: usize = 0,
+        first_rebound: ?Name = null,
+        /// Moves on every change to what a name resolves to — a name
+        /// interned, bound, rebound or unbound — so a reader that derived
+        /// something from the whole registry (a short name only one command
+        /// has) knows when to derive it again.
+        revision: u64 = 0,
 
         pub const Name = enum(u32) { _ };
 
@@ -35,6 +48,7 @@ pub fn Registry(comptime T: type) type {
                 errdefer _ = self.map.pop();
                 gop.key_ptr.* = try gpa.dupe(u8, name);
                 gop.value_ptr.* = null;
+                self.revision +%= 1;
             }
             return @enumFromInt(gop.index);
         }
@@ -49,20 +63,35 @@ pub fn Registry(comptime T: type) type {
             return self.map.keys()[@intFromEnum(name)];
         }
 
+        /// What `T.admit` may refuse a bind for; none when `T` has no rule.
+        const has_rule = @typeInfo(T) == .@"struct" and @hasDecl(T, "admit");
+        pub const AdmitError = if (has_rule) T.AdmitError else error{};
+
         /// Bind (or rebind) `name` to `value`; visible immediately
-        /// through every held handle.
-        pub fn bind(self: *Self, gpa: Allocator, name: []const u8, value: T) Allocator.Error!Name {
+        /// through every held handle. A `T` that declares `admit` is asked
+        /// first, with what `name` is bound to now — the one door every
+        /// binding passes, so a rule there (who may bind which name) has no
+        /// way around it.
+        pub fn bind(self: *Self, gpa: Allocator, name: []const u8, value: T) (Allocator.Error || AdmitError)!Name {
+            if (has_rule) try T.admit(name, self.resolve(name), value);
             const n = try self.intern(gpa, name);
+            if (self.map.values()[@intFromEnum(n)] != null) {
+                self.rebinds += 1;
+                if (self.first_rebound == null) self.first_rebound = n;
+            }
             self.map.values()[@intFromEnum(n)] = value;
+            self.revision +%= 1;
             return n;
         }
 
         pub fn bindName(self: *Self, name: Name, value: T) void {
             self.map.values()[@intFromEnum(name)] = value;
+            self.revision +%= 1;
         }
 
         pub fn unbind(self: *Self, name: Name) void {
             self.map.values()[@intFromEnum(name)] = null;
+            self.revision +%= 1;
         }
 
         /// The binding *right now* — late binding is exactly this lookup

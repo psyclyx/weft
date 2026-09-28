@@ -10,7 +10,7 @@
 //! Each attribute earns its place by the rendering.md granularity rule —
 //! someone would swap just it:
 //!
-//! - `cycles`: a docked tree should not appear in `focus-other`'s rotation,
+//! - `cycles`: a docked tree should not appear in `window.focus-next`'s rotation,
 //!   but a peek split should.
 //! - `persistent`: a sidebar keeps its own entry when the active buffer
 //!   changes; an ordinary pane follows it.
@@ -54,7 +54,7 @@ pub fn parseEdge(name: []const u8) ?Edge {
 }
 
 pub const Attrs = struct {
-    /// Participates in pane cycling (`focus-other`).
+    /// Participates in pane cycling (`window.focus-next`).
     cycles: bool = true,
     /// Keeps its own workspace entry when the active entry changes.
     persistent: bool = false,
@@ -94,7 +94,8 @@ pub const Attrs = struct {
 pub const Extent = union(enum) {
     /// A share of the frame, clamped to (0.05, 0.95).
     fraction: f32,
-    /// Whole text rows, at least one.
+    /// Whole text rows, at least one — or none, for a viewport that is only
+    /// its status line (`status_line` set): a bar presenting a status.
     rows: u16,
 
     pub fn eql(a: Extent, b: Extent) bool {
@@ -309,6 +310,19 @@ pub const Registry = struct {
         const owned = try gpa.dupe(u8, name);
         errdefer gpa.free(owned);
         try self.list.append(gpa, .{ .name = owned, .attrs = attrs, .extent = extent, .shown = !opts.hidden });
+    }
+
+    /// Publish every declared viewport's shown state into `context` as the
+    /// global key `viewport.<name>.shown` — `on` while shown, absent while
+    /// hidden — so what is on screen is a FACT like any other: a toggle
+    /// command's check mark reads it (doc/chrome.md §1.2 `toggle`), and a
+    /// predicate may name it. Called wherever the state is decided.
+    pub fn publishShown(self: *const Registry, context: *@import("context.zig").Context) void {
+        for (self.list.items) |d| {
+            var buf: [96]u8 = undefined;
+            const key = std.fmt.bufPrint(&buf, "viewport.{s}.shown", .{d.name}) catch continue;
+            _ = context.store.setCore(.global, key, if (d.shown) "on" else "") catch {};
+        }
     }
 
     /// Flip whether `name` is held on screen; returns the new state. Only the

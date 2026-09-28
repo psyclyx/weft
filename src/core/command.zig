@@ -26,6 +26,10 @@ const semantic_model = @import("weft_semantic");
 
 pub const Principal = authority.Principal;
 
+/// What a person reads about a command (doc/chrome.md §1.2): its label, menu
+/// path, icon, … The one type and text form every plane shares.
+pub const Presentation = @import("weft_membrane").presentation.Presentation;
+
 /// The embedding shell's workspace placement policy for an activated target
 /// (doc/contextual-workspace-architecture.md §9.4). Registered target
 /// handlers are asked first; a target none of them claims is offered here,
@@ -38,6 +42,22 @@ pub const EntryOpener = struct {
     open: *const fn (*anyopaque, *Context, semantic_model.target.Located) anyerror!bool,
 };
 pub const Grade = authority.Grade;
+
+/// The shell's half of an entry's life: what OPENING a designation and
+/// RETIRING an entry mean where providers (syntax, language servers), peers
+/// and remote shells are attached — things core cannot see. `file.open` and
+/// the `buffer.close-*` commands are core's, registered once; with this door
+/// installed they route through it, and without it (a headless embedding)
+/// they do what core alone can. A door, so there is one command per verb
+/// rather than a shell registration shadowing core's.
+pub const EntryShell = struct {
+    context: *anyopaque,
+    /// Open `spec` (a designation, an absolute path, `host:path`) and answer
+    /// what `file.open` answers: the entry id, or a refusal in words.
+    open: *const fn (*anyopaque, *Context, []const u8) anyerror!Value,
+    /// `entry` is about to close: let go of what the shell attached to it.
+    retire: *const fn (*anyopaque, *Context, *Buffers.Buffer) void,
+};
 
 /// The portable argument/result ABI. Mirrors what a Lua boundary can
 /// carry; strings are borrowed for the duration of the call.
@@ -144,6 +164,10 @@ pub const Context = struct {
     /// `System`; every place then reads as the degenerate one, which is what an
     /// embedding with no places should see.
     place_ids: ?*@import("place.zig").Ids = null,
+    /// The loci this system has reached (`locus.Loci`): what a place's locus
+    /// names, and how reachable it is. Null in embeddings without a `System`,
+    /// where every place is here.
+    loci: ?*@import("locus.zig").Loci = null,
     /// Turns a `Place` into an OS directory for a local effect
     /// (`doc/place.md` §2.3). Installed by the shell, which owns the roots it
     /// opened; `null` in headless embeddings, where only the degenerate
@@ -167,6 +191,12 @@ pub const Context = struct {
     filesystems: ?*@import("weft_fs_runtime").Router = null,
     /// The shell's workspace placement policy, when one is installed.
     entries: ?EntryOpener = null,
+    /// The shell's half of opening and retiring entries (`EntryShell`).
+    entry_shell: ?EntryShell = null,
+    /// The config tier of what commands are called (`presentations.zig`):
+    /// `weft.command(id, {…})` descriptions. `null` in embeddings without a
+    /// config, where every command reads as it declared itself.
+    presentations: ?*@import("presentations.zig").Presentations = null,
     /// The shell's pane operations for pointer commands (focus and scroll
     /// the pane under the pointer). `null` in embeddings without panes.
     panes: ?@import("pointer.zig").Panes = null,
@@ -224,7 +254,12 @@ pub const Context = struct {
     /// Lookup-only mode for the active presentation. A semantic scene owns
     /// its structural keys even when hosted by an editable text entry.
     pub fn bindingMode(self: *Context) []const u8 {
-        const mode = self.head.currentMode();
+        return self.bindingModeFor(self.head.currentMode());
+    }
+
+    /// `bindingMode`, for `mode` rather than the head's current one — the
+    /// mode a picker was opened from, say (`keys_for.personMode`).
+    pub fn bindingModeFor(self: *Context, mode: []const u8) []const u8 {
         if (self.head.scene_selection.path() != null) {
             if (self.keymap.variantFor(mode, .structural)) |variant| return variant;
         }
@@ -305,7 +340,7 @@ pub const Context = struct {
         const b = self.buffer();
         // A focused semantic FIELD, or point inside a projection row.s editable
         // span — the same question asked of either plane.
-        return b.posture(self.head.scene_selection.field != null or b.fieldAtPoint());
+        return b.posture(self.head.scene_selection.edit != null or b.fieldAtPoint());
     }
 
     /// Reach the captured `Ctx` value (doc/cwa-prior-docs-audit.md §5) — the
@@ -470,7 +505,7 @@ pub const Context = struct {
     /// it holds a scoped grant over.
     pub fn edit(self: *Context, r: Document.Range, bytes: []const u8) EditError!void {
         if (self.targeting()) return self.refuse("a target is being found: nothing edits");
-        if (self.buffer().read_only) return self.refuse("read-only buffer");
+        if (self.buffer().read_only) |why| return self.refuse(why);
         if (self.readOnlyOverlaps(r)) return self.refuse("read-only region");
         switch (self.checkDocRegion(r.start, r.end)) {
             .ok => {},
@@ -490,7 +525,7 @@ pub const Context = struct {
         if (ranges.len == 1) return self.edit(ranges[0], bytes);
         if (ranges.len == 0) return;
         if (self.targeting()) return self.refuse("a target is being found: nothing edits");
-        if (self.buffer().read_only) return self.refuse("read-only buffer");
+        if (self.buffer().read_only) |why| return self.refuse(why);
         for (ranges) |r| {
             if (self.readOnlyOverlaps(r)) return self.refuse("read-only region");
             switch (self.checkDocRegion(r.start, r.end)) {
@@ -559,8 +594,7 @@ pub const Context = struct {
     }
 
     fn noteRefusal(self: *Context, why: []const u8) void {
-        self.head.echo.clearRetainingCapacity();
-        self.head.echo.appendSlice(self.gpa, why) catch {};
+        self.head.echo.say(self.gpa, why) catch {};
     }
 
     /// Whether `r` overlaps a read-only SPAN of the active buffer — the
@@ -642,7 +676,7 @@ pub const RenderError = Document.AddPeerError || error{Unauthorized};
 /// a plugin that simply produced nothing.
 pub fn renderInto(
     gpa: Allocator,
-    status: *status_feed.Feed,
+    notices: *status_feed.Notices,
     doc: *Document,
     role: authority.Role,
     name: []const u8,
@@ -653,22 +687,21 @@ pub fn renderInto(
         .plugin, .agent => authority.gradeMin(doc.my_grant, .edit),
     };
     if (!grade.canEdit()) {
-        noteRenderRefusal(status, name, "view access");
+        noteRenderRefusal(notices, name, "view access");
         return error.Unauthorized;
     }
     const pid = try doc.peerNamed(gpa, name);
     doc.peerReplaceAll(gpa, pid, items) catch {};
 }
 
-/// Make a background refusal observable: a host log line always, plus the
-/// generic `weft.status` chip the status line already renders — the same
-/// surface a plugin publishes progress on, so a denied producer is visible
-/// to the user without inventing a UI for it.
-fn noteRenderRefusal(status: *status_feed.Feed, name: []const u8, why: []const u8) void {
+/// Make a background refusal observable: a host log line always, plus a
+/// notice (`status_feed.Notices`), which every status line shows briefly —
+/// never a plugin's own chip, which is the plugin's to say.
+fn noteRenderRefusal(notices: *status_feed.Notices, name: []const u8, why: []const u8) void {
     std.log.warn("render refused: '{s}' — {s}", .{ name, why });
     var buf: [96]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, "render refused: {s} ({s})", .{ name, why }) catch "render refused";
-    status.set(text);
+    notices.say(text);
 }
 
 /// [FIX 2] (doc/extensibility-native-surface.md, release-blocking): apply a capability
@@ -738,7 +771,7 @@ pub const ApplyActionError = RenderError || error{ NotAnAction, StaleVersion, Ou
 
 pub fn applyActionResult(
     gpa: Allocator,
-    status: *status_feed.Feed,
+    notices: *status_feed.Notices,
     doc: *Document,
     fired: position.StampedRange,
     result: *const capability.Result,
@@ -769,14 +802,20 @@ pub fn applyActionResult(
             return a.range.start < b.range.start;
         }
     }.lessThan);
-    try renderInto(gpa, status, doc, .plugin, result.provider, items);
+    try renderInto(gpa, notices, doc, .plugin, result.provider, items);
     return items.len;
 }
 
 pub const Command = struct {
     name: []const u8,
+    /// One sentence, capitalised, ending in a full stop: what it does.
     summary: []const u8,
     args: []const ArgSpec,
+    /// How a person sees it (doc/chrome.md §1.2): label, menu, icon, … The
+    /// config tier may rewrite it (`presentations.zig`), which is why a UI
+    /// reads `presentations.of`, never this field directly. Borrowed, like
+    /// `name` and `summary`.
+    meta: Presentation = .{},
     /// WHO BOUND IT. Borrowed, and outlives the binding for the same reason
     /// `name` does — a guest's is its plugin name, which the host holds for
     /// the plugin's whole life.
@@ -787,7 +826,7 @@ pub const Command = struct {
     /// .attribution` exist so a resolver can say whose answer won. A command
     /// had no such field, so anything wanting to GROUP commands had to parse
     /// their names — and a name is a convention nobody enforces, which lies
-    /// about exactly the cases that matter (`motion.line-start` is vim's,
+    /// about exactly the cases that matter (`motions.line-start` is vim's,
     /// `zig` is `modes`'). This is that fact, recorded.
     ///
     /// Mechanism, not policy: what a namespace is FOR — grouping a palette,
@@ -818,10 +857,44 @@ pub const Command = struct {
     /// (one extent, `.whole`): the handler's return is its end.
     ended: ?*const fn (ctx: *Context, data: ?*anyopaque) void = null,
 
+    pub const AdmitError = error{
+        /// A plugin's id outside the grammar (`command_id.check`).
+        IdOutsideGrammar,
+        /// A plugin's id outside its own namespace and core's domains.
+        NotOwnNamespace,
+        /// The id is already another owner's command.
+        OwnedByAnother,
+    };
+
+    /// Who may bind `name` (`Commands.bind` asks, with what it is bound to
+    /// now). Core binds in any namespace; a plugin only an id in the grammar,
+    /// in its own namespace or a core domain (`command_id.mayName`) — the
+    /// runtime twin of `weft.plugin`'s comptime check, which a JS plugin never
+    /// ran. And nobody takes an id another owner holds: a plugin cannot
+    /// replace `file.save`, nor one plugin another's command. Its owner may
+    /// bind it again (a reload).
+    pub fn admit(name: []const u8, bound: ?Command, cmd: Command) AdmitError!void {
+        if (bound) |b| if (!std.mem.eql(u8, b.owner, cmd.owner)) return error.OwnedByAnother;
+        if (std.mem.eql(u8, cmd.owner, core_owner)) return;
+        const command_id = @import("weft_membrane").command_id;
+        if (command_id.check(name) != null) return error.IdOutsideGrammar;
+        if (!command_id.mayName(cmd.owner, name)) return error.NotOwnNamespace;
+    }
+
+    /// The owner core's own commands carry; no plugin is named it.
+    pub const core_owner = "core";
+
     /// This command, declaring `arity`.
     pub fn maps(self: Command, arity: ?selection.Arity) Command {
         var c = self;
         c.arity = arity;
+        return c;
+    }
+
+    /// This command, presented to people as `p`.
+    pub fn present(self: Command, p: Presentation) Command {
+        var c = self;
+        c.meta = p;
         return c;
     }
 };
@@ -912,8 +985,7 @@ pub fn invoke(commands: *const Commands, ctx: *Context, name: []const u8, args: 
 }
 
 fn echo(ctx: *Context, msg: []const u8) void {
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    ctx.head.echo.say(ctx.gpa, msg) catch {};
 }
 
 /// Turn a failed invocation into a line worth reading. An argument mismatch
@@ -970,16 +1042,19 @@ pub fn actionTrampoline(ctx: *Context, data: ?*anyopaque, args: []const Value) a
     if (ctx.actions.container.resolveOne(tr.name, ctx.capturedCtx().mergedFacts())) |b| {
         return run(ctx.commands, ctx, b.provider.command, args);
     }
-    ctx.head.echo.clearRetainingCapacity();
     const lang = Actions.langOfName(ctx.buffers.active().name);
     var buf: [128]u8 = undefined;
     const msg = if (lang.len > 0)
         std.fmt.bufPrint(&buf, "no {s} provider for .{s}", .{ tr.name, lang }) catch tr.name
     else
         std.fmt.bufPrint(&buf, "no {s} provider here", .{tr.name}) catch tr.name;
-    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    ctx.head.echo.say(ctx.gpa, msg) catch {};
     return .nil;
 }
+
+/// What a config-declared action says about itself until `weft.command`
+/// describes it: it runs whichever provider answers it here.
+pub const action_summary = "Run whichever provider answers this action here.";
 
 /// Declare an action and bind its same-named trampoline `Command`, so the
 /// keymap, ex, palette, and `command.run` all dispatch it uniformly. Idempotent
@@ -991,14 +1066,17 @@ pub fn registerAction(
     actions: *Actions,
     name: []const u8,
     policy: Actions.Policy,
+    summary: []const u8,
+    meta: Presentation,
 ) !void {
     const tr = try actions.declare(name, policy);
     _ = try commands.bind(gpa, name, .{
         .name = name,
-        .summary = "action",
+        .summary = summary,
         .args = &.{},
         .handler = actionTrampoline,
         .data = tr,
+        .meta = meta,
     });
 }
 
@@ -1141,29 +1219,29 @@ test "command: invoking on a user's behalf reports — the answer AND the refusa
     // keymap promoted this — the palette and every guest `wl_run*` dropped it,
     // which is why `:share` answering "already shared" looked like a no-op.
     invoke(&env.commands, ctx, "share", &.{});
-    try t.expectEqualStrings("already shared", ctx.head.echo.items);
+    try t.expectEqualStrings("already shared", ctx.head.echo.text());
 
     // An arity refusal answers with the command's SHAPE. This is the palette's
     // whole failure mode: it calls every command with no arguments, so
     // `listen` used to refuse into a discarded error and say nothing at all.
     invoke(&env.commands, ctx, "listen", &.{});
-    try t.expect(std.mem.indexOf(u8, ctx.head.echo.items, "listen <port> <access>") != null);
-    try t.expect(std.mem.indexOf(u8, ctx.head.echo.items, "given 0") != null);
+    try t.expect(std.mem.indexOf(u8, ctx.head.echo.text(), "listen <port> <access>") != null);
+    try t.expect(std.mem.indexOf(u8, ctx.head.echo.text(), "given 0") != null);
 
     // An unknown name is named, not swallowed.
     invoke(&env.commands, ctx, "lisen", &.{});
-    try t.expectEqualStrings("no such command: lisen", ctx.head.echo.items);
+    try t.expectEqualStrings("no such command: lisen", ctx.head.echo.text());
 
     // The same call, given what it asked for, replaces the refusal with its
     // own answer — the two arrive on one line, in order, like a conversation.
     invoke(&env.commands, ctx, "listen", &.{ .{ .string = "7777" }, .{ .string = "edit" } });
-    try t.expectEqualStrings("listening…", ctx.head.echo.items);
+    try t.expectEqualStrings("listening…", ctx.head.echo.text());
 
     // A command with nothing to say leaves the line as it found it: this
     // promotes what a command REPORTS, and is not a log of what ran.
     _ = try env.commands.bind(gpa, "quiet", comptime define("quiet", "Say nothing.", saysNothing));
     invoke(&env.commands, ctx, "quiet", &.{});
-    try t.expectEqualStrings("listening…", ctx.head.echo.items);
+    try t.expectEqualStrings("listening…", ctx.head.echo.text());
 }
 
 test "command Value: a borrowed live range follows edits and rejects another document" {
@@ -1224,23 +1302,23 @@ test "command: schema derivation, validation, late-bound run" {
     };
 
     // Late binding: invoked-by-name before it exists → UnknownCommand.
-    try t.expectError(error.UnknownCommand, run(&commands, &ctx, "insert-text", &.{}));
+    try t.expectError(error.UnknownCommand, run(&commands, &ctx, "edit.insert-text", &.{}));
 
-    const cmd = comptime define("insert-text", "Insert text at a byte offset.", insertText);
+    const cmd = comptime define("edit.insert-text", "Insert text at a byte offset.", insertText);
     try t.expectEqual(@as(usize, 2), cmd.args.len);
     try t.expectEqual(Type.integer, cmd.args[0].type);
     try t.expectEqual(Type.string, cmd.args[1].type);
     try t.expectEqualStrings("offset", cmd.args[0].name);
-    _ = try commands.bind(gpa, "insert-text", cmd);
+    _ = try commands.bind(gpa, "edit.insert-text", cmd);
 
     // Wrong arity / wrong types are rejected before the handler runs.
-    try t.expectError(error.ArityMismatch, run(&commands, &ctx, "insert-text", &.{.nil}));
-    try t.expectError(error.TypeMismatch, run(&commands, &ctx, "insert-text", &.{
+    try t.expectError(error.ArityMismatch, run(&commands, &ctx, "edit.insert-text", &.{.nil}));
+    try t.expectError(error.TypeMismatch, run(&commands, &ctx, "edit.insert-text", &.{
         .{ .string = "oops" }, .{ .string = "hi" },
     }));
     try t.expectEqual(@as(usize, 0), buffers.active().textEditor().?.text().byteLen());
 
-    const res = try run(&commands, &ctx, "insert-text", &.{
+    const res = try run(&commands, &ctx, "edit.insert-text", &.{
         .{ .integer = 0 }, .{ .string = "graft" },
     });
     try t.expectEqual(Value{ .integer = 5 }, res);
@@ -1340,7 +1418,7 @@ test "command: read-only refuses interactive edit, allows render (in depth)" {
     // Seed via render (content production), THEN mark the buffer read-only.
     ctx.user_initiated = true;
     try ctx.edit(.{ .start = 0, .end = 0 }, "tree");
-    ctx.buffer().read_only = true;
+    ctx.buffer().read_only = Buffers.produced;
 
     const Peer = struct {
         gpa: std.mem.Allocator,
@@ -1373,7 +1451,7 @@ test "command: read-only refuses interactive edit, allows render (in depth)" {
 
     // ── Span-level: a read-only SPAN (a comint's output) refuses edits inside
     // it, while the rest of the buffer (its input line) stays editable.
-    ctx.buffer().read_only = false;
+    ctx.buffer().read_only = null;
     ctx.principal = .user;
     ctx.user_initiated = true;
     const doc2 = ctx.document().?;
@@ -1843,7 +1921,7 @@ test "command: W4 slice 3 [FIX 2] — applyActionResult refuses an out-of-range 
     });
     const bad_session = (try env.caps.fire(.format, doc, null, .{})).?;
     const bad_result = &env.caps.session(bad_session).?.all()[0];
-    try t.expectError(error.OutOfRange, applyActionResult(gpa, &env.buffers.status, doc, fired, bad_result));
+    try t.expectError(error.OutOfRange, applyActionResult(gpa, &env.buffers.notices, doc, fired, bad_result));
     // Refused wholesale: the document is untouched.
     const unchanged = try doc.text().toOwnedSlice(gpa);
     defer gpa.free(unchanged);
@@ -1885,7 +1963,7 @@ test "command: W4 slice 3 [FIX 2] — applyActionResult applies an in-range batc
     });
     const good_session = (try env.caps.fire(.format, doc, null, .{})).?;
     const good_result = &env.caps.session(good_session).?.all()[0];
-    const applied = try applyActionResult(gpa, &env.buffers.status, doc, fired, good_result);
+    const applied = try applyActionResult(gpa, &env.buffers.notices, doc, fired, good_result);
     try t.expectEqual(@as(usize, 1), applied);
 
     const after = try doc.text().toOwnedSlice(gpa);
@@ -1955,19 +2033,21 @@ test "command: the undo door — a region-narrowed principal cannot smuggle an o
     try t.expectEqualStrings("0123456789", restored);
 }
 
-test "command: a refused background render is observable (log + status chip)" {
+test "command: a refused background render is observable (log + notice)" {
     const gpa = t.allocator;
     var env = try DocRegionEnv.init(gpa);
     defer env.deinit();
     const doc = env.ctx.document().?;
 
     doc.my_grant = .view; // this replica may read, never write
-    try t.expectError(error.Unauthorized, renderInto(gpa, &env.buffers.status, doc, .plugin, "ci-plugin", &.{
+    try t.expectError(error.Unauthorized, renderInto(gpa, &env.buffers.notices, doc, .plugin, "ci-plugin", &.{
         .{ .range = .{ .start = 0, .end = 0 }, .bytes = "3 failing" },
     }));
 
-    // No Head to echo on, so the chip is the user-visible seam.
-    const chip = env.buffers.status.get() orelse return error.TestUnexpectedResult;
+    // No Head to echo on, so a notice is the user-visible seam — and the
+    // plugin chip is left alone.
+    try t.expect(env.buffers.status.get() == null);
+    const chip = env.buffers.notices.get() orelse return error.TestUnexpectedResult;
     try t.expect(std.mem.indexOf(u8, chip, "ci-plugin") != null);
     try t.expect(std.mem.indexOf(u8, chip, "refused") != null);
 }

@@ -1,7 +1,7 @@
 //! repl — stateful interactive REPLs (design §6.3), a `.wasm` plugin (perms
-//! `{proc, timer}`). `repl-start` spawns a persistent interpreter (arg0, e.g.
+//! `{proc, timer}`). `repl.start` spawns a persistent interpreter (arg0, e.g.
 //! `python3 -i`, `node`, `nix repl`) whose output streams into its own comint
-//! buffer; `repl-send-line` feeds it the current line and `repl-quit` ends it.
+//! buffer; `repl.send-line` feeds it the current line and `repl.quit` ends it.
 //! Unlike the stateless `console`, the process KEEPS its session state between
 //! sends — a real read-eval-print loop.
 //!
@@ -18,7 +18,7 @@
 //! While a session is live it is PUBLISHED: context key `repl.session` holds
 //! that designation on the place it runs in (doc/model.md §2.5), so a config
 //! can offer "Send to REPL" exactly where there is a REPL to send to —
-//! `weft.provide(…, { context: { "repl.session": "*" } }, "repl-send-line")`
+//! `weft.provide(…, { context: { "repl.session": "*" } }, "repl.send-line")`
 //! — and a toolbar shows it with no toolbar code knowing a REPL exists. The
 //! key names the most recent live session in that place, and is retracted
 //! when the last one quits or is found to have exited — at the place it was
@@ -65,11 +65,11 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "repl-start", .call = start, .arity = .whole, .params = "[interpreter]", .summary = "start an interpreter in its own buffer (default sh)" },
-    .{ .name = "repl-send", .call = send, .arity = .whole, .params = "text", .summary = "send a line to this buffer's REPL" },
-    .{ .name = "repl-send-line", .arity = .one, .call = sendLine, .summary = "send the current line to this buffer's REPL" },
-    .{ .name = "repl-quit", .call = quit, .arity = .whole, .summary = "stop this buffer's REPL; others stay live" },
-    .{ .name = "repl-reattach", .call = reattach, .arity = .whole, .params = "designation", .summary = "show the live REPL a `weft://here/proc/repl…` designation names" },
+    .{ .name = "repl.start", .call = start, .arity = .whole, .params = "[interpreter]", .summary = "Start an interpreter in its own buffer, sh by default.", .label = "Start REPL", .menu = "Run/REPL", .group = "repl", .order = 1, .icon = "terminal" },
+    .{ .name = "repl.send", .call = send, .arity = .whole, .params = "text", .summary = "Send a line to this buffer's REPL.", .label = "Send to REPL", .prompts = true },
+    .{ .name = "repl.send-line", .arity = .one, .call = sendLine, .summary = "Send the current line to this buffer's REPL.", .label = "Send Line to REPL", .menu = "Run/REPL", .group = "repl", .order = 2 },
+    .{ .name = "repl.quit", .call = quit, .arity = .whole, .summary = "Stop this buffer's REPL, leaving the others live.", .label = "Stop REPL", .menu = "Run/REPL", .group = "repl", .order = 3, .icon = "stop" },
+    .{ .name = "repl.reattach", .call = reattach, .arity = .whole, .params = "designation", .summary = "Show the live REPL a `weft://here/proc/repl…` designation names.", .internal = true },
 };
 
 fn describeExtra() void {
@@ -80,7 +80,7 @@ fn describeExtra() void {
 fn init() void {
     // This plugin's processes are `weft://here/proc/repl…`: it reattaches
     // them, and no other plugin may declare one.
-    _ = weft.designationOpener("proc.repl", "repl-reattach");
+    _ = weft.designationOpener("proc.repl", "repl.reattach");
 }
 
 /// `open weft://here/proc/repl.N` with no entry showing it: the interpreter

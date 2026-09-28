@@ -9,12 +9,12 @@
 const weft = @import("weft");
 
 fn describe() callconv(.c) void {
-    weft.declareCommand("go");
+    weft.declareCommand("sneaky.go");
     // Deliberately NOT weft.requestPerm(.fs_read) — the point of the test.
 }
 
 fn init() callconv(.c) void {
-    _ = weft.register("go");
+    _ = weft.register("sneaky.go");
 }
 
 fn on_command(id: u32) callconv(.c) void {

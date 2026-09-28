@@ -159,12 +159,25 @@ pub const Rows = struct {
     line_h: f32 = 16,
     /// Margins around a pane's body, both sides together.
     inset: f32 = 16,
+    /// Whether panes carry status lines of their own at all — off where a
+    /// config shows status in one bar instead (`editor/pane-status off`).
+    pane_status: bool = true,
+
+    /// Whether a pane under `attrs` draws a status line of its own: the one
+    /// reading the carve and the frame both take, so a row is reserved
+    /// exactly where one is drawn.
+    pub fn statusLine(self: Rows, attrs: core.viewport.Attrs) bool {
+        return attrs.status_line and self.pane_status;
+    }
 
     /// The pixel extent of `n` body rows in a pane under `attrs`: its own
-    /// status line is one more row.
+    /// status line is one more row, flush, outside the margins. A pane of no
+    /// body rows is only its status line (a bar presenting a status), with
+    /// no body to put margins round.
     pub fn px(self: Rows, n: u16, attrs: core.viewport.Attrs) f32 {
-        const status: f32 = if (attrs.status_line) 1 else 0;
-        return (@as(f32, @floatFromInt(n)) + status) * self.line_h + self.inset;
+        if (n == 0) return if (attrs.status_line) self.line_h else 0;
+        const status: f32 = if (self.statusLine(attrs)) self.line_h else 0;
+        return @as(f32, @floatFromInt(n)) * self.line_h + self.inset + status;
     }
 };
 
@@ -357,6 +370,23 @@ pub const Layout = struct {
         buffer_id: core.Buffers.Id,
         attrs: core.viewport.Attrs,
     ) !*Node {
+        return self.dockWithin(edge, extent, buffer_id, attrs, &.{});
+    }
+
+    /// `dock`, but INSIDE the docks whose panels are `outer`: the new panel
+    /// takes its extent from what they leave, so they stay outermost. How a
+    /// viewport declared earlier keeps its place inside one declared later
+    /// whatever order they are shown in — a panel shown on demand docks
+    /// above a window-wide bar, not under it. Only the run of `outer` docks
+    /// at the root is passed through; nothing existing moves.
+    pub fn dockWithin(
+        self: *Layout,
+        edge: core.viewport.Edge,
+        extent: core.viewport.Extent,
+        buffer_id: core.Buffers.Id,
+        attrs: core.viewport.Attrs,
+        outer: []const PaneId,
+    ) !*Node {
         const panel = try self.gpa.create(Node);
         errdefer self.gpa.destroy(panel);
         const node = try self.gpa.create(Node);
@@ -365,8 +395,10 @@ pub const Layout = struct {
         var docked = attrs;
         docked.dock = edge; // the tree and the attributes cannot disagree
         panel.* = .{ .leaf = .{ .id = id, .buffer_id = buffer_id, .attrs = docked } };
-        node.* = .{ .dock = .{ .edge = edge, .extent = extent, .panel = panel, .rest = self.root } };
-        self.root = node;
+        var at: **Node = &self.root;
+        while (at.*.* == .dock and std.mem.indexOfScalar(PaneId, outer, at.*.dock.panel.leaf.id) != null) at = &at.*.dock.rest;
+        node.* = .{ .dock = .{ .edge = edge, .extent = extent, .panel = panel, .rest = at.* } };
+        at.* = node;
         return panel;
     }
 
@@ -514,11 +546,11 @@ pub const Layout = struct {
     }
 
     /// The next CYCLING leaf after `focused` in tree order (wraps) — the
-    /// legacy `focus-other` with more than two panes. Null if fewer than two
+    /// legacy `window.focus-next` with more than two panes. Null if fewer than two
     /// panes take part.
     ///
     /// Panes whose `cycles` attribute is false are not in the rotation, which
-    /// is the whole of "a sidebar does not appear in `focus-other`": it is
+    /// is the whole of "a sidebar does not appear in `window.focus-next`": it is
     /// enforced here, once, rather than by every caller remembering to skip
     /// it. `focused` itself may be one (cycling OUT of a companion is fine —
     /// it is cycling INTO one that is unwanted).
@@ -939,6 +971,38 @@ test "dock: a row-sized strip is its rows plus chrome, at any frame and row heig
     try t.expect(!l.paneById(strip.leaf.id).?.leaf.attrs.isPrimary());
 }
 
+test "dock: a bar of no body rows is exactly its status line, across the whole frame" {
+    var l = try Layout.init(t.allocator, 1);
+    defer l.deinit();
+    const editor = l.root;
+    // A panel docked last is the outermost: it spans the frame's full width,
+    // under every panel docked before it.
+    const side = try l.dock(.left, .{ .fraction = 0.25 }, 5, companion);
+    const bar_attrs: core.viewport.Attrs = .{ .cycles = false, .persistent = true, .focus_source = false, .takes_focus = false };
+    const bar = try l.dock(.bottom, .{ .rows = 0 }, 7, bar_attrs);
+    l.rows = .{ .line_h = 20, .inset = 16 };
+    const frame: Rect = .{ .x = 0, .y = 0, .w = 400, .h = 300 };
+    try t.expectEqual(Rect{ .x = 0, .y = 280, .w = 400, .h = 20 }, l.focusedRect(bar, frame));
+    try t.expectEqual(@as(f32, 280), l.focusedRect(side, frame).h);
+    try t.expectEqual(@as(f32, 280), l.focusedRect(editor, frame).h);
+}
+
+test "dock: a row-sized panel reserves no status row where panes draw none" {
+    var l = try Layout.init(t.allocator, 1);
+    defer l.deinit();
+    const panel = try l.dock(.bottom, .{ .rows = 12 }, 5, companion);
+    l.rows = .{ .line_h = 20, .inset = 16 };
+    const frame: Rect = .{ .x = 0, .y = 0, .w = 400, .h = 600 };
+    try t.expectApproxEqAbs(@as(f32, 12 * 20 + 16 + 20), l.focusedRect(panel, frame).h, 0.01);
+    // `editor/pane-status off`: no pane draws a line, so none is carved.
+    l.rows.pane_status = false;
+    try t.expect(!l.rows.statusLine(companion));
+    try t.expectApproxEqAbs(@as(f32, 12 * 20 + 16), l.focusedRect(panel, frame).h, 0.01);
+    // A bar of no body rows is its status line whatever panes do.
+    const bar = try l.dock(.bottom, .{ .rows = 0 }, 7, .{ .cycles = false, .persistent = true, .takes_focus = false });
+    try t.expectApproxEqAbs(@as(f32, 20), l.focusedRect(bar, frame).h, 0.01);
+}
+
 test "dock: the workspace enforces the attributes the panel declares" {
     var l = try Layout.init(t.allocator, 1);
     defer l.deinit();
@@ -947,7 +1011,7 @@ test "dock: the workspace enforces the attributes the panel declares" {
     const frame: Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
 
     // Cycling never lands IN the companion, but always lets you back OUT of
-    // one: `focus-other` from the editor has nowhere to go, and from the
+    // one: `window.focus-next` from the editor has nowhere to go, and from the
     // sidebar returns to the editor.
     try t.expectEqual(@as(?*Node, null), l.focusNext(editor));
     try t.expectEqual(editor, l.focusNext(panel).?);

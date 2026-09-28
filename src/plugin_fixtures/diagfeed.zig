@@ -3,11 +3,11 @@
 //! language server behind it. A test drives it the way `lsp` is driven by a
 //! server's publish:
 //!
-//!   - `diagfeed-set <rows>`: replace the rows (`path\tline\tcol\tseverity\t
+//!   - `diagfeed.set <rows>`: replace the rows (`path\tline\tcol\tseverity\t
 //!     message`, newline-separated) and raise the `diagnostics` signal, as
 //!     `lsp` does when a publish lands.
-//!   - `diagfeed-list`: the rows, as the command's string result — what
-//!     `weft.set("problems", "source", "diagfeed-list")` points the list at.
+//!   - `diagfeed.list`: the rows, as the command's string result — what
+//!     `weft.set("problems", "source", "diagfeed.list")` points the list at.
 
 const weft = @import("weft");
 
@@ -27,8 +27,8 @@ fn list() void {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "diagfeed-set", .arity = .one, .call = set, .params = "rows" },
-    .{ .name = "diagfeed-list", .arity = .one, .call = list },
+    .{ .name = "diagfeed.set", .arity = .one, .call = set, .params = "rows", .summary = "Exercise the diagfeed.set fixture command.", .internal = true },
+    .{ .name = "diagfeed.list", .arity = .one, .call = list, .summary = "Exercise the diagfeed.list fixture command.", .internal = true },
 };
 
 comptime {

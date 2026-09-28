@@ -2,7 +2,7 @@
 //!
 //! The caller assembles it; the view renders it. Split out of `view.zig`
 //! together with the caret shape, the per-buffer markdown styling handle, the
-//! tab-strip datum, and the pure tab-strip builder. Re-exported by `view.zig`
+//! tab-strip datum, and the hover frame input. Re-exported by `view.zig`
 //! so `view_mod.Hud` / `.CursorStyle` / `.MdInline` / `.Tab` are unchanged.
 
 const std = @import("std");
@@ -12,6 +12,8 @@ const core = @import("weft_core");
 const region = @import("../region.zig");
 const ui_mesh = @import("ui_mesh.zig");
 const semantic_data = @import("semantic_data.zig");
+const semantic_model = @import("weft_semantic");
+const chrome = @import("chrome.zig");
 
 const InlineAttr = core.capability.InlineAttr;
 
@@ -50,27 +52,15 @@ pub const MdInline = struct {
 /// that matched the snapshot's text, whatever the document did since.
 pub const Hud = struct {
     mode: []const u8,
-    /// Draw the pane's status line (the viewport's `status_line` attribute).
+    /// Draw the pane's status line (the viewport's `status_line` attribute,
+    /// or a pane presenting a status).
     status_line: bool = true,
-    dirty: bool = false,
-    save_failed: bool = false,
-    /// Backing kind chip: "file" | "shell" | "tool" | "@shared" | null.
-    backing: ?[]const u8 = null,
+    /// The pane whose context `statusline_segs` describe, when it is not
+    /// this one: this pane PRESENTS another context's status (a bar showing
+    /// `weft://here/status/primary`), and a click on a segment acts there.
+    status_of: ?u32 = null,
     /// Paint the shipped mark above a dashboard tool's projection.
     brand_mark: bool = false,
-    /// Save progress chip: "saving…" | "save stale" | null.
-    save_note: ?[]const u8 = null,
-    /// Partial checkout: percent NOT yet fetched (0 = complete).
-    unfetched_pct: ?u8 = null,
-    /// Remote peers with presence in this buffer.
-    peers: usize = 0,
-    /// Transient `echo` message (wins the right-hand slot).
-    echo: ?[]const u8 = null,
-    /// A generic plugin-published status chip, PERSISTENT (unlike `echo`) —
-    /// the same kind of slot as `echo`, one tier up in lifetime. The core knows
-    /// nothing of what it says; a plugin publishes via `weft.status` (a task
-    /// progress, a repl state, an agent's "waiting"). Null = no chip.
-    plugin_status: ?[]const u8 = null,
     /// Rendering P2 (doc/rendering.md): a LEGACY/test-only path — production
     /// (`frame_builder.zig`) leaves this null and instead hands the picker's
     /// own `core.pick.Pick.buildSurface` scene through `surfaces` below, the
@@ -100,20 +90,14 @@ pub const Hud = struct {
     /// spans draw beside the line. The presentation knows only the feed
     /// shape — never which plugin published one, or what it means.
     annotations: []const core.layers.Snapshot = &.{},
-    /// Message of a diagnostic at the cursor, for the status line.
-    cursor_diag: ?[]const u8 = null,
     /// Remote peers' cursors (replicated feed layer).
     presence_layer: ?*const core.layers.Snapshot = null,
-    /// Peer trust chip: "✓ verified" | "⚠ unverified" | null (the host we
-    /// connected out to; see known_peers / the SAS).
-    trust: ?[]const u8 = null,
-    /// The `ui/statusline-seg` mesh's composed output (doc/cwa-prior-docs-audit.md §5
-    /// W3-1) — mode chip, buffer position, file/path, collab liveness (left
-    /// cluster) and the diagnostics count (right-anchored) all come from
-    /// here now; `statusline.zig` renders this list, it no longer formats
-    /// those chips itself. Empty when the caller never fired the mesh (every
-    /// pre-W3 test/harness call site) — those chips simply don't render,
-    /// same as any other omitted Hud field.
+    /// The status line: the `ui/statusline-seg` mesh's composed output for
+    /// the pane's context (doc/chrome.md §4.1) — the mode chip, the path,
+    /// the save state, the message, the position, and whatever a plugin
+    /// publishes, every one a segment. `statusline.zig` places and draws the
+    /// list; it formats nothing itself. Empty when the caller never fired
+    /// the mesh (a harness building one pane): an empty bar.
     statusline_segs: []const ui_mesh.Seg = &.{},
     /// The `ui/gutter-segment` mesh, resolved ONCE for this frame (north-
     /// star-plan §6 W3-1) — null when nothing is bound (today's default: no
@@ -143,6 +127,11 @@ pub const Hud = struct {
     cursor_style: CursorStyle = .block,
     caret_place: CaretPlace = .head,
     cursor_on: bool = true,
+    /// The focus is a ROW of a text projection, not a position in its text
+    /// (`row` granularity, doc/chrome.md §5.2): the caret's line is washed
+    /// as the focused row, and no caret is drawn — typing inserts nothing
+    /// there, and a caret would say it does.
+    row_focus: bool = false,
     /// Retained plugin overlays (which-key/files/git) to draw this frame.
     /// corner/center placements overlay the body; bottom is reserved for the
     /// dock (the picker/which-key path).
@@ -161,6 +150,15 @@ pub const Hud = struct {
     /// Which edges of this pane's frame are internal (shared with a
     /// neighbor) and get a 1px divider line. Empty for a single pane.
     pane_border: region.Edges = .{},
+    /// What the pointer rests on in this pane (frame input; see `Hover`).
+    pointer: Hover = .{},
+    /// This build paints the frame's tooltip, whichever pane offered it —
+    /// the pane built last, so the tooltip is above every pane. A caller
+    /// building one pane leaves it on.
+    tooltips: bool = true,
+    /// The tooltip's key hint, found when the pointer settled (the shell's
+    /// `keysFor`, doc/chrome.md §1.3). Empty in a frame built without one.
+    key_hint: chrome.KeyHint = .{},
 
     pub const max_pick_rows = 8;
     pub const max_hover_rows = 16;
@@ -186,36 +184,23 @@ pub const Hud = struct {
 };
 
 /// One entry in the top buffer-tab strip. `id` is the entry it shows, so a
-/// click on the tab can name it (`TabPart`) without the view knowing what a
-/// buffer is.
-pub const Tab = struct { name: []const u8, active: bool, id: u32 = 0 };
-
-/// The glyph after each tab name that a click closes the tab through.
-pub const tab_close_glyph = "×";
-
-/// Where one clickable part of the tab strip sits, in columns of the strip
-/// text: which tab (`index` into the `tabs` it was built from), and whether
-/// it is the tab's body or its close glyph. The view turns these into hit
-/// rects.
-pub const TabPart = struct {
-    index: usize,
-    part: Part,
-    col: usize,
-    cols: usize,
-
-    pub const Part = enum { body, close };
+/// click on the tab can name it (`ChromeHit.entry`) without the view knowing
+/// what a buffer is.
+pub const Tab = struct {
+    name: []const u8,
+    active: bool,
+    id: u32 = 0,
+    /// What the tab's tooltip names: the entry's full path, where the tab
+    /// shows only its base name.
+    path: []const u8 = "",
 };
 
-/// Build the tab strip text into `buf`: the active buffer bracketed, others
-/// plain, each followed by the close glyph, separated by " │ ". Whole parts
-/// only, so the result is always valid UTF-8 (the view truncates it to the
-/// column width when it renders — `appendPlainRun` stops at `cols_visible`
-/// codepoints). Pure; the geometry (which row) is the view's.
-pub fn buildTabStrip(buf: []u8, tabs: []const Tab) []const u8 {
-    return buildTabStripParts(buf, tabs, &.{}).text;
-}
+/// The glyph a text-style tab closes through (a style that draws icons draws
+/// the `close` icon instead).
+pub const tab_close_glyph = "×";
 
-pub const TabStrip = struct { text: []const u8, parts: []const TabPart };
+/// Which part of a tab a point is on: its body, or its close glyph.
+pub const TabPart = enum { body, close };
 
 /// One clickable region of a pane's chrome, as last built: a tab's body or
 /// close glyph, or a status segment. What a pointer on it resolves to
@@ -227,51 +212,48 @@ pub const ChromeHit = struct {
     /// Which tab (into `Hud.tabs`) or which segment (into
     /// `Hud.statusline_segs`).
     index: usize,
-    part: TabPart.Part = .body,
+    part: TabPart = .body,
     /// The entry a tab shows.
     entry: ?u32 = null,
     /// The command a status segment declared for a click, or "".
     command: []const u8 = "",
+    /// The pane a status segment's command acts in, when it is not the one
+    /// it is drawn in (`Hud.status_of`).
+    pane: ?u32 = null,
+    /// What a status segment reads as drawn — its compact form, or its cut
+    /// with the `…`, when that is what the room allowed.
+    label: []const u8 = "",
 
     pub const Kind = enum { tab, status };
 };
 
-/// `buildTabStrip`, also reporting where each tab's body and close glyph
-/// landed (as many as fit in `parts`). A part is reported only once the
-/// whole of it was written.
-pub fn buildTabStripParts(buf: []u8, tabs: []const Tab, parts: []TabPart) TabStrip {
-    var w: usize = 0;
-    var col: usize = 0;
-    var n: usize = 0;
-    const put = struct {
-        fn part(b: []u8, at: *usize, c: *usize, s: []const u8) bool {
-            if (at.* + s.len > b.len) return false; // whole part or nothing
-            @memcpy(b[at.* .. at.* + s.len], s);
-            at.* += s.len;
-            c.* += std.unicode.utf8CountCodepoints(s) catch s.len;
-            return true;
-        }
-    }.part;
-    for (tabs, 0..) |tabinfo, i| {
-        if (!put(buf, &w, &col, if (i == 0) " " else " │ ")) break;
-        const body_col = col;
-        if (tabinfo.active and !put(buf, &w, &col, "[")) break;
-        if (!put(buf, &w, &col, tabinfo.name)) break;
-        if (tabinfo.active and !put(buf, &w, &col, "]")) break;
-        if (n < parts.len) {
-            parts[n] = .{ .index = i, .part = .body, .col = body_col, .cols = col - body_col };
-            n += 1;
-        }
-        if (!put(buf, &w, &col, " ")) break;
-        const close_col = col;
-        if (!put(buf, &w, &col, tab_close_glyph)) break;
-        if (n < parts.len) {
-            parts[n] = .{ .index = i, .part = .close, .col = close_col, .cols = col - close_col };
-            n += 1;
-        }
+/// What the pointer rests on in this pane, as the frame's INPUT (doc/model.md
+/// §2.7): hover is not a command and dispatches nothing — the frame reads it,
+/// as it reads the caret. The app layer derives it from the last frame's hit
+/// geometry (`app/pointer.zig`) and marks the frame dirty only when the
+/// TARGET changes, so moving the pointer within a button costs no frame.
+pub const Hover = struct {
+    /// The pointer in framebuffer pixels; null when it is not over this pane.
+    at: ?[2]f32 = null,
+    /// The chrome part under it.
+    chrome: ?struct { kind: ChromeHit.Kind, index: usize, part: TabPart } = null,
+    /// The scene node under it.
+    node: ?struct { view: semantic_model.view.Ref, node: semantic_model.scene.NodeId } = null,
+    /// A button is held down on this same target: it reads as pressed.
+    pressed: bool = false,
+    /// The pointer has rested on the target past the tooltip delay.
+    tooltip: bool = false,
+
+    pub fn onChrome(self: Hover, kind: ChromeHit.Kind, index: usize, part: TabPart) bool {
+        const c = self.chrome orelse return false;
+        return c.kind == kind and c.index == index and c.part == part;
     }
-    return .{ .text = buf[0..w], .parts = parts[0..n] };
-}
+
+    pub fn onNode(self: Hover, view: semantic_model.view.Ref, node: semantic_model.scene.NodeId) bool {
+        const n = self.node orelse return false;
+        return n.node == node and n.view.eql(view);
+    }
+};
 
 const testing = std.testing;
 
@@ -280,9 +262,9 @@ test "hud: the panel reserves exactly what it renders (no status overlap)" {
     // computed offsets independently and drifted, so which-key's last hint
     // landed on the status row. Both now derive from `panelRows()`.
     const hints = [_]core.Keymap.Binding{
-        .{ .key = "f", .command = "find-file" },
+        .{ .key = "f", .command = "files.find" },
         .{ .key = "c", .command = "collab" },
-        .{ .key = "space", .command = "palette" },
+        .{ .key = "space", .command = "palette.open" },
     };
     const hud: Hud = .{ .mode = "leader", .which_key = &hints };
     try testing.expectEqual(@as(usize, 4), hud.panelRows()); // header + 3 hints
@@ -296,38 +278,4 @@ test "hud: the panel reserves exactly what it renders (no status overlap)" {
     try testing.expect(last_panel_row < rows_total - 1); // never the status row
     // And the body reservation leaves the panel_top clear of the body.
     try testing.expectEqual(panel_top, rows_total - hud.rows());
-}
-
-test "buildTabStrip: active bracketed, a close glyph each, separated, truncated to width" {
-    const tabs = [_]Tab{
-        .{ .name = "a.zig", .active = false },
-        .{ .name = "b.md", .active = true },
-        .{ .name = "c.txt", .active = false },
-    };
-    var buf: [128]u8 = undefined;
-    try testing.expectEqualStrings(" a.zig × │ [b.md] × │ c.txt ×", buildTabStrip(&buf, &tabs));
-    // A tight buffer stops on whole parts — always valid UTF-8, never a
-    // split codepoint (the two-byte glyph did not fit, so it is not there).
-    var tiny: [8]u8 = undefined;
-    const short = buildTabStrip(&tiny, &tabs);
-    try testing.expectEqualStrings(" a.zig ", short);
-    try testing.expect(std.unicode.utf8ValidateSlice(short));
-}
-
-test "buildTabStripParts: each tab's body and close glyph, in columns" {
-    const tabs = [_]Tab{
-        .{ .name = "a.zig", .active = false, .id = 4 },
-        .{ .name = "b.md", .active = true, .id = 9 },
-    };
-    var buf: [128]u8 = undefined;
-    var parts: [8]TabPart = undefined;
-    const strip = buildTabStripParts(&buf, &tabs, &parts);
-    try testing.expectEqualStrings(" a.zig × │ [b.md] ×", strip.text);
-    try testing.expectEqual(@as(usize, 4), strip.parts.len);
-    // " a.zig" — the body is columns 1..5, the glyph column 7.
-    try testing.expectEqual(TabPart{ .index = 0, .part = .body, .col = 1, .cols = 5 }, strip.parts[0]);
-    try testing.expectEqual(TabPart{ .index = 0, .part = .close, .col = 7, .cols = 1 }, strip.parts[1]);
-    // " │ " is three columns, so the second body starts at 11; brackets count.
-    try testing.expectEqual(TabPart{ .index = 1, .part = .body, .col = 11, .cols = 6 }, strip.parts[2]);
-    try testing.expectEqual(TabPart{ .index = 1, .part = .close, .col = 18, .cols = 1 }, strip.parts[3]);
 }

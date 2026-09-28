@@ -42,11 +42,11 @@ var id_read: u32 = 0;
 var answer: [256]u8 = undefined;
 
 fn describe() callconv(.c) void {
-    weft.declareCommand("badge-read");
+    weft.declareCommand("badge-consumer.read");
 }
 
 fn init() callconv(.c) void {
-    id_read = weft.register("badge-read");
+    id_read = weft.register("badge-consumer.read");
 }
 
 fn on_command(id: u32) callconv(.c) void {

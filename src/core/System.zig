@@ -78,6 +78,7 @@ const SlotHost = @import("slot.zig").SlotHost;
 const kv = @import("kv.zig");
 const env_mod = @import("env.zig");
 const place_mod = @import("place.zig");
+const locus_mod = @import("locus.zig");
 const builtins = @import("builtins.zig");
 const manifest = @import("manifest.zig");
 const task = @import("task.zig");
@@ -110,7 +111,7 @@ pub const System = @This();
 /// `System` VALUES themselves never move, only the map of pointers to them
 /// does. Do not embed a `System` by value inside another moving container.
 gpa: Allocator,
-/// This system's name — the `system-swap <name>` / `Host.hostSystem`
+/// This system's name — the `app.swap-system <name>` / `Host.hostSystem`
 /// registration key ("editor", "agent-ux", ...).
 name: []u8,
 buffers: Buffers,
@@ -166,6 +167,10 @@ environments: env_mod.Environments = undefined,
 /// Dense opaque ids for the places this run has seen (`place.Ids`), so a
 /// guest can key a session table on "which place" without being handed one.
 place_ids: place_mod.Ids = undefined,
+/// Every locus this run has reached (`locus.Loci`): where a place is — here,
+/// a peer by its fingerprint, a shell by its id — and how reachable it is.
+/// A place carries a `Locus`; this is what that handle names.
+loci: locus_mod.Loci = undefined,
 /// This system's headless/background head: what `command.run` dispatches
 /// against when no OTHER head is specified, and (once plugins are wired
 /// per-system — see the module doc) what a background wasm entry
@@ -204,6 +209,9 @@ plugins: ?Plugins = null,
 /// `Ctx.capture`'s grant resolution and a loaded plugin's possession checks
 /// both consult exactly one source of truth.
 grants: grants_mod.HandleTable = undefined,
+/// What commands are called at the config tier (`presentations.zig`):
+/// `weft.command(id, {…})` descriptions, over what each command declared.
+presentations: @import("presentations.zig").Presentations = .{},
 /// Semantic targets/views/fields and target-handler registrations belong to
 /// the system, just like buffers and commands. Heads carry only focus and
 /// active interactions into whichever system they are attached to.
@@ -237,6 +245,20 @@ viewports: viewport_mod.Registry = .empty,
 /// they unload.
 designations: @import("designation.zig").Openers = .empty,
 
+/// `Services.granularity_of` over this system's keymap: what `mode` or its
+/// fallback chain declares; else — a menu, the picker — what the mode the
+/// active entry rests in declares, so a transient mode keeps its grammar's
+/// focus; else — a tool's own mode (`git`), which no grammar owns — what
+/// the config's base mode declares (`Buffers.default_mode`: the grammar
+/// the config chose, not whichever loaded last); else `row`.
+fn granularityOf(ctx: *anyopaque, mode: []const u8) @import("weft_input").Granularity {
+    const self: *System = @ptrCast(@alignCast(ctx));
+    if (self.keymap.granularityOf(mode)) |g| return g;
+    const resting = intent_mod.restingModeOf(&self.buffers, self.buffers.active());
+    if (self.keymap.granularityOf(resting)) |g| return g;
+    return self.keymap.granularityOf(self.buffers.default_mode) orelse .row;
+}
+
 /// Build a system from scratch: fresh buffers (one scratch buffer, per
 /// `Buffers.init`), empty commands/keymap, and the built-in command/keymap
 /// floor installed (`core.builtins.install` — the same modeless baseline
@@ -258,6 +280,7 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
         .filesystems = .init(gpa),
         .environments = .init(gpa),
         .place_ids = try place_mod.Ids.init(gpa),
+        .loci = try locus_mod.Loci.init(gpa),
         .context = .init(gpa),
     };
     errdefer self.context.deinit();
@@ -273,6 +296,11 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     self.caps = Caps.init(gpa, task.nowNs, &self.container);
     self.actions = Actions.init(gpa, &self.container);
     self.slot_host = SlotHost.init(gpa, &self.container);
+    // An edit the head carries out of its entry is committed on the way
+    // (`Buffers.leave_edit`), by the structural views that own edits.
+    self.buffers.leave_edit = self.semantic.leaveEdit();
+    // How a head focuses a row is its mode's declaration, in this keymap.
+    self.semantic.granularity_of = .{ .ctx = self, .get = granularityOf };
     // The one slot core both fires and decodes (`pick/annotate.zig`). Core
     // declares it because core has to READ the answers, and it can only do
     // that against a shape it knows; a plugin-declared schema would leave
@@ -283,6 +311,9 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     // plugin answers with. What a cell says (a line number, a mark) is the
     // plugin's.
     try @import("gutter.zig").declare(&self.container);
+    // And the status line's, for the same reason: what a segment says is the
+    // plugin's, its shape the frame's to decode.
+    try @import("status_segment.zig").declare(&self.container);
     // How a projection ROLE reads, as bindings rather than a switch — so a
     // theme restyles a diff, or styles a role core never heard of, the same
     // way anything else overrides anything else.
@@ -295,6 +326,8 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     errdefer self.intent.deinit(gpa);
     try self.intent.attachActions(gpa, &self.actions);
     try builtins.install(gpa, &self.commands, &self.keymap, &self.default_head, &self.actions);
+    // A context's status is a projection core produces itself.
+    try @import("status_projection.zig").install(gpa, &self.commands, &self.designations);
     return self;
 }
 
@@ -333,9 +366,11 @@ pub fn destroy(self: *System) void {
     self.commands.deinit(gpa);
     self.buffers.deinit(gpa);
     self.place_ids.deinit();
+    self.loci.deinit();
     self.environments.deinit();
     self.config_kv.deinit(gpa);
     self.grants.deinit();
+    self.presentations.deinit(gpa);
     gpa.free(self.name);
     gpa.destroy(self);
 }
@@ -359,11 +394,13 @@ pub fn contextFor(self: *System, head: *Head) command.Context {
         .semantic = &self.semantic,
         .filesystems = &self.filesystems,
         .intent = &self.intent,
+        .presentations = &self.presentations,
         .context = &self.context,
         .viewports = &self.viewports,
         .designations = &self.designations,
         .environments = &self.environments,
         .place_ids = &self.place_ids,
+        .loci = &self.loci,
     };
 }
 
@@ -402,7 +439,7 @@ pub fn attachHead(self: *System, gpa: Allocator, head: *Head) Allocator.Error!vo
         // Same posture pairing `Buffers.switchTo` uses (§10.4) — an entry
         // this head has never visited still rests where its DECLARED posture
         // says, not in whatever the outgoing system was doing.
-        try head.setModeRaw(gpa, self.buffers.restingModeFor(active.posture(head.scene_selection.field != null)));
+        try head.setModeRaw(gpa, self.buffers.restingModeFor(active.posture(head.scene_selection.edit != null)));
     }
 }
 
@@ -559,7 +596,7 @@ pub const Host = struct {
     pub const SwapError = error{ UnknownSystem, OpenTransient, PickReopenedDuringCancellation } || Allocator.Error;
 
     /// Re-bind `head` (dispatching through `c`) onto the hosted system
-    /// named `target` — the `system-swap <name>` mechanism (§6 W2b gate
+    /// named `target` — the `app.swap-system <name>` mechanism (§6 W2b gate
     /// (b)). If `c` currently targets a DIFFERENT hosted system, that
     /// system's `detachHead` runs first (saving `head`'s resting mode onto
     /// IT); `c`'s table/service pointers (buffers/commands/keymap/actions/
@@ -610,7 +647,7 @@ pub const Host = struct {
     pub fn swap(self: *Host, gpa: Allocator, c: *command.Context, head: *Head, target: []const u8) SwapError!void {
         const to = self.get(target) orelse return error.UnknownSystem;
         if (head.hasOpenTransients()) {
-            std.log.warn("system-swap: refused — head has an open transient/menu (mode '{s}'); pop it before swapping systems", .{head.currentMode()});
+            std.log.warn("app.swap-system: refused — head has an open transient/menu (mode '{s}'); pop it before swapping systems", .{head.currentMode()});
             return error.OpenTransient;
         }
         if (self.systemOf(c)) |from| {
@@ -631,6 +668,7 @@ pub const Host = struct {
         c.semantic = &to.semantic;
         c.filesystems = &to.filesystems;
         c.intent = &to.intent;
+        c.presentations = &to.presentations;
         c.context = &to.context;
         c.viewports = &to.viewports;
         c.designations = &to.designations;
@@ -638,7 +676,7 @@ pub const Host = struct {
     }
 };
 
-/// The `system-swap <name>` command — `data` is the owning `*Host`. Wires
+/// The `app.swap-system <name>` command — `data` is the owning `*Host`. Wires
 /// `Host.swap` onto the ordinary command surface, so a keybinding (or a
 /// test driving it through `command.run`, exactly like any other command)
 /// can trigger a live re-bind. Not installed by `builtins.install` (a
@@ -653,12 +691,13 @@ pub fn systemSwapHandler(ctx: *command.Context, data: ?*anyopaque, args: []const
 }
 
 pub fn registerSwapCommand(gpa: Allocator, commands: *command.Commands, host: *Host) !void {
-    _ = try commands.bind(gpa, "system-swap", .{
-        .name = "system-swap",
-        .summary = "Re-bind this head to another hosted system.",
+    _ = try commands.bind(gpa, "app.swap-system", .{
+        .name = "app.swap-system",
+        .summary = "Switch this window over to another hosted system.",
         .args = &.{.{ .name = "name", .type = .string }},
         .handler = systemSwapHandler,
         .data = host,
+        .meta = .{ .internal = true },
     });
 }
 
@@ -672,8 +711,7 @@ pub fn revokeHandler(ctx: *command.Context, data: ?*anyopaque, args: []const com
     const n = sys.revoke(args[0].string, args[1].string);
     var buf: [160]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "revoke: {s}/{s} — {d} row(s) invalidated", .{ args[0].string, args[1].string, n }) catch "revoke: done";
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    ctx.head.echo.say(ctx.gpa, msg) catch {};
     return .nil;
 }
 
@@ -681,12 +719,13 @@ pub fn revokeHandler(ctx: *command.Context, data: ?*anyopaque, args: []const com
 /// — optional, per-embedder wiring): a system that wants the live `revoke`
 /// debug command binds it explicitly against itself.
 pub fn registerRevokeCommand(gpa: Allocator, commands: *command.Commands, system: *System) !void {
-    _ = try commands.bind(gpa, "revoke", .{
-        .name = "revoke",
-        .summary = "Revoke a capability from a principal/plugin — its next matching use traps.",
+    _ = try commands.bind(gpa, "grants.revoke", .{
+        .name = "grants.revoke",
+        .summary = "Take a permission away from a plugin, so its next use of it fails.",
         .args = &.{ .{ .name = "principal", .type = .string }, .{ .name = "capability", .type = .string } },
         .handler = revokeHandler,
         .data = system,
+        .meta = .{ .label = "Revoke Permission", .icon = "shield-check", .prompts = true },
     });
 }
 
@@ -710,7 +749,7 @@ fn formatLimit(buf: []u8, limit: grants_mod.Limit) []const u8 {
     };
 }
 
-/// The `grants-show` debug command (§6 W4 slice 4: "the INSPECTION surface"
+/// The `grants.show` debug command (§6 W4 slice 4: "the INSPECTION surface"
 /// half of the approval-as-manifest-diff residual — a blocking approve/deny
 /// prompt is explicitly NOT v1; this is). `data` is the owning `*System`.
 /// Lists EVERY row this System's `HandleTable` has ever minted (alive or
@@ -736,21 +775,21 @@ pub fn grantsShowHandler(ctx: *command.Context, data: ?*anyopaque, args: []const
         std.log.info("grants-show:{s}", .{line});
     }
     if (sys.grants.rows.items.len == 0) out.appendSlice(gpa, " (empty)") catch {};
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(gpa, out.items) catch {};
+    ctx.head.echo.say(gpa, out.items) catch {};
     return .nil;
 }
 
 /// Not installed by `builtins.install` (same rationale as `registerRevokeCommand`
-/// above): a system that wants the live `grants-show` inspection command
+/// above): a system that wants the live `grants.show` inspection command
 /// binds it explicitly against itself.
 pub fn registerGrantsShowCommand(gpa: Allocator, commands: *command.Commands, system: *System) !void {
-    _ = try commands.bind(gpa, "grants-show", .{
-        .name = "grants-show",
-        .summary = "List every row in the grant table: principal, capability, limit, state.",
+    _ = try commands.bind(gpa, "grants.show", .{
+        .name = "grants.show",
+        .summary = "List every permission granted to each plugin, with its limit and state.",
         .args = &.{},
         .handler = grantsShowHandler,
         .data = system,
+        .meta = .{ .label = "Show Permissions", .icon = "shield-check" },
     });
 }
 
@@ -772,7 +811,7 @@ test "system: create/destroy — a fresh headless system services command.run im
 
     var c = sys.contextFor(&sys.default_head);
     try sys.default_head.setModeRaw(gpa, "default");
-    _ = try command.run(&sys.commands, &c, "insert-text", &.{.{ .string = "hi" }});
+    _ = try command.run(&sys.commands, &c, "edit.insert-text", &.{.{ .string = "hi" }});
     const rope = (try c.textEditor()).text();
     const got = try rope.toOwnedSlice(gpa);
     defer gpa.free(got);
@@ -797,13 +836,13 @@ test "system: GATE (a) — the container hosts TWO systems concurrently, one hea
     try editor_sys.attachHead(gpa, &editor_head);
     var ec = editor_sys.contextFor(&editor_head);
     try editor_head.setModeRaw(gpa, "default");
-    _ = try command.run(&editor_sys.commands, &ec, "insert-text", &.{.{ .string = "editor text" }});
+    _ = try command.run(&editor_sys.commands, &ec, "edit.insert-text", &.{.{ .string = "editor text" }});
 
     // The agent-ux system is HEADLESS: no head ever attaches to it, but its
     // OWN default_head lets a direct command.run edit its buffer anyway.
     var ac = agent_sys.contextFor(&agent_sys.default_head);
     try agent_sys.default_head.setModeRaw(gpa, "default");
-    _ = try command.run(&agent_sys.commands, &ac, "insert-text", &.{.{ .string = "agent text" }});
+    _ = try command.run(&agent_sys.commands, &ac, "edit.insert-text", &.{.{ .string = "agent text" }});
 
     // Both landed on their OWN buffer, entirely independent of the other.
     const editor_got = try (try ec.textEditor()).text().toOwnedSlice(gpa);
@@ -911,7 +950,7 @@ test "system: GATE (b) via the system-swap COMMAND — same mechanism, real comm
     var c = editor_sys.contextFor(&head);
     try registerSwapCommand(gpa, &editor_sys.commands, &host);
 
-    _ = try command.run(&editor_sys.commands, &c, "system-swap", &.{.{ .string = "agent-ux" }});
+    _ = try command.run(&editor_sys.commands, &c, "app.swap-system", &.{.{ .string = "agent-ux" }});
     try t.expect(c.buffers == &agent_sys.buffers);
 }
 
@@ -985,7 +1024,7 @@ test "system: F1 — swap CANCELS an open pick (references the system being left
     try t.expect(head.pick.active);
 
     // Head-personal state that should SURVIVE the swap untouched.
-    try head.echo.appendSlice(gpa, "kept across swap");
+    try head.echo.say(gpa, "kept across swap");
     head.dot.reg_n = 1;
     head.dot.reg[0] = .{ .slen = 1, .tlen = 0 };
     head.dot.reg[0].spec[0] = 'x';
@@ -996,7 +1035,7 @@ test "system: F1 — swap CANCELS an open pick (references the system being left
     try t.expect(!head.pick.active);
     try t.expect(sink.cancelled);
     // dot/echo untouched — head-personal, not system-referencing.
-    try t.expectEqualStrings("kept across swap", head.echo.items);
+    try t.expectEqualStrings("kept across swap", head.echo.text());
     try t.expectEqual(@as(usize, 1), head.dot.reg_n);
 }
 
@@ -1056,7 +1095,7 @@ test "system: a second manifest hosts a SECOND system end-to-end" {
     try t.expectEqualStrings("agent-ux-quit", agent_sys.keymap.lookup("normal", "q").?);
     try t.expectEqualStrings("agent-ux-status", agent_sys.keymap.lookup("normal", "space a s").?); // "SPC a s" normalizes to "space a s" — Keymap.zig's canonical form
     // The startup echo landed on the system's default head.
-    try t.expectEqualStrings("agent-ux: minimal system loaded", agent_sys.default_head.echo.items);
+    try t.expectEqualStrings("agent-ux: minimal system loaded", agent_sys.default_head.echo.text());
 
     // Headless the whole time: no Head other than `default_head` ever
     // attached, and the system fully evaluated + applied its own manifest.
@@ -1095,11 +1134,11 @@ test "system: W4 slice 1 — the System-owned grant table, capture-time resoluti
     // The live `revoke` debug command (§6 W4 gate) invalidates the row —
     // through the ordinary command surface, exactly as a keybinding would.
     try registerRevokeCommand(gpa, &sys.commands, sys);
-    _ = try command.run(&sys.commands, &c, "revoke", &.{ .{ .string = "notes" }, .{ .string = "fs_read" } });
+    _ = try command.run(&sys.commands, &c, "grants.revoke", &.{ .{ .string = "notes" }, .{ .string = "fs_read" } });
 
     try t.expect(!sys.grants.check(h));
     try t.expectEqual(grants_mod.Reason.revoked, sys.grants.reasonFor(h));
-    try t.expectEqualStrings("revoke: notes/fs_read — 1 row(s) invalidated", sys.default_head.echo.items);
+    try t.expectEqualStrings("revoke: notes/fs_read — 1 row(s) invalidated", sys.default_head.echo.text());
 
     // A capture AFTER revocation no longer collects the dead row.
     try t.expectEqual(@as(usize, 0), c.capturedCtx().grants.len);
@@ -1118,9 +1157,9 @@ test "system: W4 slice 4 — grants-show lists every row, alive and dead, with i
 
     try registerGrantsShowCommand(gpa, &sys.commands, sys);
     var c = sys.contextFor(&sys.default_head);
-    _ = try command.run(&sys.commands, &c, "grants-show", &.{});
+    _ = try command.run(&sys.commands, &c, "grants.show", &.{});
 
-    const echoed = sys.default_head.echo.items;
+    const echoed = sys.default_head.echo.text();
     try t.expect(std.mem.indexOf(u8, echoed, "notes/fs_read limit=none state=revoked") != null);
     try t.expect(std.mem.indexOf(u8, echoed, "git/fs_write limit=fs_root(repo) state=alive") != null);
 }

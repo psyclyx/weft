@@ -114,7 +114,7 @@ pub fn validateClassName(name: []const u8) NameError!void {
 
 /// Does a bound name REFER to an intention rather than name a command?
 /// One grammar (doc/configuration.md §5.1): the §5.1 spelling IS the
-/// reference, so a flat name (`insert-newline`) and a dotted name under an
+/// reference, so a flat name (`edit.insert-newline`) and a dotted name under an
 /// unknown root (`git.commit`) both stay commands, and there is no second
 /// sigil to keep in sync with the validator above.
 pub fn isIntentionName(name: []const u8) bool {
@@ -208,6 +208,10 @@ pub const Affordance = struct {
     group: []const u8 = "",
     /// Ordering hint within the group; lower sorts first.
     order: ?i32 = null,
+    /// An icon name from the theme's set (`save`, `build`). Filled from the
+    /// command the offer runs (`intent.presentation`); a provider's own
+    /// affordance leaves it to that.
+    icon: []const u8 = "",
 };
 
 /// One row of a pushed table: "for this intention, in contexts matching this

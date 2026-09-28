@@ -40,7 +40,7 @@ pub const Args = struct {
     share_fs: core.peer_fs.Grant = .none,
     /// --share-presence / --no-share-presence: publish our caret to peers.
     /// Null = unstated, leaving the choice to config and then the interactive
-    /// default (`collab.presenceDefault`); the `share-presence` command flips
+    /// default (`collab.presenceDefault`); the `collab.share-presence` command flips
     /// it at runtime.
     share_presence: ?bool = null,
 };

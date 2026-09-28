@@ -51,7 +51,7 @@ pub const TextCommit = struct {
 ///   nothing routes raw input today; what IS wired is the declaration, its
 ///   round trip, and the break-out that pairs with it. Capture is never a
 ///   one-way door: the grammar always retains a break-out chord
-///   (`std.input.break-out` / the `posture-break-out` command), and breaking
+///   (`std.input.break-out` / the `mode.break-out` command), and breaking
 ///   out restores the declaration capture displaced.
 ///
 /// DERIVED by default, from what the entry can do rather than from who owns
@@ -80,6 +80,26 @@ pub const Posture = enum(u32) {
     pub fn fromWire(raw: u32) ?Posture {
         if (raw > @intFromEnum(Posture.capture)) return null;
         return @enumFromInt(raw);
+    }
+};
+
+/// How the loaded grammar focuses a ROW of a structural view that holds an
+/// editable field (doc/chrome.md §5.2). Declared by the grammar
+/// (`mode.set-structural-focus text|row`); a grammar that declares nothing gets `row`,
+/// which can never show a caret where typing does nothing.
+///
+///   text  editable-listing style: focusing a row edits its primary field, and the
+///         grammar's own modes decide what a keystroke does there.
+///   row   list-control style: the focus IS the row — a highlight, no caret.
+///         Editing is begun explicitly (`std.editing.begin`, a slow second
+///         click), committed by activating or leaving the row, cancelled by
+///         `std.gesture.cancel`; printable keys jump by type-ahead.
+pub const Granularity = enum(u32) {
+    text,
+    row,
+
+    pub fn parse(name: []const u8) ?Granularity {
+        return std.meta.stringToEnum(Granularity, name);
     }
 };
 

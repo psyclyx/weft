@@ -5,7 +5,7 @@
 //!                                   a docked companion that holds focus)
 //!   weft://here/offers/active       the focused context
 //!   weft://here/offers/at-pointer   the context under the pointer — made the
-//!                                   focused one first (`pointer-focus-point`)
+//!                                   focused one first (`pointer.focus-point`)
 //!
 //! presented `as` one of
 //!
@@ -14,13 +14,15 @@
 //!           polling, and a caret move redraws nothing;
 //!   list    the same entries down a column;
 //!   menu    a transient menu at the pointer (`at-pointer`) or the caret —
-//!           a head-local semantic interaction, opaque and frame-placed, that
-//!           a click anywhere else closes (the default for the other two).
+//!           the menu widget's (`weft_menu`, doc/chrome.md §2): the rows'
+//!           icons and keys, rules between groups, the keyboard and the
+//!           pointer as in any menu, and a click anywhere else closes it (the
+//!           default for the other two).
 //!
 //! This is what the toolbar and the context menu were. Neither owns a
 //! viewport any more: a toolbar is a config viewport presenting
 //! `weft://here/offers/primary` as a strip (config/toolbar.js), and mouse-3
-//! presents `offers/at-pointer` as a menu (`offers-menu`). What each lists is
+//! presents `offers/at-pointer` as a menu (`offers.menu`). What each lists is
 //! the shared `weft_offers` reading — pinned entries (`weft.set("offers",
 //! "pinned", [...])`) then the context's offers arranged by their own
 //! `group`/`order` — the same reading the palette's offer rows come from.
@@ -36,6 +38,7 @@
 const std = @import("std");
 const weft = @import("weft");
 const offers = @import("weft_offers");
+const menu_lib = @import("weft_menu");
 const Node = weft.semantic.scene.Node;
 const Fact = weft.semantic.scene.Fact;
 const durable = weft.semantic.durable;
@@ -43,21 +46,35 @@ const durable = weft.semantic.durable;
 const kind = "offers";
 const root_id: u64 = 1;
 const item_base: u64 = 2;
-const row_base: u64 = 1 << 32;
 const sep_base: u64 = 1 << 33;
+/// The menu's rows (`weft_menu`'s ids), far from any board's.
+const menu_base: u64 = 1 << 44;
 
 const act_press = "offers.press";
-const act_up = "offers.up";
-const act_down = "offers.down";
-const act_choose = "offers.choose";
-const act_close = "offers.close";
-const act_click = "offers.click";
-const act_reopen = "offers.reopen";
-const act_swallow = "offers.swallow";
 
 /// The words a menu leaves out unless a config says otherwise: they are
 /// keys' business (moving, a line break, breaking out of a capture).
 const default_hide = [_][]const u8{ "std.navigation.", "std.input.", "std.gesture.", "std.editing.insert-line-break" };
+
+/// What a context menu leads with, as every conventional one does: Cut,
+/// Copy, Paste — wherever the context offers them (text whose grammar means
+/// them, a listing's rows), greyed in place when they cannot run, absent
+/// where nothing offers them. `weft.set("offers", "menu-pinned", [...])`
+/// replaces the list.
+const default_menu_pinned: weft.ConfigIter = .{
+    .cur = framed(&.{ "std.transfer.delete-to-register", "std.transfer.yank", "std.transfer.paste" }),
+    .remaining = 3,
+};
+
+/// Names as a config list's records (a length byte, then the name).
+fn framed(comptime names: []const []const u8) []const u8 {
+    comptime var out: []const u8 = "";
+    inline for (names) |n| {
+        if (n.len >= 0x80) @compileError("a one-byte length: " ++ n);
+        out = out ++ [_]u8{@intCast(n.len)} ++ n;
+    }
+    return out;
+}
 
 const Layout = enum { strip, list, menu };
 
@@ -104,8 +121,7 @@ const Menu = struct {
     ref: Ref,
     arena: std.heap.ArenaAllocator,
     items: []offers.Item = &.{},
-    rules: []bool = &.{},
-    selected: usize = 0,
+    cascade: menu_lib.Cascade = .{},
     view: ?weft.semantic.view.Ref = null,
     interaction: ?weft.semantic.interaction.Ref = null,
     revision: u32 = 0,
@@ -113,11 +129,11 @@ const Menu = struct {
 var menu: ?Menu = null;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "offers-present", .arity = .whole, .call = present, .params = "designation", .summary = "present an offers designation (weft://here/offers/<context>?as=strip|list|menu)" },
-    .{ .name = "offers-menu", .arity = .whole, .call = menuAtPointer, .summary = "a menu of what the context under the pointer offers" },
-    .{ .name = "offers-menu-at-caret", .arity = .whole, .call = menuAtCaret, .summary = "a menu of what the focused context offers, at the caret" },
-    .{ .name = "offers-press", .arity = .whole, .call = press, .params = "button" },
-    .{ .name = "offers-menu-key", .arity = .whole, .call = menuKey, .params = "input" },
+    .{ .name = "offers.present", .arity = .whole, .call = present, .params = "designation", .summary = "Present an offers designation (weft://here/offers/<context>?as=strip|list|menu).", .internal = true },
+    .{ .name = "offers.menu", .arity = .whole, .call = menuAtPointer, .summary = "Open a menu of what the thing under the pointer offers.", .label = "Context Menu", .prompts = true, .icon = "more" },
+    .{ .name = "offers.menu-at-caret", .arity = .whole, .call = menuAtCaret, .summary = "Open a menu of what the focused context offers, at the caret.", .label = "Context Menu at Caret", .prompts = true, .icon = "more" },
+    .{ .name = "offers.press", .arity = .whole, .call = press, .params = "button", .summary = "Run the offer a strip button stands for.", .internal = true },
+    .{ .name = "offers.menu-key", .arity = .whole, .call = menuKey, .params = "input", .summary = "Move through, choose from or close the open offers menu.", .internal = true },
 };
 
 comptime {
@@ -128,7 +144,7 @@ comptime {
 
 fn init() void {
     _ = weft.semanticActionProvider();
-    _ = weft.designationOpener(kind, "offers-present");
+    _ = weft.designationOpener(kind, "offers.present");
 }
 
 /// The opener: `open weft://here/offers/<context>?as=<layout>` lands here,
@@ -143,7 +159,7 @@ fn present() void {
     else
         std.meta.stringToEnum(Layout, as) orelse return weft.echo("offers: as strip, list or menu");
     switch (layout) {
-        .menu => openMenu(ref),
+        .menu => openMenu(ref, ref != .at_pointer),
         .strip, .list => presentBoard(ref, layout),
     }
 }
@@ -190,10 +206,15 @@ fn publishBoard(board: *Board) !void {
     const a = board.arena.allocator();
     var nodes: std.ArrayList(Node) = .empty;
     for (board.items, 0..) |item, i| {
+        // A separator says what it is; the chrome style decides how it looks
+        // (the label is only its text fallback).
         if (offers.separatorBefore(board.items, i))
-            try nodes.append(a, .{ .id = @enumFromInt(sep_base + i), .facts = &.{.{ .name = "tone", .value = "muted" }}, .content = .{ .label = if (board.layout == .strip) "│" else "──" } });
+            try nodes.append(a, .{ .id = @enumFromInt(sep_base + i), .role = "separator", .facts = &.{.{ .name = "tone", .value = "muted" }}, .content = .{ .label = if (board.layout == .strip) "│" else "──" } });
         var facts: std.ArrayList(Fact) = .empty;
         try facts.append(a, .{ .name = "name", .value = item.name });
+        // What the offer's command presents itself with (doc/chrome.md §1.2):
+        // the styles that draw icons put it beside the label.
+        if (item.icon.len > 0) try facts.append(a, .{ .name = "icon", .value = item.icon });
         if (item.provider.len > 0) try facts.append(a, .{ .name = "provider", .value = item.provider });
         if (!item.enabled()) {
             // Greyed by the presenter's `muted` tone; still clickable, so the
@@ -221,7 +242,7 @@ fn publishBoard(board: *Board) !void {
     board.view = try weft.semanticViewPublish(root, null, board.revision);
 }
 
-/// `offers-press <board> <item>`: a click on a button. Runs in the context
+/// `offers.press <board> <item>`: a click on a button. Runs in the context
 /// the board describes, and leaves the head where it was.
 fn press() void {
     const raw = weft.argStr(0) orelse return;
@@ -235,13 +256,17 @@ fn press() void {
 }
 
 // ── The menu ────────────────────────────────────────────────────────
+//
+// The menu widget's (doc/chrome.md §2): `weft_menu` keeps the cascade, draws
+// the scene the widget reads and binds the keys, so the context menu is the
+// menubar's drop-down with different rows.
 
 fn menuAtPointer() void {
-    openMenu(.at_pointer);
+    openMenu(.at_pointer, false);
 }
 
 fn menuAtCaret() void {
-    openMenu(.active);
+    openMenu(.active, true);
 }
 
 fn menuHide(buf: [][]const u8) []const []const u8 {
@@ -258,57 +283,62 @@ fn menuHide(buf: [][]const u8) []const []const u8 {
     return &default_hide;
 }
 
-fn openMenu(ref: Ref) void {
+/// Open the menu of what `ref` offers — lit on its first row when the
+/// keyboard opened it (S-F10), on nothing when a click did.
+fn openMenu(ref: Ref, keyboard: bool) void {
     closeMenu();
     // Make the context under the pointer the active one first: the pane
     // there takes focus, and the row or the caret moves to the point.
-    if (ref == .at_pointer) weft.run("pointer-focus-point");
+    if (ref == .at_pointer) weft.run("pointer.focus-point");
     menu = .{ .ref = ref, .arena = .init(weft.allocator) };
     const m = &menu.?;
     const a = m.arena.allocator();
     var hide_buf: [32][]const u8 = undefined;
     const hide = menuHide(&hide_buf);
     defer if (hide.ptr != &default_hide) for (hide) |h| weft.allocator.free(h);
-    m.items = offers.collect(a, .{ .where = ref.where(), .grammar_words = true, .hide = hide, .disabled = .omit }) catch return closeMenu();
+    m.items = offers.collect(a, .{
+        .where = ref.where(),
+        .pinned = weft.configList("menu-pinned") orelse default_menu_pinned,
+        .grammar_words = true,
+        .hide = hide,
+        .disabled = .omit,
+        .pinned_disabled = .keep,
+    }) catch return closeMenu();
     if (m.items.len == 0) {
         closeMenu();
         weft.echo("nothing to offer here");
         return;
     }
-    m.rules = a.alloc(bool, m.items.len) catch return closeMenu();
-    placeRules(m.items, m.rules);
+    const rules = a.alloc(bool, m.items.len) catch return closeMenu();
+    placeRules(m.items, rules);
+    const entries = a.alloc(menu_lib.Entry, m.items.len) catch return closeMenu();
+    for (m.items, rules, entries, 0..) |item, rule, *entry, i| entry.* = .{
+        .label = item.label,
+        .name = item.name,
+        .icon = item.icon,
+        // The key that runs it in the context it describes — the one this
+        // menu opened over.
+        .keys = a.dupe(u8, weft.firstKey(weft.keysFor(item.name))) catch "",
+        .rule = rule,
+        // A pinned word that cannot run here stays, greyed, saying why.
+        .reason = item.reason,
+        .tag = @intCast(i),
+    };
+    m.cascade = .open(entries, keyboard);
     publishMenu(m) catch return closeMenu();
-    m.interaction = weft.semanticInteractionOpen(.{
-        .role = .popup,
-        .view = m.view.?,
-        .root = @enumFromInt(root_id),
-        .actions = &.{
-            .{ .id = act_up },    .{ .id = act_down },   .{ .id = act_choose },  .{ .id = act_close },
-            .{ .id = act_click }, .{ .id = act_reopen }, .{ .id = act_swallow },
-        },
-        .bindings = &.{
-            .{ .input = "Up", .action = act_up },
-            .{ .input = "Down", .action = act_down },
-            .{ .input = "Return", .action = act_choose },
-            .{ .input = "KP_Enter", .action = act_choose },
-            .{ .input = "Escape", .action = act_close },
-            .{ .input = "S-F10", .action = act_close },
-            .{ .input = "Menu", .action = act_close },
-            .{ .input = "mouse-1", .action = act_click },
-            .{ .input = "mouse-3", .action = act_reopen },
-            // The rest of a click that opened or chose: never the text's.
-            .{ .input = "up-mouse-1", .action = act_swallow },
-            .{ .input = "up-mouse-3", .action = act_swallow },
-            .{ .input = "drag-mouse-1", .action = act_swallow },
-        },
-        .default_action = act_choose,
-        .cancel_action = act_close,
-        .presentation = if (ref == .at_pointer) "pointer" else "caret",
-    }) catch null;
+    var scratch = std.heap.ArenaAllocator.init(weft.allocator);
+    defer scratch.deinit();
+    const definition = menu_lib.definition(scratch.allocator(), m.view.?, menu_lib.cascade.panelId(menu_base, 0), if (ref == .at_pointer) "pointer" else "caret", false, &.{
+        .{ .input = "mouse-3", .name = "reopen" },
+        .{ .input = "S-F10", .name = "close" },
+        .{ .input = "Menu", .name = "close" },
+    }) catch return closeMenu();
+    m.interaction = weft.semanticInteractionOpen(definition) catch null;
     if (menu != null and menu.?.interaction == null) closeMenu();
 }
 
-/// A rule opens a group of two or more, and only once what is above it since
+/// The pinned words are ruled off from the rest. Otherwise a rule opens a
+/// group of two or more, and only once what is above it since
 /// the last rule is two or more as well; a lone item joins its neighbours,
 /// so a menu of mostly single words is not a ladder of rules.
 fn placeRules(list: []const offers.Item, rules: []bool) void {
@@ -319,40 +349,20 @@ fn placeRules(list: []const offers.Item, rules: []bool) void {
         while (end < list.len and std.mem.eql(u8, list[end].group, list[start].group)) end += 1;
         const size = end - start;
         for (rules[start..end]) |*r| r.* = false;
-        rules[start] = start > 0 and size >= 2 and section >= 2;
+        // The pinned words are a block of their own, always ruled off.
+        const after_pinned = start > 0 and list[start - 1].pinned and !list[start].pinned;
+        rules[start] = start > 0 and ((size >= 2 and section >= 2) or after_pinned);
         section = if (rules[start]) size else section + size;
         start = end;
     }
 }
 
-/// Publish (or replace) the menu's view. Only the selected item is in the
-/// focus order, so it is the one the presenter highlights; every item is an
-/// action node, which a click reaches regardless.
+/// Publish (or replace) the menu's view: the cascade as the menu widget's
+/// scene.
 fn publishMenu(m: *Menu) !void {
-    const a = m.arena.allocator();
-    var rows: std.ArrayList(Node) = .empty;
-    for (m.items, 0..) |item, i| {
-        if (m.rules[i])
-            try rows.append(a, .{ .id = @enumFromInt(sep_base + i), .facts = &.{.{ .name = "tone", .value = "muted" }}, .layout = .{ .column = 0 }, .content = .{ .label = "──" } });
-        const cells = try a.alloc(Node, 1);
-        cells[0] = .{
-            .id = @enumFromInt(item_base + i),
-            .role = "offers.item",
-            .facts = try a.dupe(Fact, &.{.{ .name = "name", .value = item.name }}),
-            .layout = .{ .column = 0 },
-            .focusable = i == m.selected,
-            .content = .{ .action = .{ .action = act_choose, .label = item.label } },
-        };
-        try rows.append(a, .{
-            .id = @enumFromInt(row_base + i),
-            .content = .{ .container = .{ .axis = .horizontal, .children = cells } },
-        });
-    }
-    const root: Node = .{
-        .id = @enumFromInt(root_id),
-        .role = "offers.menu",
-        .content = .{ .container = .{ .axis = .vertical, .children = try rows.toOwnedSlice(a) } },
-    };
+    var scratch = std.heap.ArenaAllocator.init(weft.allocator);
+    defer scratch.deinit();
+    const root = try menu_lib.scene(scratch.allocator(), &m.cascade, menu_base, null);
     m.revision += 1;
     if (m.view) |ref| {
         if (weft.semanticViewReplace(ref, m.revision, root)) |_| return else |_| m.view = null;
@@ -387,30 +397,27 @@ fn choose(i: usize) void {
     offers.run(chosen, where);
 }
 
+/// `offers.menu-key <verb>`: what the open menu's interaction heard.
 fn menuKey() void {
-    const verb = weft.argStr(0) orelse return;
+    const verb = menu_lib.Verb.parse(weft.argStr(0) orelse return) orelse return;
     const m = &(menu orelse return);
     if (m.interaction == null) return;
-    if (std.mem.eql(u8, verb, "up")) {
-        if (m.selected > 0) m.selected -= 1;
-        publishMenu(m) catch {};
-    } else if (std.mem.eql(u8, verb, "down")) {
-        if (m.selected + 1 < m.items.len) m.selected += 1;
-        publishMenu(m) catch {};
-    } else if (std.mem.eql(u8, verb, "choose")) {
-        choose(m.selected);
-    } else if (std.mem.eql(u8, verb, "close")) {
-        closeMenu();
-    } else if (std.mem.eql(u8, verb, "click")) {
-        // Over one of the menu's items (it covers the focused pane, so a
-        // node under the pointer there is the menu's): run it. Anywhere
-        // else: close, and the click does nothing more.
-        const p = weft.pointer() orelse return closeMenu();
-        const node = p.node orelse return closeMenu();
-        if (!p.focused or node < item_base or node >= item_base + m.items.len) return closeMenu();
-        choose(@intCast(node - item_base));
-    } else if (std.mem.eql(u8, verb, "reopen")) {
-        openMenu(.at_pointer);
+    const outcome: menu_lib.Outcome = switch (verb) {
+        // Over one of the menu's rows: that row. Anywhere else a click
+        // closes it, and does nothing more.
+        .click => if (menu_lib.pointedRow(menu_base)) |at| menu_lib.cascade.click(&m.cascade, at.panel, at.row) else .close,
+        .hover => if (menu_lib.pointedRow(menu_base)) |at| menu_lib.cascade.hover(&m.cascade, at.panel, at.row) else .none,
+        .other => |name| if (std.mem.eql(u8, name, "reopen")) {
+            openMenu(.at_pointer, false);
+            return;
+        } else .close,
+        else => menu_lib.key(&m.cascade, verb),
+    };
+    switch (outcome) {
+        .none, .bar => {},
+        .redraw => publishMenu(m) catch {},
+        .activate => |entry| choose(entry.tag),
+        .close, .close_panel => closeMenu(),
     }
 }
 
@@ -430,30 +437,18 @@ fn onSemanticAction() callconv(.c) void {
             if (raw < item_base or raw >= item_base + b.items.len) break;
             _ = weft.semanticActionHandled();
             var buf: [48]u8 = undefined;
-            weft.runStr("offers-press", std.fmt.bufPrint(&buf, "{d} {d}", .{ which, raw - item_base }) catch return);
+            weft.runStr("offers.press", std.fmt.bufPrint(&buf, "{d} {d}", .{ which, raw - item_base }) catch return);
             return;
         }
         _ = weft.semanticActionDecline();
         return;
     }
-    const verb: []const u8 = if (std.mem.eql(u8, action, act_up))
-        "up"
-    else if (std.mem.eql(u8, action, act_down))
-        "down"
-    else if (std.mem.eql(u8, action, act_choose))
-        "choose"
-    else if (std.mem.eql(u8, action, act_close))
-        "close"
-    else if (std.mem.eql(u8, action, act_click))
-        "click"
-    else if (std.mem.eql(u8, action, act_reopen))
-        "reopen"
-    else if (std.mem.eql(u8, action, act_swallow))
-        ""
-    else {
+    const verb = menu_lib.Verb.of(action) orelse {
         _ = weft.semanticActionDecline();
         return;
     };
     _ = weft.semanticActionHandled();
-    if (verb.len > 0) weft.runStr("offers-menu-key", verb);
+    if (verb == .swallow) return;
+    var buf: [48]u8 = undefined;
+    weft.runStr("offers.menu-key", verb.spell(&buf));
 }

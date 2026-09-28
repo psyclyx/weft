@@ -5,10 +5,10 @@
 //! in another plugin names "marks" — it claims an annotation layer on a
 //! REFERENCED entry and the presentation composites whatever feeds it finds.
 //!
-//! `marks-on [buffer]` decorates that entry (the active one by default) and
-//! republishes; `marks-off [buffer]` takes its paint away. Each round is
+//! `marks.on [buffer]` decorates that entry (the active one by default) and
+//! republishes; `marks.off [buffer]` takes its paint away. Each round is
 //! stamped with the entry revision it was computed against, so an edit drops
-//! the marks until the next `marks-on` — a decorator never guesses where its
+//! the marks until the next `marks.on` — a decorator never guesses where its
 //! spans went.
 
 const std = @import("std");
@@ -35,8 +35,8 @@ var buf: [window]u8 = undefined;
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
-    .{ .name = "marks-on", .handler = on },
-    .{ .name = "marks-off", .handler = off },
+    .{ .name = "marks.on", .handler = on },
+    .{ .name = "marks.off", .handler = off },
 };
 
 fn describe() callconv(.c) void {

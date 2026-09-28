@@ -8,45 +8,84 @@ const std = @import("std");
 const text_engine = @import("weft_text");
 const scene = @import("weft_scene");
 const view = @import("../view.zig");
+const region = @import("../region.zig");
 
 const View = view.View;
 const Run = view.Run;
 const Rect = view.Rect;
 const Built = view.Built;
 
-/// Where the floating layer starts in each list: everything a build appended
-/// from these indices on (a popup, a menu) paints after the whole base layer,
-/// so a popup's fill covers the text beneath it instead of the text showing
-/// through (rects all paint before glyphs within one layer).
+/// Where a layer starts in each list: everything a build appended from these
+/// indices on (a popup, a menu; above those, a tooltip) paints after the
+/// whole layer below, so a popup's fill covers the text beneath it instead of
+/// the text showing through (rects all paint before glyphs within one layer).
 pub const Layers = struct { rects: usize, runs: usize };
 
-pub fn render(v: *View, world_to_pixel: scene.Transform2D, runs: []Run, rects: []const Rect, float: Layers) !Built {
-    var count = rects.len;
+/// `starts` are the layers above the base one, bottom up, in increasing
+/// order.
+pub fn render(v: *View, world_to_pixel: scene.Transform2D, runs: []Run, rects: []const Rect, starts: []const Layers) !Built {
+    // At most: every rect, every glyph, a clip before each run and one lift
+    // after each layer.
+    var count = rects.len + runs.len + starts.len + 1;
     for (runs) |run| count += run.shaped.glyphs.len;
-    const items = try v.gpa.alloc(scene.DrawItem, count);
+    var items = try v.gpa.alloc(scene.DrawItem, count);
     errdefer v.gpa.free(items);
 
     var at: usize = 0;
-    at += try place(v, world_to_pixel, items[at..], runs[0..float.runs], rects[0..float.rects]);
-    at += try place(v, world_to_pixel, items[at..], runs[float.runs..], rects[float.rects..]);
-    std.debug.assert(at == items.len);
+    var from: Layers = .{ .rects = 0, .runs = 0 };
+    for (starts) |to| {
+        at += try place(v, world_to_pixel, items[at..], runs[from.runs..to.runs], rects[from.rects..to.rects]);
+        from = to;
+    }
+    at += try place(v, world_to_pixel, items[at..], runs[from.runs..], rects[from.rects..]);
+    std.debug.assert(at <= items.len);
+    if (at < items.len) items = try v.gpa.realloc(items, at);
     return .{ .items = items };
 }
 
-/// One layer: its rects, then its glyphs.
+/// One layer: its rects (in append order, whatever their shape), then its
+/// glyphs, each run under its own clip.
 fn place(v: *View, world_to_pixel: scene.Transform2D, items: []scene.DrawItem, runs: []Run, rects: []const Rect) !usize {
     var at: usize = 0;
     for (rects) |rect| {
-        items[at] = .{ .rect = .{
-            .x = rect.x,
-            .y = rect.y,
-            .w = rect.w,
-            .h = rect.h,
-            .color = rect.color,
-        } };
+        items[at] = switch (rect.shape) {
+            .fill => .{ .rect = .{
+                .x = rect.x,
+                .y = rect.y,
+                .w = rect.w,
+                .h = rect.h,
+                .color = rect.color,
+            } },
+            .rounded => |r| .{ .rrect = .{
+                .x = rect.x,
+                .y = rect.y,
+                .w = rect.w,
+                .h = rect.h,
+                .radius = r.radius,
+                .color = rect.color,
+                .stroke_width = r.stroke_width,
+                .blur = r.blur,
+            } },
+            .icon => |icon| .{ .path = .{
+                .commands = icon.commands,
+                .x = rect.x,
+                .y = rect.y,
+                .scale = rect.w / icon.size,
+                .stroke_width = icon.stroke_width,
+                .color = rect.color,
+                .cap = .round,
+                .join = .round,
+            } },
+        };
         at += 1;
     }
+    var clip: ?region.Rect = null;
     for (runs) |*run| {
+        if (!sameClip(clip, run.clip)) {
+            clip = run.clip;
+            items[at] = .{ .clip = if (clip) |c| .{ .x = c.x, .y = c.y, .w = c.w, .h = c.h } else null };
+            at += 1;
+        }
         at += switch (run.place) {
             .cell => |cells| try placeCells(items[at..], &run.shaped, cells, .{
                 .baseline = .{ .x = v.origin_x, .y = run.baseline_y },
@@ -61,7 +100,16 @@ fn place(v: *View, world_to_pixel: scene.Transform2D, items: []scene.DrawItem, r
             }),
         };
     }
+    if (clip != null) {
+        items[at] = .{ .clip = null };
+        at += 1;
+    }
     return at;
+}
+
+fn sameClip(a: ?region.Rect, b: ?region.Rect) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return std.meta.eql(a.?, b.?);
 }
 
 const CellPlacement = struct {

@@ -47,6 +47,12 @@ pub const Content = union(enum) {
         ref: FieldRef,
         placeholder: []const u8 = &.{},
         single_line: bool = false,
+        /// The one field of its row a person edits by default — a file's
+        /// name (doc/chrome.md §5.2). What `std.editing.begin` edits, what a
+        /// `text` granularity grammar edits on focus, and the text
+        /// type-ahead matches. A projection marks it and learns nothing
+        /// else about how its rows are focused or edited.
+        primary: bool = false,
     },
     action: struct {
         action: []const u8,

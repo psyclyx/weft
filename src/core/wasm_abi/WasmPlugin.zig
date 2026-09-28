@@ -64,7 +64,7 @@ pub const WasmCmd = struct { plugin: *WasmPlugin, id: u32, name: []u8 };
 ///
 /// A guest command used to register with `.summary = ""` and `.args = &.{}` —
 /// a name and nothing else. That is why the palette listed every plugin
-/// command undocumented, and why nothing could tell that `net-open` takes a
+/// command undocumented, and why nothing could tell that `net.open` takes a
 /// host: a plugin command was, to the rest of the editor, shapeless. A
 /// `describeCommand` declaration fills both in, so a plugin's commands are
 /// first-class in the palette, on the `:` line, and in a refusal message —
@@ -201,12 +201,12 @@ in_dispatch: bool = false,
 /// that didn't exist a moment ago, so a head-gated call here can only ever
 /// set the SAME (single, load-time) head's starting state, never hijack a
 /// second one. NUANCE (review of #19 item 4): at STARTUP that head is fresh;
-/// on a RUNTIME `config-reload` that loads a NEW plugin, the load-time head
+/// on a RUNTIME `app.reload-config` that loads a NEW plugin, the load-time head
 /// is the LIVE editing head — a modal plugin's `init` `setMode("normal")`
 /// then stomps the live mode. That is pre-existing reload behavior this
 /// exemption PRESERVES (necessary — trapping it would break every modal
 /// guest's load), not a new hole it opens; a mid-chord stomp is unreachable
-/// (dispatching `config-reload` consumed the chord). The argument stops
+/// (dispatching `app.reload-config` consumed the chord). The argument stops
 /// holding the instant load finishes — every
 /// LATER background entry (`on_poll`/`on_fill_token`/`on_activate`/
 /// `on_complete`/`on_menu`) still traps, exactly as `in_dispatch` would. Set
@@ -247,8 +247,6 @@ commands: std.ArrayList(*WasmCmd) = .empty,
 
 // ── Perm handshake state ──
 phase: Phase = .describing,
-/// Capability names the guest declared during `describe()` (owned).
-declared_caps: std.ArrayList([]u8) = .empty,
 perms: [perm_count]bool = @splat(false),
 /// doc/contextual-workspace-architecture.md §13.5 — the grant table this plugin's possessed
 /// handles (`grant_handles`, below) are checked against. `null` (the default
@@ -763,8 +761,7 @@ pub fn declaration(self: *WasmPlugin, name: []const u8) ?*const DeclaredCommand 
 }
 
 pub fn declaresCapability(self: *WasmPlugin, name: []const u8) bool {
-    for (self.declared_caps.items) |d| if (std.mem.eql(u8, d, name)) return true;
-    return false;
+    return self.resources.declaresCapability(name);
 }
 
 /// This plugin as an edit principal: authors as its own peer on whatever
@@ -838,7 +835,10 @@ pub fn deinit(self: *WasmPlugin) void {
     self.ctx.actions.unregisterByOwnerPrefix(self.name);
     // So does every context value it published (`wl_context_set`): a claim
     // about the plugin's work must not outlive the code that knew it true.
-    if (self.ctx.context) |context| _ = context.store.retractOwner(self.resources.name);
+    if (self.ctx.context) |context| {
+        _ = context.store.retractOwner(self.resources.name);
+        context.unwatchOwner(self.resources.name);
+    }
     // The projection kinds it claimed go with it: a designation of one is
     // then refused as having no producer, not handed to a dead command.
     if (self.ctx.designations) |openers| openers.release(gpa, self.name);
@@ -886,8 +886,6 @@ pub fn deinit(self: *WasmPlugin) void {
     self.pick_items.deinit(gpa);
     self.surface.deinit(gpa);
     self.subs.deinit(gpa); // the SubBuffers service owns the entries
-    for (self.declared_caps.items) |d| gpa.free(d);
-    self.declared_caps.deinit(gpa);
     self.instance.deinit();
     self.linker.deinit();
     self.module.deinit();

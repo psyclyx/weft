@@ -97,7 +97,7 @@ pub const Publisher = struct {
             .provider = try plane.catalog.provider(provider_name),
             .actions = actions,
         };
-        self.handle = try plane.invokers.register(gpa, provider_name, invokeRow, self.actions);
+        self.handle = try plane.invokers.register(gpa, provider_name, invokeRow, commandOfRow, self.actions);
         return self;
     }
 
@@ -185,6 +185,15 @@ pub const Publisher = struct {
         const cmd = actions.resolveFacts(name, ctx.capturedCtx().mergedFacts()) orelse
             return intent.Error.StaleEndpoint;
         _ = try command.run(ctx.commands, ctx, cmd, &.{});
+    }
+
+    /// The provider command a row's action resolves to here — what it runs.
+    fn commandOfRow(data: ?*anyopaque, ctx: *command.Context, payload: u32) ?[]const u8 {
+        const actions: *Actions = @ptrCast(@alignCast(data.?));
+        const plane = ctx.intent orelse return null;
+        const self = plane.derived;
+        if (payload >= self.rows.items.len) return null;
+        return actions.resolveFacts(self.rows.items[payload].action, ctx.capturedCtx().mergedFacts());
     }
 };
 

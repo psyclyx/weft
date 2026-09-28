@@ -6,7 +6,6 @@ const Node = weft.semantic.scene.Node;
 const NodeId = weft.semantic.scene.NodeId;
 
 const name = "*dashboard*";
-const file_pick: u32 = 1;
 const activate_action = "dashboard.activate";
 
 const Section = struct {
@@ -41,34 +40,32 @@ var revision: u32 = 0;
 var activations: std.ArrayList(Activation) = .empty;
 
 const commands = [_]weft.CommandEntry{
-    .{ .name = "dashboard", .arity = .whole, .call = openDashboard, .summary = "open the welcome dashboard" },
-    .{ .name = "dashboard-activate", .arity = .one, .call = activate, .summary = "activate the selected dashboard item" },
-    .{ .name = "dashboard-open-file", .arity = .whole, .call = openFile, .summary = "find a file to edit" },
-    .{ .name = "dashboard-new", .arity = .whole, .call = newBuffer, .summary = "create a new buffer" },
+    .{ .name = "dashboard.open", .arity = .whole, .call = openDashboard, .summary = "Open the welcome dashboard.", .label = "Welcome", .menu = "Help", .group = "welcome", .order = 1, .icon = "layout-dashboard" },
+    .{ .name = "dashboard.activate", .arity = .one, .call = activate, .summary = "Activate the selected dashboard item.", .internal = true },
 };
 
 comptime {
-    weft.plugin(&commands, .{ .init = init, .pick = onPick }).exportAll();
+    weft.plugin(&commands, .{ .init = init }).exportAll();
     weft.exportCallback("on_semantic_action", &onSemanticAction);
 }
 
 fn init() void {
     arena = std.heap.ArenaAllocator.init(weft.allocator);
     _ = weft.semanticActionProvider();
-    _ = weft.designationOpener(kind, "dashboard");
+    _ = weft.designationOpener(kind, "dashboard.open");
     weft.restingMode("dashboard");
     // The dashboard only specializes its small local vocabulary below. Keep
     // the ordinary workspace chords available for everything it does not
     // claim (SPC f f, buffer/window commands, the palette, ...).
     weft.setFallback("dashboard", "normal");
-    weft.bindKey("dashboard", "j", "cursor-down");
-    weft.bindKey("dashboard", "k", "cursor-up");
-    weft.bindKey("dashboard", "Down", "cursor-down");
-    weft.bindKey("dashboard", "Up", "cursor-up");
-    weft.bindKey("dashboard", "Return", "dashboard-activate");
-    weft.bindKey("dashboard", "o", "dashboard-open-file");
-    weft.bindKey("dashboard", "n", "dashboard-new");
-    weft.bindKey("dashboard", "q", "buffer-back");
+    weft.bindKey("dashboard", "j", "cursor.down");
+    weft.bindKey("dashboard", "k", "cursor.up");
+    weft.bindKey("dashboard", "Down", "cursor.down");
+    weft.bindKey("dashboard", "Up", "cursor.up");
+    weft.bindKey("dashboard", "Return", "dashboard.activate");
+    weft.bindKey("dashboard", "o", "files.find");
+    weft.bindKey("dashboard", "n", "buffer.scratch");
+    weft.bindKey("dashboard", "q", "buffer.back");
 }
 
 fn fields(rec: []const u8, out: [][]const u8) void {
@@ -107,8 +104,8 @@ fn configuredItems(a: std.mem.Allocator, fallback: bool) ![]const Item {
         }
     }
     if (items.items.len == 0 and fallback) {
-        try items.append(a, .{ .section = "start", .label = "Open file", .command = "dashboard-open-file", .arg = "" });
-        try items.append(a, .{ .section = "start", .label = "New buffer", .command = "dashboard-new", .arg = "" });
+        try items.append(a, .{ .section = "start", .label = "Open file", .command = "files.find", .arg = "" });
+        try items.append(a, .{ .section = "start", .label = "New buffer", .command = "buffer.scratch", .arg = "" });
     }
     return items.toOwnedSlice(a);
 }
@@ -194,24 +191,4 @@ fn onSemanticAction() callconv(.c) void {
         return;
     }
     _ = weft.semanticActionDecline();
-}
-
-fn openFile() void {
-    weft.openFilePick("Open file", file_pick);
-}
-
-fn newBuffer() void {
-    weft.runStr("buffer-create", "*scratch*");
-}
-
-fn onPick(id: u32) void {
-    if (id != file_pick) return;
-    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
-    defer outcome.deinit(weft.allocator);
-    const path = switch (outcome) {
-        .candidate => |candidate| candidate.text,
-        .input => |input| input,
-        .cancelled => return,
-    };
-    if (path.len > 0) weft.openTyped(path);
 }

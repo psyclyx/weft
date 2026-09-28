@@ -73,25 +73,25 @@ const posRequest = request.posRequest;
 
 // ── Plugin surface ───────────────────────────────────────────────────
 const base_cmds = [_]weft.CommandEntry{
-    .{ .name = "hover", .arity = .one, .call = cmdHover, .summary = "describe the symbol under the cursor" },
-    .{ .name = "goto-definition", .arity = .one, .call = cmdDefinition, .summary = "jump to the definition" },
-    .{ .name = "goto-type-definition", .arity = .one, .call = cmdTypeDefinition, .summary = "jump to the definition of the symbol's type" },
-    .{ .name = "goto-implementation", .arity = .one, .call = cmdImplementation, .summary = "jump to the implementation" },
-    .{ .name = "references", .arity = .one, .call = cmdReferences, .summary = "list references to the symbol" },
-    .{ .name = "symbols", .call = cmdSymbols, .arity = .whole, .summary = "pick a symbol in this file" },
-    .{ .name = "next-diagnostic", .call = cmdNextDiag, .arity = .whole, .summary = "go to the next diagnostic" },
-    .{ .name = "prev-diagnostic", .call = cmdPrevDiag, .arity = .whole, .summary = "go to the previous diagnostic" },
-    .{ .name = "diagnostics", .call = cmdDiagnostics, .arity = .whole, .summary = "pick a diagnostic in this file" },
-    .{ .name = "diagnostics-list", .call = cmdDiagnosticsList, .arity = .whole, .summary = "every stored diagnostic, one `path\tline\tcol\tseverity\tmessage` row each (a string result)" },
-    .{ .name = "lsp-format", .call = cmdFormat, .arity = .whole, .summary = "format the buffer through the language server" },
-    .{ .name = "rename", .arity = .one, .call = cmdRename, .summary = "rename the symbol everywhere" },
-    .{ .name = "signature-help", .arity = .one, .call = cmdSignature, .summary = "show the call signature here" },
-    .{ .name = "inlay-hints", .call = cmdInlay, .arity = .whole, .summary = "toggle inlay hints" },
-    .{ .name = "code-actions", .arity = .one, .call = cmdCodeActions, .summary = "offer the code actions available here" },
+    .{ .name = "lsp.hover", .arity = .one, .call = cmdHover, .summary = "Describe the symbol under the cursor.", .label = "Hover", .icon = "info" },
+    .{ .name = "lsp.goto-definition", .arity = .one, .call = cmdDefinition, .summary = "Jump to the definition of the symbol under the cursor.", .label = "Go to Definition", .menu = "Go", .group = "symbol", .order = 1, .icon = "crosshair" },
+    .{ .name = "lsp.goto-type-definition", .arity = .one, .call = cmdTypeDefinition, .summary = "Jump to the definition of the symbol's type.", .label = "Go to Type Definition", .menu = "Go", .group = "symbol", .order = 2 },
+    .{ .name = "lsp.goto-implementation", .arity = .one, .call = cmdImplementation, .summary = "Jump to the implementation of the symbol under the cursor.", .label = "Go to Implementation", .menu = "Go", .group = "symbol", .order = 3 },
+    .{ .name = "lsp.references", .arity = .one, .call = cmdReferences, .summary = "List the references to the symbol under the cursor.", .label = "Find References", .prompts = true, .menu = "Go", .group = "symbol", .order = 4, .icon = "search" },
+    .{ .name = "lsp.pick-symbol", .call = cmdSymbols, .arity = .whole, .summary = "Pick a symbol in this file and jump to it.", .label = "Go to Symbol", .prompts = true, .menu = "Go", .group = "symbol", .order = 5, .icon = "list-tree" },
+    .{ .name = "lsp.next-diagnostic", .call = cmdNextDiag, .arity = .whole, .summary = "Go to the next diagnostic.", .label = "Next Problem", .menu = "Go", .group = "problems", .order = 1, .icon = "chevron-down" },
+    .{ .name = "lsp.prev-diagnostic", .call = cmdPrevDiag, .arity = .whole, .summary = "Go to the previous diagnostic.", .label = "Previous Problem", .menu = "Go", .group = "problems", .order = 2, .icon = "chevron-up" },
+    .{ .name = "lsp.pick-diagnostic", .call = cmdDiagnostics, .arity = .whole, .summary = "Pick a diagnostic in this file and jump to it.", .label = "Go to Problem", .prompts = true, .menu = "Go", .group = "problems", .order = 3, .icon = "warning" },
+    .{ .name = "lsp.list-diagnostics", .call = cmdDiagnosticsList, .arity = .whole, .summary = "Return every stored diagnostic as a row of path, line, column, severity and message.", .internal = true },
+    .{ .name = "lsp.format", .call = cmdFormat, .arity = .whole, .summary = "Format the buffer through the language server.", .label = "Format with Language Server", .menu = "Edit", .group = "format", .order = 2, .icon = "format" },
+    .{ .name = "lsp.rename", .arity = .one, .call = cmdRename, .summary = "Rename the symbol under the cursor everywhere.", .label = "Rename Symbol", .prompts = true, .menu = "Edit", .group = "refactor", .order = 1, .icon = "rename" },
+    .{ .name = "lsp.signature-help", .arity = .one, .call = cmdSignature, .summary = "Show the signature of the call around the cursor.", .label = "Signature Help" },
+    .{ .name = "lsp.toggle-inlay-hints", .call = cmdInlay, .arity = .whole, .summary = "Show or hide the language server's inlay hints.", .label = "Toggle Inlay Hints" },
+    .{ .name = "lsp.code-actions", .arity = .one, .call = cmdCodeActions, .summary = "Offer the code actions available at the cursor.", .label = "Code Actions", .prompts = true, .menu = "Edit", .group = "refactor", .order = 2, .icon = "lightbulb" },
     // Internal: the deferred half of `on_poll`'s message dispatch (task #19
     // item 4) — not a user-facing verb, invoked only via `weft.run` from
     // `on_poll` itself. See `on_poll`'s doc.
-    .{ .name = "lsp-deliver-internal", .call = lspDeliverInternal, .arity = .whole },
+    .{ .name = "lsp.deliver", .call = lspDeliverInternal, .arity = .whole, .summary = "Deliver the language server's queued messages.", .internal = true },
 };
 
 /// The rename prompt's five editing commands (`rename_prompt`, below),
@@ -99,7 +99,7 @@ const base_cmds = [_]weft.CommandEntry{
 const prompt_cmds: [rename_prompt.commands.len]weft.CommandEntry = blk: {
     var arr: [rename_prompt.commands.len]weft.CommandEntry = undefined;
     // Editing the prompt's own line: never the selection.
-    for (rename_prompt.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler, .arity = .whole };
+    for (rename_prompt.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .call = c.handler, .arity = .whole, .summary = c.summary, .internal = true };
     break :blk arr;
 };
 
@@ -211,7 +211,7 @@ fn on_poll() callconv(.c) void {
         while (s.conn.live) {
             pending_msg = s.conn.next() orelse break;
             pending_session = s;
-            weft.run("lsp-deliver-internal");
+            weft.run("lsp.deliver");
         }
     }
 }
@@ -250,7 +250,11 @@ fn onPickAccept(pick_id: u32) void {
     };
     if (idx < session_mod.pick_n) {
         const target = session_mod.pick_targets[idx];
-        weft.jump(targetOffset(target) orelse return);
+        const offset = targetOffset(target) orelse return;
+        // Going to a reference or a symbol is a jump in every grammar: the
+        // place it leaves is where `jump.back` returns.
+        weft.jumpPush();
+        weft.jump(offset);
     }
 }
 
@@ -346,7 +350,7 @@ fn cmdRename() void {
 /// and emacs alike, so it returns you to the mode the ENTRY declares rather
 /// than to a mode lsp chose on your behalf.
 const rename_prompt = prompt.Prompt(.{
-    .name = "lsp-rename",
+    .name = "lsp.rename",
     .capacity = 256,
     .on_accept = onRenameName,
     .on_cancel = struct {
@@ -768,6 +772,9 @@ fn presentDefinition(s: *Session, result: rpc.Value) void {
         weft.echo("lsp: definition in another file");
         return;
     }
+    // A jump in every grammar's sense, so no grammar wraps this command to
+    // push one first: the place it leaves is where `jump.back` returns.
+    weft.jumpPush();
     weft.jump(offsetOf(loc.line, loc.col));
 }
 

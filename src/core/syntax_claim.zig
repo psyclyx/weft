@@ -124,7 +124,7 @@
 //! against `syntax.zig`'s grammar machinery. This is a scoped-down v1, not
 //! an oversight: the flagship gate is about identity surviving edits/
 //! moves/deletes under a subtree grant, not about parser fidelity, and a
-//! full ts-query integration (capture names per grammar, multi-language
+//! full ts.query integration (capture names per grammar, multi-language
 //! function/method shapes) is real, separable work. The heuristic is
 //! swapped for `Syntax.queryCaptures`-driven detection (`syntax.zig`
 //! already exposes the primitive: a `function`/`method` capture query
@@ -174,7 +174,7 @@ fn isIdentChar(ch: u8) bool {
 /// spirit as `syntax.zig`'s own hole-aware `readCb`.
 ///
 /// **Two named heuristic gaps, both inherited from "brace-depth counting
-/// is not parsing," both closed for free by the ts-query upgrade (see
+/// is not parsing," both closed for free by the ts.query upgrade (see
 /// "Parser fidelity, deferred"):** (1) the signature/return-type
 /// brace-free assumption above — an anonymous-struct return type or a
 /// default-value struct literal in the parameter list would miscount;

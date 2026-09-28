@@ -44,7 +44,7 @@ pub const MenuOverlay = struct {
     open_ns: u64 = 0, // when the current menu was entered (idle timer)
     last_mode: [64]u8 = undefined,
     last_len: usize = 0,
-    /// The F1 "show the hint now" edge, set by the `which-key-now` command
+    /// The F1 "show the hint now" edge, set by the `which-key.show` command
     /// and consumed by `update` below. PER-HEAD, same reasoning as this
     /// struct's own doc: head A pressing F1 must not force head B's popup.
     /// Was a free-floating `main()`-local `bool` threaded through `Session.
@@ -128,6 +128,119 @@ pub const MenuOverlay = struct {
     }
 };
 
+/// A message is brief. It shows on a status line for `duration_ns` from the
+/// wake that first sees it said (`Head.Echo.said`), then the line shows what
+/// it shows at rest — so neither a startup echo nor a refusal sits there for
+/// the rest of the session, and a message said again shows again.
+/// `editor/echo-ms` is re-read at each saying. Noted at the wake's boundary,
+/// before the frame (`note`); the frame only reads `showing`, so building it
+/// changes nothing (doc/model.md §2.7).
+pub const EchoTiming = struct {
+    said: u64 = 0,
+    since_ns: u64 = 0,
+    duration_ns: u64 = default_ns,
+    /// Whether the message shows now — the frame's input.
+    showing: bool = false,
+
+    pub const default_ns = 4 * std.time.ns_per_s;
+
+    /// Note a message said `said` times so far (`Head.Echo.said`,
+    /// `status_feed.Notices.said`), holding text or not, at `now`: a new
+    /// saying starts its time, and a message past its time stops showing;
+    /// `ms` is the configured duration, when there is one. True when what the
+    /// line shows moved — a new saying, or shown, then gone — so the frame is
+    /// due.
+    pub fn note(self: *EchoTiming, said: u64, has_text: bool, now: u64, ms: ?u64) bool {
+        const new = said != self.said;
+        if (new) {
+            self.said = said;
+            self.since_ns = now;
+            self.duration_ns = if (ms) |m| m * std.time.ns_per_ms else default_ns;
+        }
+        const showing = has_text and now -| self.since_ns < self.duration_ns;
+        defer self.showing = showing;
+        return new or showing != self.showing;
+    }
+
+    /// When the message showing now lapses: the wake that redraws without it.
+    pub fn due(self: *const EchoTiming, now: u64) ?u64 {
+        if (!self.showing) return null;
+        const at = self.since_ns + self.duration_ns;
+        return if (at > now) at else null;
+    }
+};
+
+/// A flash (vim-goggles: `core.flash`) shows for `duration_ns` from the wake
+/// that first sees its generation, then goes. `editor/flash-ms` is re-read
+/// as each new flash starts, so a reload applies to the next one; without
+/// it the duration stands. Noted at the wake's boundary, before the frame,
+/// as `EchoTiming` is — the frame only reads `showing`.
+pub const FlashTiming = struct {
+    gen: u64 = 0,
+    since_ns: u64 = 0,
+    duration_ns: u64 = 150 * std.time.ns_per_ms,
+    /// Whether the flash shows now — the frame's input.
+    showing: bool = false,
+
+    /// Note the flash set's generation `gen` (0: none ever) at `now`; `ms`
+    /// is the configured duration, when there is one. True when what the
+    /// frame shows moved — a new flash, or shown, then gone.
+    pub fn note(self: *FlashTiming, gen: u64, now: u64, ms: ?u64) bool {
+        const new = gen != self.gen;
+        if (new) {
+            self.gen = gen;
+            self.since_ns = now;
+            if (ms) |m| self.duration_ns = m * std.time.ns_per_ms;
+        }
+        const showing = gen > 0 and now -| self.since_ns < self.duration_ns;
+        defer self.showing = showing;
+        return new or showing != self.showing;
+    }
+
+    /// When the flash showing now lapses: the wake that redraws without it.
+    pub fn due(self: *const FlashTiming, now: u64) ?u64 {
+        if (!self.showing) return null;
+        const at = self.since_ns + self.duration_ns;
+        return if (at > now) at else null;
+    }
+};
+
+test "flash timing: a flash shows for its duration from the wake that sees it, and a new one restarts it" {
+    var timing: FlashTiming = .{};
+    const ms = std.time.ns_per_ms;
+    try std.testing.expect(!timing.note(0, 10 * ms, null)); // no flash yet
+    try std.testing.expect(timing.note(1, 20 * ms, null));
+    try std.testing.expect(timing.showing);
+    try std.testing.expectEqual(@as(?u64, 170 * ms), timing.due(100 * ms));
+    try std.testing.expect(!timing.note(1, 100 * ms, null)); // nothing moved
+    try std.testing.expect(timing.note(1, 170 * ms, null)); // gone
+    try std.testing.expect(!timing.showing);
+    try std.testing.expect(timing.note(2, 200 * ms, 50)); // a new one, configured
+    try std.testing.expectEqual(@as(?u64, 250 * ms), timing.due(200 * ms));
+}
+
+test "echo timing: a message shows for its duration from its saying, and again when said again" {
+    var echo: core.Head.Echo = .{};
+    defer echo.deinit(std.testing.allocator);
+    var timing: EchoTiming = .{};
+    const s = std.time.ns_per_s;
+    try echo.say(std.testing.allocator, "no hover");
+    try std.testing.expect(timing.note(echo.sayings(), echo.text().len > 0, 10 * s, null));
+    try std.testing.expect(timing.showing);
+    try std.testing.expect(!timing.note(echo.sayings(), echo.text().len > 0, 13 * s, null)); // nothing moved
+    try std.testing.expect(timing.showing);
+    try std.testing.expectEqual(@as(?u64, 14 * s), timing.due(13 * s));
+    try std.testing.expect(timing.note(echo.sayings(), echo.text().len > 0, 15 * s, null)); // gone
+    try std.testing.expect(!timing.showing);
+    try std.testing.expect(timing.due(15 * s) == null);
+    // The same words, said again: shown again.
+    try echo.say(std.testing.allocator, "no hover");
+    try std.testing.expect(timing.note(echo.sayings(), echo.text().len > 0, 20 * s, 1000));
+    try std.testing.expect(timing.showing);
+    try std.testing.expect(timing.note(echo.sayings(), echo.text().len > 0, 21 * s + 1, 1000));
+    try std.testing.expect(!timing.showing);
+}
+
 pub const FrameCtx = struct {
     gpa: std.mem.Allocator,
 
@@ -176,17 +289,18 @@ pub const FrameCtx = struct {
     /// Damage flag: the build gates on it (skips a clean frame) and re-arms it
     /// for the frame after a flash so the flash is drawn then cleared.
     view_dirty: *bool,
+    /// What the pointer rests on (`pointer.Hover`): the pointer writes it,
+    /// the frame reads it into each pane's `Hud.pointer`.
+    hover: *@import("pointer.zig").Hover,
     /// Last render's pane frame, for click routing next frame.
     last_frame_rect: *region.Rect,
 
-    // ── vim-goggles flash timing ──
-    flash_gen: *u64,
-    flash_start_ns: *u64,
-    flash_was_active: *bool,
-    /// How long a flash shows. Re-read from `config` (`editor/flash-ms`) each
-    /// time a new flash starts, so a config reload takes effect on the next
-    /// one; the value it held before is the fallback.
-    flash_duration_ns: *u64,
+    /// Whether the vim-goggles flash shows, as the wake noted it.
+    flash_timing: *const FlashTiming,
+    /// When the head's message was said, as the frame first saw it.
+    echo_timing: *const EchoTiming,
+    /// The system's last notice (`Buffers.notices`), timed as an echo is.
+    notice_timing: *const EchoTiming,
     /// The `weft.set` values the frame reads live (`editor/flash-ms`,
     /// `editor/flash-undo`). Null in an embedding with no configuration.
     config: ?*const core.kv.Store = null,

@@ -19,7 +19,7 @@
 //! REPOSITORY SESSIONS (design §14.3). The model is per REPOSITORY, not per
 //! plugin: a `RepoSession` keyed by repository root owns the files/hunks/raw/
 //! render/branch/fold/interaction state and its own instanced buffer (`*git*`,
-//! `*git:2*`, …). `git-status` in a buffer whose repository differs opens THAT
+//! `*git:2*`, …). `git.status` in a buffer whose repository differs opens THAT
 //! repository's session; every other command routes to the session of the
 //! focused git buffer, and a fill routes by the session its token carries. Two
 //! repositories therefore list their own files and stage independently.
@@ -50,7 +50,7 @@
 //!
 //! A COMMIT DRAFT is not part of that projection: it is an ordinary instanced
 //! text entry (`*git-commit*`, `*git-commit:2*`, …) with no mode and no keys of
-//! its own. It is tool-backed, so `save` in it resolves to `git-commit-save` —
+//! its own. It is tool-backed, so `save` in it resolves to `git.commit-save` —
 //! saving the draft IS the commit, aborting it is closing the entry, and
 //! amend/reword/fixup/squash are offers that re-seat the draft rather than
 //! commands with their own buffers. Each draft records the repository it was
@@ -72,6 +72,7 @@
 const std = @import("std");
 const weft = @import("weft");
 const prompt = @import("weft_prompt");
+const statusline = @import("weft_statusline");
 
 // The plugin's own parts. A verb below composes them; none of them knows
 // about a verb, so the model can be read without the commands and the
@@ -179,15 +180,24 @@ const Cmd = struct {
     do: Do,
     route: Route = .focus,
     scope: Scope = .durable,
-    /// What this verb IS, for someone reading a list of them. Empty means
-    /// "not something you look up by name" — the row motions, the draft
-    /// re-seats, the settles one half of this plugin runs on the other.s
-    /// behalf. The palette lists what is DOCUMENTED, so silence here is a
-    /// decision rather than an omission.
-    summary: []const u8 = "",
+    /// What this verb IS, for someone reading a list of them: one sentence,
+    /// on every command. Whether it is LISTED is `internal`'s business — the
+    /// row motions, the draft re-seats, the settles one half of this plugin
+    /// runs on the other's behalf are described but never offered.
+    summary: []const u8,
     /// How it maps over several selections (`weft.Arity`) — required, as in
     /// the manifest's own table: a verb on "what the cursor is on" is `.one`.
     arity: weft.Arity,
+    // How it is presented (doc/chrome.md §1.2), passed through to the
+    // manifest's `weft.CommandEntry` unchanged.
+    label: []const u8 = "",
+    menu: []const u8 = "",
+    group: []const u8 = "",
+    order: ?i32 = null,
+    icon: []const u8 = "",
+    prompts: bool = false,
+    toggle: []const u8 = "",
+    internal: bool = false,
 };
 
 /// The `fn () void` for one table entry — the shape's implementation, closed
@@ -219,77 +229,77 @@ fn callFor(comptime i: usize) *const fn () void {
     };
 }
 const base_cmds = [_]Cmd{
-    .{ .name = "git-status", .arity = .whole, .do = .{ .call = gitStatus }, .route = .repo, .summary = "show the repository's status" },
-    .{ .name = "git-status-open", .arity = .whole, .do = .{ .call = gitStatusOpen }, .route = .repo, .summary = "show the status a `weft://here/git.status/…` designation names" },
-    .{ .name = "git-init", .arity = .whole, .do = .{ .run = &.{ "git", "init" } }, .route = .repo, .summary = "start a repository here" },
-    .{ .name = "git-refresh", .arity = .whole, .do = .{ .call = gitRefresh }, .summary = "re-read the repository" },
-    .{ .name = "git-toggle-fold", .arity = .one, .do = .{ .call = gitToggleFold }, .summary = "fold or unfold the section under the cursor" },
+    .{ .name = "git.status", .arity = .whole, .do = .{ .call = gitStatus }, .route = .repo, .summary = "Show the repository's status.", .label = "Source Control", .menu = "View", .group = "panels", .order = 20, .icon = "git-branch" },
+    .{ .name = "git.status-open", .arity = .whole, .do = .{ .call = gitStatusOpen }, .route = .repo, .summary = "Show the status a `weft://here/git.status/…` designation names.", .internal = true },
+    .{ .name = "git.init", .arity = .whole, .do = .{ .run = &.{ "git", "init" } }, .route = .repo, .summary = "Start a repository here.", .label = "Initialize Repository", .icon = "git-branch" },
+    .{ .name = "git.refresh", .arity = .whole, .do = .{ .call = gitRefresh }, .summary = "Re-read the repository.", .label = "Refresh", .icon = "refresh" },
+    .{ .name = "git.toggle-fold", .arity = .one, .do = .{ .call = gitToggleFold }, .summary = "Fold or unfold the section under the cursor.", .label = "Toggle Fold" },
     // Row motion: core's cursor move, then republish — the offers describe
     // the row under point, so moving point is a new eligibility fact.
-    .{ .name = "git-next-row", .arity = .whole, .do = .{ .call = gitNextRow } },
-    .{ .name = "git-prev-row", .arity = .whole, .do = .{ .call = gitPrevRow } },
-    .{ .name = "git-stage", .arity = .one, .do = .{ .call = gitStage }, .scope = .snapshot, .summary = "stage what the cursor is on" },
-    .{ .name = "git-unstage", .arity = .one, .do = .{ .call = gitUnstage }, .scope = .snapshot, .summary = "unstage what the cursor is on" },
-    .{ .name = "git-stage-all", .arity = .whole, .do = .{ .run = &.{ "git", "add", "-A" } }, .summary = "stage every change" },
-    .{ .name = "git-unstage-all", .arity = .whole, .do = .{ .run = &.{ "git", "reset", "-q", "HEAD" } }, .summary = "unstage everything" },
-    .{ .name = "git-discard", .arity = .one, .do = .{ .call = gitDiscard }, .scope = .arm, .summary = "discard what the cursor is on" },
-    .{ .name = "git-visit", .arity = .one, .do = .{ .call = gitVisit }, .summary = "open the file the cursor is on" },
-    .{ .name = "git-commit", .arity = .whole, .do = .{ .draft = .{ .flags = "" } }, .summary = "write a commit message" },
+    .{ .name = "git.next-row", .arity = .whole, .do = .{ .call = gitNextRow }, .summary = "Move to the next row of the status.", .internal = true },
+    .{ .name = "git.prev-row", .arity = .whole, .do = .{ .call = gitPrevRow }, .summary = "Move to the previous row of the status.", .internal = true },
+    .{ .name = "git.stage", .arity = .one, .do = .{ .call = gitStage }, .scope = .snapshot, .summary = "Stage the file or hunk under the cursor.", .label = "Stage", .icon = "plus" },
+    .{ .name = "git.unstage", .arity = .one, .do = .{ .call = gitUnstage }, .scope = .snapshot, .summary = "Unstage the file or hunk under the cursor.", .label = "Unstage", .icon = "minus" },
+    .{ .name = "git.stage-all", .arity = .whole, .do = .{ .run = &.{ "git", "add", "-A" } }, .summary = "Stage every change.", .label = "Stage All" },
+    .{ .name = "git.unstage-all", .arity = .whole, .do = .{ .run = &.{ "git", "reset", "-q", "HEAD" } }, .summary = "Unstage everything.", .label = "Unstage All" },
+    .{ .name = "git.discard", .arity = .one, .do = .{ .call = gitDiscard }, .scope = .arm, .summary = "Discard the change under the cursor, after asking.", .label = "Discard" },
+    .{ .name = "git.visit", .arity = .one, .do = .{ .call = gitVisit }, .summary = "Open the file, or show the commit, the cursor is on.", .internal = true },
+    .{ .name = "git.commit", .arity = .whole, .do = .{ .draft = .{ .flags = "" } }, .summary = "Write a commit message and commit the staged changes.", .label = "Commit", .prompts = true, .icon = "git-commit" },
     // Saving a draft entry IS its commit; the settle runs on the fill's way
     // back. A draft names its own repository (`currentDraft` routes to it), so
     // both stay `.carried` — never "whatever git buffer was focused".
-    .{ .name = "git-commit-save", .arity = .whole, .do = .{ .call = gitCommitSave }, .route = .carried },
-    .{ .name = "git-commit-settle", .arity = .whole, .do = .{ .call = gitCommitSettle }, .route = .carried },
+    .{ .name = "git.commit-save", .arity = .whole, .do = .{ .call = gitCommitSave }, .route = .carried, .summary = "Commit with the draft's message.", .internal = true },
+    .{ .name = "git.commit-settle", .arity = .whole, .do = .{ .call = gitCommitSettle }, .route = .carried, .summary = "Finish a commit once its draft is saved.", .internal = true },
     // Commit dispatch (the `c` transient): each opens a draft for the commit it
     // means; fixup/squash resolve the commit under point into its message.
-    .{ .name = "git-amend", .arity = .whole, .do = .{ .draft = .{ .flags = "--amend", .prefill = head_message } }, .summary = "amend the last commit" },
-    .{ .name = "git-extend", .arity = .whole, .do = .{ .run = &.{ "git", "commit", "--amend", "--no-edit" } }, .summary = "add the staged changes to the last commit, message unchanged" },
-    .{ .name = "git-reword", .arity = .whole, .do = .{ .draft = .{ .flags = "--amend --only", .prefill = head_message } }, .summary = "reword the last commit" },
-    .{ .name = "git-fixup", .arity = .one, .do = .{ .call = gitFixup }, .summary = "write a fixup for the commit under point" },
-    .{ .name = "git-squash", .arity = .one, .do = .{ .call = gitSquash }, .summary = "write a squash for the commit under point" },
+    .{ .name = "git.amend", .arity = .whole, .do = .{ .draft = .{ .flags = "--amend", .prefill = head_message } }, .summary = "Amend the last commit.", .label = "Amend", .prompts = true, .icon = "git-commit" },
+    .{ .name = "git.extend", .arity = .whole, .do = .{ .run = &.{ "git", "commit", "--amend", "--no-edit" } }, .summary = "Add the staged changes to the last commit, keeping its message.", .label = "Extend", .icon = "git-commit" },
+    .{ .name = "git.reword", .arity = .whole, .do = .{ .draft = .{ .flags = "--amend --only", .prefill = head_message } }, .summary = "Reword the last commit.", .label = "Reword", .prompts = true, .icon = "git-commit" },
+    .{ .name = "git.fixup", .arity = .one, .do = .{ .call = gitFixup }, .summary = "Write a fixup for the commit under the cursor.", .label = "Fixup", .prompts = true, .icon = "git-commit" },
+    .{ .name = "git.squash", .arity = .one, .do = .{ .call = gitSquash }, .summary = "Write a squash for the commit under the cursor.", .label = "Squash", .prompts = true, .icon = "git-commit" },
     // The draft entry's own offers — they re-seat the draft under point.
-    .{ .name = "git-draft-close", .arity = .whole, .do = .{ .call = gitDraftClose }, .route = .carried },
-    .{ .name = "git-draft-amend", .arity = .whole, .do = .{ .call = gitDraftAmend }, .route = .carried },
-    .{ .name = "git-draft-reword", .arity = .whole, .do = .{ .call = gitDraftReword }, .route = .carried },
-    .{ .name = "git-draft-fixup", .arity = .one, .do = .{ .call = gitDraftFixup }, .route = .carried },
-    .{ .name = "git-draft-squash", .arity = .one, .do = .{ .call = gitDraftSquash }, .route = .carried },
+    .{ .name = "git.draft-close", .arity = .whole, .do = .{ .call = gitDraftClose }, .route = .carried, .summary = "Close the commit draft, asking first if it has a message.", .internal = true },
+    .{ .name = "git.draft-amend", .arity = .whole, .do = .{ .call = gitDraftAmend }, .route = .carried, .summary = "Turn the commit draft into an amend.", .internal = true },
+    .{ .name = "git.draft-reword", .arity = .whole, .do = .{ .call = gitDraftReword }, .route = .carried, .summary = "Turn the commit draft into a reword.", .internal = true },
+    .{ .name = "git.draft-fixup", .arity = .one, .do = .{ .call = gitDraftFixup }, .route = .carried, .summary = "Turn the commit draft into a fixup.", .internal = true },
+    .{ .name = "git.draft-squash", .arity = .one, .do = .{ .call = gitDraftSquash }, .route = .carried, .summary = "Turn the commit draft into a squash.", .internal = true },
     // Commit-scoped verbs on a recent-commit node.
-    .{ .name = "git-show", .arity = .one, .do = .{ .call = gitShow }, .summary = "show the commit under point" },
-    .{ .name = "git-cherry-pick", .arity = .one, .do = .{ .call = gitCherryPick }, .summary = "cherry-pick the commit under point" },
-    .{ .name = "git-revert", .arity = .one, .do = .{ .call = gitRevert }, .summary = "revert the commit under point" },
-    .{ .name = "git-reset-soft", .arity = .one, .do = .{ .call = gitResetSoft }, .summary = "reset to the commit under point, keeping the index and tree" },
-    .{ .name = "git-reset-mixed", .arity = .one, .do = .{ .call = gitResetMixed }, .summary = "reset to the commit under point, keeping the tree" },
-    .{ .name = "git-reset-hard", .arity = .one, .do = .{ .call = gitResetHard }, .summary = "reset to the commit under point, discarding everything" },
+    .{ .name = "git.show", .arity = .one, .do = .{ .call = gitShow }, .summary = "Show the commit under the cursor.", .label = "Show Commit", .icon = "git-commit" },
+    .{ .name = "git.cherry-pick", .arity = .one, .do = .{ .call = gitCherryPick }, .summary = "Cherry-pick the commit under the cursor.", .label = "Cherry-Pick", .icon = "git-commit" },
+    .{ .name = "git.revert", .arity = .one, .do = .{ .call = gitRevert }, .summary = "Revert the commit under the cursor.", .label = "Revert Commit", .icon = "git-commit" },
+    .{ .name = "git.reset-soft", .arity = .one, .do = .{ .call = gitResetSoft }, .summary = "Reset to the commit under the cursor, keeping the index and tree.", .label = "Reset Soft" },
+    .{ .name = "git.reset-mixed", .arity = .one, .do = .{ .call = gitResetMixed }, .summary = "Reset to the commit under the cursor, keeping the tree.", .label = "Reset Mixed" },
+    .{ .name = "git.reset-hard", .arity = .one, .do = .{ .call = gitResetHard }, .summary = "Reset to the commit under the cursor, discarding everything.", .label = "Reset Hard" },
     // Branch transient.
-    .{ .name = "git-branch-checkout", .arity = .whole, .do = .{ .branch = .{ .before = &.{ "git", "checkout" }, .label = "checkout branch: " } }, .summary = "check out a branch" },
-    .{ .name = "git-branch-create", .arity = .whole, .do = .{ .branch = .{ .before = &.{ "git", "checkout", "-b" }, .label = "create & checkout branch: " } }, .summary = "create a branch and switch to it" },
-    .{ .name = "git-branch-new", .arity = .whole, .do = .{ .branch = .{ .before = &.{ "git", "branch" }, .label = "new branch: " } }, .summary = "create a branch here without switching" },
-    .{ .name = "git-branch-delete", .arity = .whole, .do = .{ .branch = .{ .before = &.{ "git", "branch", "-d" }, .label = "delete branch: ", .confirm = true } }, .summary = "delete a branch" },
-    .{ .name = "git-branch-rename", .arity = .whole, .do = .{ .branch = .{ .before = &.{ "git", "branch", "-m" }, .label = "rename current branch to: " } }, .summary = "rename a branch" },
+    .{ .name = "git.branch-checkout", .arity = .whole, .do = .{ .branch = .{ .before = &.{ "git", "checkout" }, .label = "checkout branch: " } }, .summary = "Check out a branch.", .label = "Checkout Branch", .prompts = true, .icon = "git-branch" },
+    .{ .name = "git.branch-create", .arity = .whole, .do = .{ .branch = .{ .before = &.{ "git", "checkout", "-b" }, .label = "create & checkout branch: " } }, .summary = "Create a branch and switch to it.", .label = "Create Branch", .prompts = true, .icon = "git-branch" },
+    .{ .name = "git.branch-new", .arity = .whole, .do = .{ .branch = .{ .before = &.{ "git", "branch" }, .label = "new branch: " } }, .summary = "Create a branch here without switching to it.", .label = "New Branch", .prompts = true, .icon = "git-branch" },
+    .{ .name = "git.branch-delete", .arity = .whole, .do = .{ .branch = .{ .before = &.{ "git", "branch", "-d" }, .label = "delete branch: ", .confirm = true } }, .summary = "Delete a branch.", .label = "Delete Branch", .prompts = true, .icon = "git-branch" },
+    .{ .name = "git.branch-rename", .arity = .whole, .do = .{ .branch = .{ .before = &.{ "git", "branch", "-m" }, .label = "rename current branch to: " } }, .summary = "Rename the current branch.", .label = "Rename Branch", .prompts = true, .icon = "git-branch" },
     // Stash transient.
-    .{ .name = "git-stash-save", .arity = .whole, .do = .{ .run = &.{ "git", "stash", "push" } }, .summary = "stash the working tree" },
-    .{ .name = "git-stash-pop", .arity = .whole, .do = .{ .run = &.{ "git", "stash", "pop" } }, .summary = "re-apply the newest stash and drop it" },
-    .{ .name = "git-stash-apply", .arity = .whole, .do = .{ .run = &.{ "git", "stash", "apply" } }, .summary = "re-apply a stash, keeping it" },
-    .{ .name = "git-stash-list", .arity = .whole, .do = .{ .view = .{ .argv = &.{ "git", "stash", "list" }, .name = "*git-stash*", .style = .none } }, .summary = "list the stashes" },
-    .{ .name = "git-stash-drop", .arity = .whole, .do = .{ .call = gitStashDrop }, .summary = "drop a stash" },
+    .{ .name = "git.stash-save", .arity = .whole, .do = .{ .run = &.{ "git", "stash", "push" } }, .summary = "Stash the working tree.", .label = "Stash Changes" },
+    .{ .name = "git.stash-pop", .arity = .whole, .do = .{ .run = &.{ "git", "stash", "pop" } }, .summary = "Re-apply the newest stash and drop it.", .label = "Pop Stash" },
+    .{ .name = "git.stash-apply", .arity = .whole, .do = .{ .run = &.{ "git", "stash", "apply" } }, .summary = "Re-apply the newest stash, keeping it.", .label = "Apply Stash" },
+    .{ .name = "git.stash-list", .arity = .whole, .do = .{ .view = .{ .argv = &.{ "git", "stash", "list" }, .name = "*git-stash*", .style = .none } }, .summary = "List the stashes.", .label = "List Stashes", .icon = "list" },
+    .{ .name = "git.stash-drop", .arity = .whole, .do = .{ .call = gitStashDrop }, .summary = "Drop the newest stash, after asking.", .label = "Drop Stash" },
     // Log transient.
-    .{ .name = "git-log-all", .arity = .whole, .do = .{ .view = .{ .argv = &.{ "git", "log", "--oneline", "--graph", "--all", "-50" }, .name = "*git-log*", .style = .log } }, .summary = "show the log of every branch" },
+    .{ .name = "git.log-all", .arity = .whole, .do = .{ .view = .{ .argv = &.{ "git", "log", "--oneline", "--graph", "--all", "-50" }, .name = "*git-log*", .style = .log } }, .summary = "Show the log of every branch.", .label = "Log All Branches", .icon = "history" },
     // Push/pull/fetch are TRANSIENTS: their open/toggle/run/cancel commands are
     // generated from the declarations in `transient.zig` and spliced in below
     // (`transient_cmds`), so there is nothing to list here.
     // Interactive rebase: the plan is an entry; saving it runs the rebase.
-    .{ .name = "git-rebase-interactive", .arity = .whole, .do = .{ .call = gitRebaseInteractive }, .summary = "edit a rebase plan" },
-    .{ .name = "git-rebase-continue", .arity = .whole, .do = .{ .run = &.{ "git", "-c", "core.editor=true", "rebase", "--continue" } }, .summary = "carry on with the rebase" },
-    .{ .name = "git-rebase-abort", .arity = .whole, .do = .{ .run = &.{ "git", "rebase", "--abort" } }, .summary = "abandon the rebase" },
-    .{ .name = "git-rebase-skip", .arity = .whole, .do = .{ .run = &.{ "git", "rebase", "--skip" } }, .summary = "skip this commit and carry on" },
-    .{ .name = "git-rebase-save", .arity = .whole, .do = .{ .call = gitRebaseSave }, .route = .carried },
-    .{ .name = "git-rebase-settle", .arity = .whole, .do = .{ .call = gitRebaseSettle }, .route = .carried },
-    .{ .name = "git-menu-cancel", .arity = .whole, .do = .{ .call = transient.gitMenuCancel } },
+    .{ .name = "git.rebase-interactive", .arity = .whole, .do = .{ .call = gitRebaseInteractive }, .summary = "Edit a rebase plan for the last few commits.", .label = "Interactive Rebase", .prompts = true, .icon = "git-merge" },
+    .{ .name = "git.rebase-continue", .arity = .whole, .do = .{ .run = &.{ "git", "-c", "core.editor=true", "rebase", "--continue" } }, .summary = "Carry on with the rebase.", .label = "Continue Rebase", .icon = "git-merge" },
+    .{ .name = "git.rebase-abort", .arity = .whole, .do = .{ .run = &.{ "git", "rebase", "--abort" } }, .summary = "Abandon the rebase.", .label = "Abort Rebase", .icon = "git-merge" },
+    .{ .name = "git.rebase-skip", .arity = .whole, .do = .{ .run = &.{ "git", "rebase", "--skip" } }, .summary = "Skip this commit and carry on with the rebase.", .label = "Skip Rebase Commit", .icon = "git-merge" },
+    .{ .name = "git.rebase-save", .arity = .whole, .do = .{ .call = gitRebaseSave }, .route = .carried, .summary = "Run the rebase the saved plan describes.", .internal = true },
+    .{ .name = "git.rebase-settle", .arity = .whole, .do = .{ .call = gitRebaseSettle }, .route = .carried, .summary = "Finish a rebase once its plan is saved.", .internal = true },
+    .{ .name = "git.menu-cancel", .arity = .whole, .do = .{ .call = transient.gitMenuCancel }, .summary = "Close the rebase menu.", .internal = true },
     // Kept for the SPC-g leader menu: read-only views into their own buffers.
-    .{ .name = "git-log", .arity = .whole, .do = .{ .view = .{ .argv = &.{ "git", "log", "--oneline", "--graph", "-30" }, .name = "*git-log*", .style = .log } }, .summary = "show the commit log" },
-    .{ .name = "git-diff", .arity = .whole, .do = .{ .view = .{ .argv = &.{ "git", "diff" }, .name = "*git-diff*", .style = .diff } }, .summary = "show the unstaged diff" },
-    .{ .name = "git-diff-staged", .arity = .whole, .do = .{ .view = .{ .argv = &.{ "git", "diff", "--staged" }, .name = "*git-diff-staged*", .style = .diff } }, .summary = "show the staged diff" },
-    .{ .name = "git-blame", .arity = .whole, .do = .{ .call = gitBlame }, .summary = "blame the file under point" },
+    .{ .name = "git.log", .arity = .whole, .do = .{ .view = .{ .argv = &.{ "git", "log", "--oneline", "--graph", "-30" }, .name = "*git-log*", .style = .log } }, .summary = "Show the commit log.", .label = "Log", .icon = "history" },
+    .{ .name = "git.diff", .arity = .whole, .do = .{ .view = .{ .argv = &.{ "git", "diff" }, .name = "*git-diff*", .style = .diff } }, .summary = "Show the unstaged diff.", .label = "Diff" },
+    .{ .name = "git.diff-staged", .arity = .whole, .do = .{ .view = .{ .argv = &.{ "git", "diff", "--staged" }, .name = "*git-diff-staged*", .style = .diff } }, .summary = "Show the staged diff.", .label = "Diff Staged" },
+    .{ .name = "git.blame", .arity = .whole, .do = .{ .call = gitBlame }, .summary = "Show who last changed each line of the current file.", .label = "Blame" },
 };
 
 /// The shared prompt's five editing commands (`input`, below), mapped into
@@ -299,9 +309,19 @@ const base_cmds = [_]Cmd{
 /// buffer had to work around by carrying the session in `input_action`.
 const input_cmds: [input.commands.len]Cmd = blk: {
     var arr: [input.commands.len]Cmd = undefined;
-    for (input.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .do = .{ .call = c.handler }, .arity = .whole };
+    for (input.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .do = .{ .call = c.handler }, .arity = .whole, .summary = c.summary, .internal = true };
     break :blk arr;
 };
+
+/// The two transients whose open command is only a key in the status buffer:
+/// `c` opens the commit dispatch and `l` the log choice, while the palette
+/// already lists `git.commit` and `git.log` as the verbs themselves.
+const unlisted_menus = [_][]const u8{ "git.commit-dispatch", "git.log-choose" };
+
+fn unlistedMenu(comptime name: []const u8) bool {
+    for (unlisted_menus) |m| if (std.mem.eql(u8, m, name)) return true;
+    return false;
+}
 
 /// The push/pull/fetch transients' generated commands, adapted to git's own
 /// `Cmd`. They take the table's defaults — `.focus` route, `.durable` scope —
@@ -310,7 +330,20 @@ const input_cmds: [input.commands.len]Cmd = blk: {
 /// current render.
 const transient_cmds: [transient.commands.len]Cmd = blk: {
     var arr: [transient.commands.len]Cmd = undefined;
-    for (transient.commands, 0..) |c, i| arr[i] = .{ .name = c.name, .do = .{ .call = c.call }, .arity = c.arity };
+    for (transient.commands, 0..) |c, i| arr[i] = .{
+        .name = c.name,
+        .do = .{ .call = c.call },
+        .arity = c.arity,
+        .summary = c.summary,
+        .label = c.label,
+        .menu = c.menu,
+        .group = c.group,
+        .order = c.order,
+        .icon = c.icon,
+        .prompts = c.prompts,
+        .toggle = c.toggle,
+        .internal = c.internal or unlistedMenu(c.name),
+    };
     break :blk arr;
 };
 
@@ -320,7 +353,20 @@ const cmds = base_cmds ++ input_cmds ++ transient_cmds;
 /// index reaches the same entry's route and scope.
 const entries: [cmds.len]weft.CommandEntry = blk: {
     var arr: [cmds.len]weft.CommandEntry = undefined;
-    for (cmds, 0..) |c, i| arr[i] = .{ .name = c.name, .call = callFor(i), .summary = c.summary, .arity = c.arity };
+    for (cmds, 0..) |c, i| arr[i] = .{
+        .name = c.name,
+        .call = callFor(i),
+        .summary = c.summary,
+        .arity = c.arity,
+        .label = c.label,
+        .menu = c.menu,
+        .group = c.group,
+        .order = c.order,
+        .icon = c.icon,
+        .prompts = c.prompts,
+        .toggle = c.toggle,
+        .internal = c.internal,
+    };
     break :blk arr;
 };
 
@@ -340,6 +386,9 @@ comptime {
 
 fn initExtra() void {
     provideRowVerbs();
+    // The branch on the status line, right after the place it is the
+    // branch of (core's place segment is 97), for every entry.
+    statusline.bind(.{ .all = &.{} }, .core, 96);
     // What a settled gather owes the rest of the plugin, and how a view is
     // coloured. Installed rather than called directly so `gather.zig` stays
     // readable without the rest of this file in your head.
@@ -352,31 +401,31 @@ fn initExtra() void {
     // buffer's RESTING mode instead: leaving a transient lands back here
     // rather than in a generic editing mode with dead keys.
     weft.restingMode("git");
-    weft.bindKey("git", "j", "git-next-row"); // core's fold-aware move, then republish
-    weft.bindKey("git", "k", "git-prev-row");
-    weft.bindKey("git", "Down", "git-next-row");
-    weft.bindKey("git", "Up", "git-prev-row");
-    weft.bindKey("git", "Tab", "git-toggle-fold");
+    weft.bindKey("git", "j", "git.next-row"); // core's fold-aware move, then republish
+    weft.bindKey("git", "k", "git.prev-row");
+    weft.bindKey("git", "Down", "git.next-row");
+    weft.bindKey("git", "Up", "git.prev-row");
+    weft.bindKey("git", "Tab", "git.toggle-fold");
     // The row verbs resolve OFFERS (see publishOffers): the key names what
     // the user means, git's published table says whether this row affords it
     // and why not, and the effect door rechecks the model ordinal.
     weft.bindKeys("git", "s", &.{"plugin.git.stage"});
     weft.bindKeys("git", "u", &.{"plugin.git.unstage"});
-    weft.bindKey("git", "S", "git-stage-all");
-    weft.bindKey("git", "U", "git-unstage-all");
+    weft.bindKey("git", "S", "git.stage-all");
+    weft.bindKey("git", "U", "git.unstage-all");
     // Discard is destructive; `x` (not git's `k`, which we spend on vim-style
     // up-motion) asks before anything is thrown away.
     // `x` dispatches by node kind (file/hunk → discard; commit → reset menu).
-    weft.bindKey("git", "x", "git-discard");
+    weft.bindKey("git", "x", "git.discard");
     // `c` opens the commit dispatch transient (which-key renders it).
-    weft.bindKey("git", "c", "git-commit-dispatch");
-    weft.bindKey("git", "b", "git-branch");
-    weft.bindKey("git", "z", "git-stash");
-    weft.bindKey("git", "l", "git-log-choose");
+    weft.bindKey("git", "c", "git.commit-dispatch");
+    weft.bindKey("git", "b", "git.branch");
+    weft.bindKey("git", "z", "git.stash");
+    weft.bindKey("git", "l", "git.log-choose");
     weft.bindKey("git", "r", "git-rebase-menu");
     // Cherry-pick / revert the commit under point (resolve the hash live).
-    weft.bindKey("git", "A", "git-cherry-pick");
-    weft.bindKey("git", "V", "git-revert");
+    weft.bindKey("git", "A", "git.cherry-pick");
+    weft.bindKey("git", "V", "git.revert");
     // Entry-level offers: about the repository this buffer projects, not
     // about the row under point.
     weft.bindKeys("git", "P", &.{"plugin.git.push"});
@@ -385,7 +434,7 @@ fn initExtra() void {
     weft.bindKeys("git", "g", &.{"plugin.git.refresh"});
     // RET dispatches: file/hunk → visit; commit → show.
     weft.bindKeys("git", "Return", &.{"plugin.git.open-diff"});
-    weft.bindKey("git", "q", "buffer-back");
+    weft.bindKey("git", "q", "buffer.back");
 
     // Discard and the other destructive verbs ask through the pick membrane
     // (`confirmPick`), so git owns no confirmation modes at all.
@@ -394,16 +443,16 @@ fn initExtra() void {
     // (doc/model.md §2.1). Git re-runs it when that designation is opened
     // with no entry showing it — a jump back to a closed status, a viewport
     // showing one again.
-    _ = weft.designationOpener(model.status_kind, "git-status-open");
+    _ = weft.designationOpener(model.status_kind, "git.status-open");
 
     // A commit draft owns NO mode and NO keys: it is an ordinary text entry in
     // the configuration's own editing modes. Its tool identity is what makes it
     // a draft, and `save` in it resolves here instead of to a file write — so
     // `:w`, `SPC f s`, and the palette's `std.persistence.save` all commit it.
-    weft.provide("save", .{ .tool = draft_tool }, "git-commit-save", 10);
+    weft.provide("file.save", .{ .tool = draft_tool }, "git.commit-save", 10);
     // A written draft has no file to recover it from, so closing it asks first
     // — the same `close` action the workspace's own keys resolve.
-    weft.provide("close", .{ .tool = draft_tool }, "git-draft-close", 10);
+    weft.provide("buffer.close", .{ .tool = draft_tool }, "git.draft-close", 10);
     // What else a draft affords is PUBLISHED, like every other `plugin.git.*`
     // intention (see publishOffers) — one namespace, one plane.
 
@@ -423,12 +472,12 @@ fn initExtra() void {
     // "leaf moved us elsewhere" branch honors regardless of stickiness — same
     // as the git-push transient's sticky toggles vs. its leaving `-do` action.
     weft.stickyMenu("git-rebase-menu");
-    weft.bindKey("git-rebase-menu", "i", "git-rebase-interactive");
-    weft.bindKey("git-rebase-menu", "c", "git-rebase-continue");
-    weft.bindKey("git-rebase-menu", "a", "git-rebase-abort");
-    weft.bindKey("git-rebase-menu", "s", "git-rebase-skip");
-    weft.bindKey("git-rebase-menu", "Escape", "git-menu-cancel");
-    weft.bindKey("git-rebase-menu", "C-g", "git-menu-cancel");
+    weft.bindKey("git-rebase-menu", "i", "git.rebase-interactive");
+    weft.bindKey("git-rebase-menu", "c", "git.rebase-continue");
+    weft.bindKey("git-rebase-menu", "a", "git.rebase-abort");
+    weft.bindKey("git-rebase-menu", "s", "git.rebase-skip");
+    weft.bindKey("git-rebase-menu", "Escape", "git.menu-cancel");
+    weft.bindKey("git-rebase-menu", "C-g", "git.menu-cancel");
 
     // The single-line prompt (branch names, rebase depth): the shared
     // minibuffer's mode and keys, not a bespoke buffer with a C-c submenu.
@@ -445,20 +494,20 @@ fn initExtra() void {
     // A rebase plan is a list of verbs in an ordinary text entry: it is edited
     // by typing, like the todo `git rebase -i` would have opened, and saving it
     // hands it to git through the same sequence editor.
-    weft.provide("save", .{ .tool = todo_tool }, "git-rebase-save", 10);
-    weft.provide("close", .{ .tool = todo_tool }, "git-draft-close", 10);
+    weft.provide("file.save", .{ .tool = todo_tool }, "git.rebase-save", 10);
+    weft.provide("buffer.close", .{ .tool = todo_tool }, "git.draft-close", 10);
 
     // A shared read-only view mode for the show/log/stash buffers (own their own
     // buffers, so git's mutating keys never fire against a stale model). Like
     // `git`, these entries hold no editor — nothing to lock, so it is simply
     // the mode those buffers rest in.
     weft.restingMode("git-view");
-    weft.bindKey("git-view", "j", "cursor-down");
-    weft.bindKey("git-view", "k", "cursor-up");
-    weft.bindKey("git-view", "Down", "cursor-down");
-    weft.bindKey("git-view", "Up", "cursor-up");
-    weft.bindKey("git-view", "g", "git-status");
-    weft.bindKey("git-view", "q", "git-status");
+    weft.bindKey("git-view", "j", "cursor.down");
+    weft.bindKey("git-view", "k", "cursor.up");
+    weft.bindKey("git-view", "Down", "cursor.down");
+    weft.bindKey("git-view", "Up", "cursor.up");
+    weft.bindKey("git-view", "g", "git.status");
+    weft.bindKey("git-view", "q", "git.status");
 }
 /// THE funnel — the manifest's dispatch prologue. Two decisions live here and
 /// nowhere else: which repository session the command is about, and whether the
@@ -514,6 +563,7 @@ fn refuseStale() void {
 /// from wherever you happen to be standing. The dance is gone, and with it the
 /// window where a gather landing mid-keystroke moved your focus.
 fn onGathered() void {
+    forgetBranch(model.curSession().root);
     renderStatus();
     if (cur().committing != null) gitCommitSettle();
     if (cur().sequencing != null) gitRebaseSettle();
@@ -660,28 +710,28 @@ fn provideRowVerbs() void {
 
     // The disjunction the old four-tag wire could not encode, doing the work a
     // reason string used to do.
-    weft.provide("plugin.git.stage", .{ .any = &.{ file_unstaged, file_untracked, hunk_unstaged, sec_unstaged, sec_untracked } }, "git-stage", 0);
-    weft.provide("plugin.git.unstage", .{ .any = &.{ file_staged, hunk_staged, sec_staged } }, "git-unstage", 0);
+    weft.provide("plugin.git.stage", .{ .any = &.{ file_unstaged, file_untracked, hunk_unstaged, sec_unstaged, sec_untracked } }, "git.stage", 0);
+    weft.provide("plugin.git.unstage", .{ .any = &.{ file_staged, hunk_staged, sec_staged } }, "git.unstage", 0);
     weft.provide("plugin.git.open-diff", .{ .any = &.{
         file_unstaged, file_untracked, file_staged,
         hunk_unstaged, hunk_staged,    commit_row,
-    } }, "git-visit", 0);
+    } }, "git.visit", 0);
 
     // Entry-level verbs: about the repository this entry projects, not about
     // the row under point.
     const in_git: weft.Predicate = .{ .tool = tool };
-    weft.provide("plugin.git.commit", in_git, "git-commit", 0);
-    weft.provide("plugin.git.refresh", in_git, "git-refresh", 0);
-    weft.provide("plugin.git.push", in_git, "git-push", 0);
-    weft.provide("plugin.git.pull", in_git, "git-pull", 0);
-    weft.provide("plugin.git.fetch", in_git, "git-fetch", 0);
+    weft.provide("plugin.git.commit", in_git, "git.commit", 0);
+    weft.provide("plugin.git.refresh", in_git, "git.refresh", 0);
+    weft.provide("plugin.git.push", in_git, "git.push", 0);
+    weft.provide("plugin.git.pull", in_git, "git.pull", 0);
+    weft.provide("plugin.git.fetch", in_git, "git.fetch", 0);
 
     // A draft's own verbs, scoped to the draft's tool identity.
     const in_draft: weft.Predicate = .{ .tool = draft_tool };
-    weft.provide("plugin.git.amend", in_draft, "git-draft-amend", 0);
-    weft.provide("plugin.git.reword", in_draft, "git-draft-reword", 0);
-    weft.provide("plugin.git.fixup", in_draft, "git-draft-fixup", 0);
-    weft.provide("plugin.git.squash", in_draft, "git-draft-squash", 0);
+    weft.provide("plugin.git.amend", in_draft, "git.draft-amend", 0);
+    weft.provide("plugin.git.reword", in_draft, "git.draft-reword", 0);
+    weft.provide("plugin.git.fixup", in_draft, "git.draft-fixup", 0);
+    weft.provide("plugin.git.squash", in_draft, "git.draft-squash", 0);
 
     // How each verb is PRESENTED where it wins — a toolbar button, a menu
     // entry: the row's verbs first, then the repository's, then a draft's.
@@ -709,10 +759,10 @@ fn provideRowVerbs() void {
 /// describing the previous row — the verb then refuses out loud when it
 /// re-resolves the node, exactly as it always has.
 fn gitNextRow() void {
-    weft.run("cursor-down");
+    weft.run("cursor.down");
 }
 fn gitPrevRow() void {
-    weft.run("cursor-up");
+    weft.run("cursor.up");
 }
 
 fn gitStatus() void {
@@ -721,7 +771,7 @@ fn gitStatus() void {
 }
 
 /// The opener for `weft://here/git.status/<root>` (arg 0): the status of that
-/// repository, re-gathered. Routed like `git-status` — by the place this
+/// repository, re-gathered. Routed like `git.status` — by the place this
 /// dispatch is in — so it answers only for the repository of that place, and
 /// says which one it is about otherwise rather than showing another.
 fn gitStatusOpen() void {
@@ -737,10 +787,10 @@ fn gitStatusOpen() void {
 }
 
 /// Start version control from inside the editor: `git init` in the project,
-/// then gather straight into `*git*`. Without this, `git-status` on a
+/// then gather straight into `*git*`. Without this, `git.status` on a
 /// non-repo just shows an empty buffer and there is no in-editor way to create
 /// the repo — you had to drop to a shell. Reuses the same gather scaffolding as
-/// every other mutation (no git-init special-casing); after init, GATHER's
+/// every other mutation (no git.init special-casing); after init, GATHER's
 /// `git status --branch` renders the fresh `Branch: main` header.
 fn gitRefresh() void {
     gather_mod.gather();
@@ -789,7 +839,7 @@ fn gitVisit() void {
         },
         else => return,
     };
-    weft.runStr("open", model.inRepo(model.curSession(), cur().files.items[fi].path_()));
+    weft.runStr("file.open", model.inRepo(model.curSession(), cur().files.items[fi].path_()));
 }
 
 // ── Staging: file / hunk / region, resolved from the node under point ───────
@@ -999,7 +1049,7 @@ fn discardHunk(hi: usize, sel: ?Lines, staged: bool) void {
 
 // ── The commit draft ───────────────────────────────────────────────────────
 // A draft is an ORDINARY text entry: no mode of its own, no owned keys. It is
-// tool-backed, so `std.persistence.save` resolves to `git-commit-save` in it —
+// tool-backed, so `std.persistence.save` resolves to `git.commit-save` in it —
 // saving the draft IS the commit. Aborting is closing the entry. Drafts are
 // instanced, so each repository (and each parallel message) is its own entry.
 
@@ -1099,7 +1149,7 @@ fn settleDraft(comptime Table: type, table: *Table, slot: *Table.Slot, done: []c
         return;
     }
     // Retiring the entry is focus-scoped: land on it, then close it.
-    if (focusBuffer(slot.name())) weft.run("buffer-close");
+    if (focusBuffer(slot.name())) weft.run("buffer.close-unmodified");
     table.close(slot);
     _ = focusBuffer(model.curSession().name());
     weft.echo(done);
@@ -1233,7 +1283,7 @@ fn route_to(session: u32) bool {
 fn gitDraftClose() void {
     const text = weft.slice(0, weft.byteLen());
     if (std.mem.trim(u8, text, " \t\r\n").len == 0) {
-        weft.run("buffer-close");
+        weft.run("buffer.close-unmodified");
         return;
     }
     _ = weft.confirm("discard this draft?", closeIfConfirmed);
@@ -1241,7 +1291,7 @@ fn gitDraftClose() void {
 
 /// The entry the question was asked in is still the active one.
 fn closeIfConfirmed(yes: bool) void {
-    if (yes) weft.run("buffer-close") else weft.echo("cancelled");
+    if (yes) weft.run("buffer.close-unmodified") else weft.echo("cancelled");
 }
 
 // ── Show / cherry-pick / revert / reset on the commit under point ───────────
@@ -1318,7 +1368,7 @@ fn gitLogAll() void {
 // switch translating one back into the other. The question and its purpose
 // travel together, which is the same fix `confirmWith` made for confirmations.
 const input = prompt.Prompt(.{
-    .name = "git-input",
+    .name = "git.input",
     .resting = "git",
     .capacity = 256,
     .payload_callers = true,
@@ -1470,4 +1520,101 @@ fn gitRebaseSettle() void {
 
 comptime {
     weft.exportCallback("on_activate", &on_activate);
+    weft.exportCallback("on_slot_fire", &onSlotFire);
+}
+
+// ── The branch, on the status line (doc/chrome.md §4.3) ─────────────────────
+//
+// A status segment git publishes like any other provider: the branch of the
+// repository the entry is in, with its icon, and a click that opens the
+// repository's status. Asked for a place git has not read yet, it answers
+// nothing and runs `git rev-parse` there once; the answer lands as
+// `git.branch` on that place (a context key a predicate can read too), and
+// publishing it is what makes the status line ask again. A gather — any
+// mutation git runs, a checkout among them — forgets the repository's branch,
+// so the next ask reads it afresh.
+
+const Branch = struct {
+    root: [1024]u8 = undefined,
+    root_len: usize = 0,
+    name: [128]u8 = undefined,
+    name_len: usize = 0,
+    /// Read (`name` holds the answer, empty outside a repository).
+    known: bool = false,
+    /// A `git rev-parse` for it is out.
+    pending: bool = false,
+};
+
+var branches: [8]Branch = @splat(.{});
+/// The next slot a new place takes when all eight are held.
+var branch_next: usize = 0;
+
+fn branchFor(root: []const u8) ?*Branch {
+    if (root.len > 1024) return null;
+    for (&branches) |*b| if (b.root_len == root.len and std.mem.eql(u8, b.root[0..b.root_len], root)) return b;
+    const b = &branches[branch_next];
+    branch_next = (branch_next + 1) % branches.len;
+    b.* = .{};
+    @memcpy(b.root[0..root.len], root);
+    b.root_len = root.len;
+    return b;
+}
+
+/// The place a branch was asked for, carried to the answer.
+const BranchAsk = struct { root: [1024]u8, root_len: usize, place: [1100]u8, place_len: usize };
+
+fn onSlotFire(session: i32) callconv(.c) void {
+    const handle: u32 = @bitCast(session);
+    _ = statusline.ask(handle) orelse return;
+    const root = weft.placeRoot();
+    const b = (if (root.len > 0) branchFor(root) else null) orelse return statusline.tell(handle, &.{});
+    if (!b.known) {
+        if (!b.pending) readBranch(b);
+        return statusline.tell(handle, &.{});
+    }
+    if (b.name_len == 0) return statusline.tell(handle, &.{});
+    statusline.tell(handle, &.{.{
+        .text = b.name[0..b.name_len],
+        .role = .muted,
+        .priority = 60,
+        .icon = "git-branch",
+        .command = "git.status",
+        .tooltip = "Branch — open Source Control",
+    }});
+}
+
+/// Ask git for `b`'s branch, in the place this dispatch is in (`b`'s).
+fn readBranch(b: *Branch) void {
+    // Not a repository: nothing to ask, and nothing to show.
+    if (weft.placeHas(".git") == .none) {
+        b.known = true;
+        return;
+    }
+    var ask: BranchAsk = undefined;
+    @memcpy(ask.root[0..b.root_len], b.root[0..b.root_len]);
+    ask.root_len = b.root_len;
+    const place = weft.placeDesignation(&ask.place) orelse return;
+    ask.place_len = place.len;
+    if (weft.execWith(BranchAsk, ask, .{ .argv = &.{ "git", "rev-parse", "--abbrev-ref", "HEAD" } }, branchRead)) b.pending = true;
+}
+
+fn branchRead(r: weft.ExecDone, ask: BranchAsk) void {
+    const b = branchFor(ask.root[0..ask.root_len]) orelse return;
+    b.pending = false;
+    b.known = true;
+    var out: [256]u8 = undefined;
+    const name = if (r.ok()) std.mem.trim(u8, r.read(.out, 0, &out), " \t\r\n") else "";
+    b.name_len = @min(name.len, b.name.len);
+    @memcpy(b.name[0..b.name_len], name[0..b.name_len]);
+    // Said on the place it is true of — which is also what asks the status
+    // line again.
+    weft.contextSetAt("git.branch", b.name[0..b.name_len], ask.place[0..ask.place_len]) catch {};
+}
+
+/// A gather ran in `root`: whatever git did there, its branch is read again
+/// on the next ask.
+fn forgetBranch(root: []const u8) void {
+    for (&branches) |*b| if (b.root_len == root.len and std.mem.eql(u8, b.root[0..b.root_len], root)) {
+        if (!b.pending) b.known = false;
+    };
 }

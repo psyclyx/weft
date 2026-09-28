@@ -37,8 +37,15 @@ const NodeId = semantic_model.scene.NodeId;
 
 // ── Reading the strip ────────────────────────────────────────────────
 
+/// The pane a declared viewport is docked in, by the name its fragment
+/// declares it under (two strips share the top edge: the menubar and the
+/// toolbar).
+pub fn viewportPane(ed: *Editor, name: []const u8) !*window_layout.Node {
+    return ed.viewportPane(name) orelse error.ViewportNotDocked;
+}
+
 fn toolbarPane(ed: *Editor) !*window_layout.Node {
-    return ed.win_layout.dockedPanel(.top) orelse error.NoToolbar;
+    return viewportPane(ed, "toolbar");
 }
 
 /// The toolbar's retained view, read where the host keeps it: the entry the
@@ -127,16 +134,16 @@ fn menuView(ed: *Editor) ?*const view_runtime.view.Instance {
     return ed.ctx.semantic.?.views.get(active.descriptor.view);
 }
 
-/// The menu's entries (each row's action node), in order.
-fn menuItems(out: []*const Node, view: *const view_runtime.view.Instance) []*const Node {
+/// The menu's rows (its root panel's `menu-item` action nodes), in order.
+pub fn menuItems(out: []*const Node, view: *const view_runtime.view.Instance) []*const Node {
     var n: usize = 0;
     const rows = switch (view.scene.content) {
         .container => |c| c.children,
         else => return out[0..0],
     };
     for (rows) |*row| switch (row.content) {
-        .container => |c| if (c.children.len > 0 and n < out.len) {
-            out[n] = &c.children[0];
+        .action => if (n < out.len) {
+            out[n] = row;
             n += 1;
         },
         else => {},
@@ -144,24 +151,36 @@ fn menuItems(out: []*const Node, view: *const view_runtime.view.Instance) []*con
     return out[0..n];
 }
 
-fn menuText(buf: []u8, view: *const view_runtime.view.Instance) []const u8 {
+/// A menu panel as a person reads it: labels in order, `|` for a rule, a `~`
+/// on each greyed row.
+pub fn panelText(buf: []u8, panel: *const Node) []const u8 {
     var w: std.Io.Writer = .fixed(buf);
-    const rows = switch (view.scene.content) {
+    const rows = switch (panel.content) {
         .container => |c| c.children,
         else => return "",
     };
-    for (rows, 0..) |*row, i| {
-        if (i > 0) w.writeAll(" ") catch {};
+    var first = true;
+    for (rows) |*row| {
         switch (row.content) {
-            .container => |c| {
-                const item = &c.children[0];
-                w.writeAll(item.content.action.label) catch {};
-                if (fact(item, "tone") != null) w.writeAll("~") catch {};
+            .action => |a| {
+                if (!first) w.writeAll(" ") catch {};
+                w.writeAll(a.label) catch {};
+                if (fact(row, "reason") != null) w.writeAll("~") catch {};
             },
-            else => w.writeAll("|") catch {},
+            .label => {
+                if (!first) w.writeAll(" ") catch {};
+                w.writeAll("|") catch {};
+            },
+            // An open submenu is its own panel.
+            else => continue,
         }
+        first = false;
     }
     return w.buffered();
+}
+
+fn menuText(buf: []u8, view: *const view_runtime.view.Instance) []const u8 {
+    return panelText(buf, &view.scene);
 }
 
 fn expectMenu(ed: *Editor, want: []const u8) !void {
@@ -182,11 +201,15 @@ fn selectInMenu(ed: *Editor, label: []const u8) !void {
     var at: ?usize = null;
     var want: ?usize = null;
     for (items, 0..) |item, i| {
-        if (item.focusable) at = i;
+        if (fact(item, "lit") != null) at = i;
         if (std.mem.eql(u8, item.content.action.label, label)) want = i;
     }
-    const from = at orelse return error.NoHighlight;
     const to = want orelse return error.NoSuchMenuItem;
+    // Opened by a click, nothing is lit: the first Down lights the first row.
+    const from = at orelse blk: {
+        ed.press("Down", "");
+        break :blk 0;
+    };
     if (to > from) {
         for (0..to - from) |_| ed.press("Down", "");
     } else for (0..from - to) |_| ed.press("Up", "");
@@ -209,8 +232,9 @@ test "e2e/chrome: the toolbar is one row along the top, the pinned entries plus 
     const editor_entry = ed.buffers.active_id;
     ed.applyWindow();
 
-    // Docked at the top, as tall as one text row plus the pane margins —
-    // no status line of its own — and never where the keys are.
+    // Docked at the top — beneath the menubar — as tall as one text row plus
+    // the pane margins, no status line of its own, and never where the keys
+    // are.
     const pane = try toolbarPane(ed);
     try t.expect(!pane.pane().attrs.takes_focus);
     try t.expect(!pane.pane().attrs.status_line);
@@ -218,7 +242,7 @@ test "e2e/chrome: the toolbar is one row along the top, the pinned entries plus 
     const rect = for (view.pane_maps[0..view.pane_map_count]) |m| {
         if (m.pane == pane.pane().id) break m.rect;
     } else return error.ToolbarNotDrawn;
-    try t.expectEqual(@as(f32, 0), rect.y);
+    try t.expectApproxEqAbs(view.line_h + 2 * h.view.View.pane_margin, rect.y, 0.5);
     try t.expectApproxEqAbs(view.line_h + 2 * h.view.View.pane_margin, rect.h, 0.5);
     try t.expectEqual(@as(f32, @floatFromInt(h.app_w)), rect.w);
     try t.expectEqual(editor_entry, ed.buffers.active_id);
@@ -235,6 +259,13 @@ test "e2e/chrome: the toolbar is one row along the top, the pinned entries plus 
     try t.expectEqualStrings("std.history.undo", fact(undo, "name").?);
     // The winner rides along — what a tooltip would say.
     try t.expectEqualStrings("config", fact(button(try toolbarView(ed), "Build").?, "provider").?);
+    // Every button carries its command's icon (doc/chrome.md §1.2) for the
+    // styles that draw one: an intention's from the command that answers it
+    // here, a pinned command's from itself, an action's from its provider.
+    for ([_][2][]const u8{ .{ "Save", "save" }, .{ "Undo", "undo" }, .{ "Palette", "command" }, .{ "Build", "build" }, .{ "Format", "format" } }) |want| {
+        const b = button(try toolbarView(ed), want[0]) orelse return error.ButtonMissing;
+        try t.expectEqualStrings(want[1], fact(b, "icon") orelse return error.ButtonHasNoIcon);
+    }
     app.proj.shot(ed, "chrome-toolbar-zig");
 }
 
@@ -262,16 +293,18 @@ test "e2e/chrome: the toolbar adapts to the primary context — source, a files 
     try expectStrip(ed, "Save Undo~ Redo~ Palette | Run line | Format Rename");
 
     // A files listing in the primary pane: the listing's own node actions,
-    // and ide.js's rename keyed on the files tool. Nothing is drafted yet, so
-    // Apply draft is greyed.
-    ed.runStr("open", ".");
+    // and ide.js's rename keyed on the files tool. Its "Edit name" is the
+    // standard `std.editing.begin` now (doc/chrome.md §5.2), which the
+    // toolbar leaves to Rename. Nothing is drafted yet, so Apply draft is
+    // greyed.
+    ed.runStr("file.open", ".");
     ed.applyWindow();
-    try expectStrip(ed, "Save Undo~ Redo~ Palette | Rename | Edit name | Delete Paste before | New file New directory Edit permissions | Use as working target | Refresh Apply draft~ Revert draft");
+    try expectStrip(ed, "Save Undo~ Redo~ Palette | Rename | Delete Paste before | New file New directory Edit permissions | Use as working target | Refresh Apply draft~ Revert draft");
     app.proj.shot(ed, "chrome-toolbar-files");
 
     // A git status buffer: git's verbs. Nothing durable to save here, so the
     // pinned Save is greyed and says so.
-    ed.run("git-status");
+    ed.run("git.status");
     try t.expect(h.drainToolContains(ed, "*git*", "f.txt"));
     ed.applyWindow();
     try expectStrip(ed, "Save~ Undo~ Redo~ Palette | Stage Diff Commit Push Pull Fetch Refresh");
@@ -360,8 +393,8 @@ test "e2e/chrome: Send to REPL is on the strip exactly while a REPL is live, wit
 
     // The repl plugin publishes `repl.session` on the place its interpreter
     // runs in. Its own buffer takes the pane; come back to the source.
-    ed.runStr("repl-start", "cat");
-    ed.runStr("open", "a.txt");
+    ed.runStr("repl.start", "cat");
+    ed.runStr("file.open", "a.txt");
     try t.expectEqual(source, ed.buffers.active_id);
     ed.applyWindow();
     try expectStrip(ed, "Save Undo~ Redo~ Palette | Run line Send to REPL | Format Rename");
@@ -374,7 +407,7 @@ test "e2e/chrome: Send to REPL is on the strip exactly while a REPL is live, wit
     try t.expectEqual(source, ed.buffers.active_id);
 
     // Quitting the last REPL retracts the key, and the strip drops the button.
-    ed.run("repl-quit");
+    ed.run("repl.quit");
     ed.applyWindow();
     try expectStrip(ed, "Save Undo~ Redo~ Palette | Run line | Format Rename");
 }
@@ -393,12 +426,13 @@ test "e2e/chrome: mouse-3 lists what is under the pointer — text or a sidebar 
     ed.typeText(" ");
     ed.applyWindow();
 
-    // Over the text: the editor's offers, and the source actions ide.js
-    // provides for Zig. Undo can run, Redo cannot, so only Undo is listed;
-    // the lone words join the group before them instead of each sitting
-    // between two rules.
+    // Over the text: Cut, Copy, Paste first, as in every editor — the
+    // grammar means them over text and core offers the words — then the
+    // editor's offers and the source actions ide.js provides for Zig. Undo
+    // can run, Redo cannot, so only Undo is listed; the lone words join the
+    // group before them instead of each sitting between two rules.
     rightClick(ed, ed.pointAt(3).?);
-    try expectMenu(ed, "Build Test Debug | Format Rename Undo Save");
+    try expectMenu(ed, "Cut Copy Paste | Build Test Debug | Format Rename Undo Save");
     app.proj.shot(ed, "chrome-contextmenu-text");
     // Escape closes it, and the key goes no further.
     ed.press("Escape", "");
@@ -410,6 +444,20 @@ test "e2e/chrome: mouse-3 lists what is under the pointer — text or a sidebar 
     try selectInMenu(ed, "Undo");
     ed.press("Return", "");
     try t.expect(ed.head.interactions.active() == null);
+    try ide.expectText(ed, "const y = 2;\n");
+
+    // Cut and Paste from the menu do what C-x and C-v do: the grammar's own
+    // transfer, the selection out and back.
+    ed.press("C-a", "");
+    ed.press("S-F10", "");
+    ed.applyWindow();
+    try selectInMenu(ed, "Cut");
+    ed.press("Return", "");
+    try ide.expectText(ed, "");
+    ed.press("S-F10", "");
+    ed.applyWindow();
+    try selectInMenu(ed, "Paste");
+    ed.press("Return", "");
     try ide.expectText(ed, "const y = 2;\n");
 
     // Over a sidebar row: the listing's offers for THAT row, node actions
@@ -428,7 +476,7 @@ test "e2e/chrome: mouse-3 lists what is under the pointer — text or a sidebar 
     try t.expectEqual(panel.pane().buffer_id, ed.buffers.active_id);
     // No greyed words (a menu lists what can run here), and no rule around
     // a lone item.
-    try expectMenu(ed, "Up to Parent Open | Copy Paste Cut Rename | Insert Before Insert After Save Edit name | Delete Paste before | New file New directory Edit permissions | Refresh Revert draft Use as working target");
+    try expectMenu(ed, "Cut Copy Paste | Up to Parent Open Rename | Insert Before Insert After Edit name Save | Delete Paste before | New file New directory Edit permissions | Refresh Revert draft Use as working target");
     app.proj.shot(ed, "chrome-contextmenu-row");
 
     // Click Copy — drawn over the editor pane, past the sidebar's edge: the
@@ -465,10 +513,227 @@ test "e2e/chrome: S-F10 opens the menu at the caret, and Escape closes it" {
     ed.applyWindow();
     ed.press("S-F10", "");
     ed.applyWindow();
-    try expectMenu(ed, "Run line Format Rename Save");
+    try expectMenu(ed, "Cut Copy Paste | Run line Format Rename Save");
     ed.press("Escape", "");
     try t.expect(ed.head.interactions.active() == null);
     try t.expectEqualStrings("ide", ed.mode());
+}
+
+// ── Transfer over text is every grammar's ────────────────────────────
+// Core offers Cut, Copy and Paste over text only where the grammar provides
+// what they mean there (`intent.zig`), so every grammar that edits text
+// provides them — each through its own registers and clipboard.
+
+/// A config booted for a context-menu test: a shipped one by name, or a
+/// fixture's source.
+const GrammarApp = struct {
+    proj: h.Project = undefined,
+    ed: Editor = undefined,
+    loader: h.ConfigLoader = undefined,
+
+    fn init(self: *GrammarApp, gpa: std.mem.Allocator, config: []const u8, source: ?[]const u8) !void {
+        try self.proj.init(gpa);
+        errdefer self.proj.deinit();
+        try Editor.init(gpa, &self.ed);
+        errdefer self.ed.deinit();
+        self.loader = .{ .ed = &self.ed };
+        errdefer self.loader.deinit();
+        const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{self.proj.prev_cwd});
+        defer gpa.free(config_dir);
+        if (source) |src|
+            try core.quickjs.evalConfig(&self.ed.engine, self.ed.ctx, self.loader.loader(), &self.ed.config_kv, config_dir, src)
+        else
+            try h.bootConfigNamed(&self.ed, config_dir, config, &self.loader);
+        try t.expect(self.loader.missing.items.len == 0 and self.loader.failed.items.len == 0);
+        try self.ed.buffers.setDefaultMode(gpa, self.ed.head.currentMode());
+    }
+
+    fn open(self: *GrammarApp, name: []const u8, text: []const u8) !void {
+        try core.file.writeBytes(self.ed.gpa, name, text);
+        self.ed.runStr("file.open", name);
+        self.ed.applyWindow();
+    }
+
+    fn deinit(self: *GrammarApp) void {
+        self.loader.deinit();
+        self.ed.deinit();
+        self.proj.deinit();
+    }
+};
+
+/// An emacs config: the grammar, what it composes, and the context menu.
+const emacs_fixture =
+    \\weft.plugin("motions");
+    \\weft.plugin("operators");
+    \\weft.plugin("emacs");
+    \\weft.plugin("offers");
+    \\weft.bind("global", "mouse-3", "offers.menu");
+;
+
+/// Right-click over `offset` and expect a menu led by `lead`, then a rule.
+fn expectMenuLed(ed: *Editor, offset: usize, lead: []const u8) !void {
+    rightClick(ed, ed.pointAt(offset).?);
+    const view = menuView(ed) orelse return error.NoMenu;
+    var buf: [1024]u8 = undefined;
+    const got = menuText(&buf, view);
+    if (!std.mem.startsWith(u8, got, lead) or !std.mem.startsWith(u8, got[lead.len..], " |")) {
+        std.debug.print("[e2e/chrome] menu over text: '{s}', expected it led by '{s}'\n", .{ got, lead });
+        return error.TestUnexpectedMenu;
+    }
+}
+
+/// Right-click over `offset` — a menu led by Cut, Copy, Paste — and choose
+/// `label`.
+fn chooseOverText(ed: *Editor, offset: usize, label: []const u8) !void {
+    return chooseIn(ed, offset, "Cut Copy Paste", label);
+}
+
+fn chooseIn(ed: *Editor, offset: usize, lead: []const u8, label: []const u8) !void {
+    try expectMenuLed(ed, offset, lead);
+    try selectInMenu(ed, label);
+    ed.press("Return", "");
+    ed.applyWindow();
+    try t.expect(ed.head.interactions.active() == null);
+}
+
+test "e2e/chrome: GATE — every grammar that declares a text posture provides Cut, Copy and Paste over text" {
+    // A grammar that rests in text but provides none leaves its users a
+    // context menu with no clipboard words over the text they edit. Each
+    // bundled plugin, loaded alone: if it says where text rests, it says
+    // what the transfer words mean there.
+    const gpa = t.allocator;
+    const transfer = [_][]const u8{ "selection.cut", "selection.copy", "selection.paste-after" };
+    var grammars: usize = 0;
+    for (h.bundled_plugins.keys(), h.bundled_plugins.values()) |name, wasm| {
+        // The synthetic std-only fixture of the Files conformance gate
+        // speaks the standard words alone, by design.
+        if (std.mem.eql(u8, name, "gramtest")) continue;
+        var ed: Editor = undefined;
+        try Editor.init(gpa, &ed);
+        defer ed.deinit();
+        ed.load(name, wasm) catch continue;
+        if (ed.buffers.posture_modes.get(.text).len == 0) continue;
+        grammars += 1;
+        var owner_buf: [64]u8 = undefined;
+        const owner = try std.fmt.bufPrint(&owner_buf, "plugin.{s}", .{name});
+        for (transfer) |action| {
+            const provided = if (ed.ctx.actions.actions.get(action)) |a| for (a.providers.items) |p| {
+                if (std.mem.eql(u8, p.owner, owner)) break true;
+            } else false else false;
+            if (!provided) {
+                std.debug.print("[e2e/chrome] '{s}' declares a text posture but provides no '{s}'\n", .{ name, action });
+                return error.GrammarProvidesNoTransfer;
+            }
+        }
+    }
+    // vim, helix, emacs, ide.
+    try t.expectEqual(@as(usize, 4), grammars);
+}
+
+test "e2e/chrome: config.js — over vim's visual selection the context menu's Cut, Copy and Paste are vim's d, y and p" {
+    const gpa = t.allocator;
+    var app: GrammarApp = undefined;
+    try app.init(gpa, "config.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    try app.open("v.txt", "one two\n");
+
+    // Each row does what its key does in the same state: the menu's result,
+    // undone, then the key's, compared.
+    const Case = struct { label: []const u8, key: []const u8, then: []const u8, want: []const u8 };
+    const cases = [_]Case{
+        // Copy is visual `y`, leaving visual; the `P` after it shows what
+        // the register took — the whole of `one`, the cursor's `e` too.
+        .{ .label = "Copy", .key = "y", .then = "P", .want = "oneone two\n" },
+        // Cut is visual `d`.
+        .{ .label = "Cut", .key = "d", .then = "", .want = " two\n" },
+    };
+    for (cases) |c| {
+        ed.chord("g g");
+        ed.press("v", "");
+        ed.press("e", "");
+        try chooseOverText(ed, 2, c.label);
+        try t.expectEqualStrings("normal", ed.mode());
+        if (c.then.len > 0) ed.press(c.then, "");
+        const by_menu = try ed.textAlloc();
+        defer gpa.free(by_menu);
+        try t.expectEqualStrings(c.want, by_menu);
+        ed.press("u", "");
+        try ide.expectText(ed, "one two\n");
+
+        ed.chord("g g");
+        ed.press("v", "");
+        ed.press("e", "");
+        ed.press(c.key, "");
+        if (c.then.len > 0) ed.press(c.then, "");
+        try ide.expectText(ed, by_menu);
+        ed.press("u", "");
+        try ide.expectText(ed, "one two\n");
+    }
+
+    // In normal mode nothing is selected, so there is nothing to cut or
+    // copy: Paste leads, and is `p` — after the caret's character.
+    ed.chord("g g");
+    try chooseIn(ed, 0, "Paste", "Paste");
+    const by_menu = try ed.textAlloc();
+    defer gpa.free(by_menu);
+    try t.expect(!std.mem.eql(u8, by_menu, "one two\n"));
+    ed.press("u", "");
+    ed.chord("g g");
+    ed.press("p", "");
+    try ide.expectText(ed, by_menu);
+}
+
+test "e2e/chrome: helix.js — the context menu over a selection has Cut, Copy and Paste, and they are helix's d, y and p" {
+    const gpa = t.allocator;
+    var app: GrammarApp = undefined;
+    try app.init(gpa, "helix.js", null);
+    defer app.deinit();
+    const ed = &app.ed;
+    try app.open("h.txt", "one two\n");
+    ed.chord("g g");
+
+    ed.press("x", ""); // the line
+    try chooseOverText(ed, 1, "Copy");
+    try ide.expectText(ed, "one two\n");
+    try chooseOverText(ed, 1, "Cut");
+    try ide.expectText(ed, "");
+    // Paste is `p`: what the menu put is what the key puts.
+    try chooseOverText(ed, 0, "Paste");
+    const pasted = try ed.textAlloc();
+    defer gpa.free(pasted);
+    try t.expect(std.mem.indexOf(u8, pasted, "one two\n") != null);
+    ed.press("u", "");
+    try ide.expectText(ed, "");
+    ed.press("p", "");
+    try ide.expectText(ed, pasted);
+}
+
+test "e2e/chrome: an emacs config — the context menu over the region has Cut, Copy and Paste: kill-region, kill-ring-save, yank" {
+    const gpa = t.allocator;
+    var app: GrammarApp = undefined;
+    try app.init(gpa, "emacs", emacs_fixture);
+    defer app.deinit();
+    const ed = &app.ed;
+    try app.open("e.txt", "one two\n");
+    try t.expectEqualStrings("emacs", ed.mode());
+
+    ed.press("C-space", "");
+    ed.press("M-f", "");
+    try chooseOverText(ed, 1, "Cut");
+    try ide.expectText(ed, "two\n");
+    // With no region, a right-click places point where it lands, as on the
+    // desktop — so Paste is asked for where it should land.
+    try chooseOverText(ed, 0, "Paste");
+    try ide.expectText(ed, "one two\n");
+    ed.press("C-a", "");
+    ed.press("C-space", "");
+    ed.press("M-f", "");
+    try chooseOverText(ed, 1, "Copy");
+    try ide.expectText(ed, "one two\n");
+    ed.press("C-e", "");
+    try chooseOverText(ed, 7, "Paste");
+    try ide.expectText(ed, "one twoone \n"); // M-f goes to the next word's start
 }
 
 // ── Per-pane chrome ──────────────────────────────────────────────────

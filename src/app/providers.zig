@@ -2,7 +2,7 @@
 //! `Buffer.frontend`; its capability providers decline foreign documents, so
 //! per-buffer registrations race correctly. Highlight layers key by (doc, name)
 //! in the shared store. Also the config-supplied grammar registry these attach
-//! from (`grammar-add`) and the pooled reconnect task. LSP is no longer here at
+//! from (`syntax.add-grammar`) and the pooled reconnect task. LSP is no longer here at
 //! all — it's an async wasm plugin (`src/plugins/lsp/root.zig`) that talks to servers
 //! over the streaming membrane and provides every capability, completion
 //! included, as a caps provider; server commands come from config, not a
@@ -12,7 +12,7 @@ const std = @import("std");
 const core = @import("weft_core");
 const collab = @import("collab.zig");
 
-/// `grammar-add <exts> <grammar> <symbol> [query] [outline]` — grammars as
+/// `syntax.add-grammar <exts> <grammar> <symbol> [query] [outline]` — grammars as
 /// data. `exts` is comma-separated; `grammar` is a name resolved along the
 /// registry's search path, or an absolute package directory; `query` and
 /// `outline` are query-file paths that default to the package's own
@@ -21,8 +21,8 @@ const collab = @import("collab.zig");
 /// a grammar that config cannot say.
 pub fn grammarAddCommand(runtime: *core.syntax.Runtime) core.command.Command {
     return .{
-        .name = "grammar-add",
-        .summary = "Register a tree-sitter grammar for one or more extensions.",
+        .name = "syntax.add-grammar",
+        .summary = "Register a tree-sitter grammar for one or more file extensions.",
         .args = &.{
             .{ .name = "exts", .type = .string },
             .{ .name = "grammar", .type = .string },
@@ -32,10 +32,11 @@ pub fn grammarAddCommand(runtime: *core.syntax.Runtime) core.command.Command {
         },
         .handler = grammarAddHandler,
         .data = runtime,
+        .meta = .{ .internal = true },
     };
 }
 
-/// The FEWEST arguments `grammar-add` will act on. This — not the declared
+/// The FEWEST arguments `syntax.add-grammar` will act on. This — not the declared
 /// arity, which is larger because query and outline are optional — is the
 /// number that has to stay out of guest reach: it is what it takes to get to
 /// `std.DynLib.open` on a caller-named directory. The gate below reads this,
@@ -91,6 +92,16 @@ pub fn resolveSyntax(buf: *core.Buffers.Buffer) ?*core.syntax.Syntax {
     return at.syntax;
 }
 
+/// How far `buf`'s grammar tree has moved (`Syntax.generation`, 0 with no
+/// grammar): the context's `Derived`, so a watched subject and a chrome
+/// answer see a parse that lands after the edit it reads. A read: a landed
+/// initial parse is adopted by the frame loop (`frame.tickAsync`), earlier
+/// in the same wake than the boundary that reads this.
+pub fn treeRevision(buf: *core.Buffers.Buffer) u64 {
+    const syn = resolveSyntax(buf) orelse return 0;
+    return syn.generation;
+}
+
 pub const AttachDeps = struct {
     gpa: std.mem.Allocator,
     grammars: *core.syntax.Runtime,
@@ -99,38 +110,135 @@ pub const AttachDeps = struct {
     /// Set once the connection exists: buffer close unbinds shares
     /// before the document dies.
     share: ?*collab.ShareCtx = null,
-    /// Persistent shells per remote host (ssh spawner), created on
-    /// first `open host:path` and reused for every buffer on that host.
-    shells: std.StringHashMapUnmanaged(*core.ShellFs) = .empty,
+    /// Persistent shells per remote host, created on first use (`open
+    /// host:path`, `open weft://shell:<host>/…`) and reused for every entry
+    /// and listing on that host.
+    shells: std.StringHashMapUnmanaged(*Shell) = .empty,
+    /// How a shell is started for a host. ssh is the default, not a
+    /// dependency (substrate §7): anything that yields a POSIX sh with
+    /// coreutils on its stdio is the same tier.
+    spawner: Spawner = .ssh,
 
+    pub const Spawner = union(enum) {
+        /// `ssh -o BatchMode=yes -o ConnectTimeout=8 <host> sh`.
+        ssh,
+        /// This argv for every host — a container exec, an adb shell, or a
+        /// local `sh` standing in for a remote one.
+        command: []const []const u8,
+    };
+
+    /// One remote shell: the channel, the filesystem provider over it, and
+    /// the directories published through that provider (`shellDirectory`).
+    pub const Shell = struct {
+        channel: core.ShellFs,
+        provider: core.ShellProvider,
+        mount: ?Mount = null,
+
+        /// The provider as a system's router knows it: registered under its
+        /// own authority, its directories published under one owner.
+        const Mount = struct {
+            owner: @import("weft_semantic").owner.Id,
+            locus: core.locus.Locus,
+            published: std.ArrayList(Published) = .empty,
+        };
+
+        const Published = struct {
+            path: []u8,
+            registration: fs_runtime.publication.Registration,
+        };
+    };
+
+    /// Free the shells. Runs after the system is gone (see `Providers`), so
+    /// the publications are simply forgotten — their registries died first.
     pub fn deinitShells(self: *AttachDeps) void {
         var it = self.shells.iterator();
         while (it.next()) |e| {
-            e.value_ptr.*.deinit();
-            self.gpa.destroy(e.value_ptr.*);
+            const sh = e.value_ptr.*;
+            if (sh.mount) |*m| {
+                for (m.published.items) |p| self.gpa.free(p.path);
+                m.published.deinit(self.gpa);
+            }
+            sh.provider.deinit();
+            sh.channel.deinit();
+            self.gpa.destroy(sh);
             self.gpa.free(e.key_ptr.*);
         }
         self.shells.deinit(self.gpa);
     }
 
-    pub fn shellFor(self: *AttachDeps, host: []const u8) !*core.ShellFs {
-        if (self.shells.get(host)) |fs| return fs;
-        const fs = try self.gpa.create(core.ShellFs);
-        errdefer self.gpa.destroy(fs);
+    fn shell(self: *AttachDeps, host: []const u8) !*Shell {
+        if (self.shells.get(host)) |sh| return sh;
+        if (!core.designation.durable.validShellHost(host)) return error.InvalidShellHost;
+        const sh = try self.gpa.create(Shell);
+        errdefer self.gpa.destroy(sh);
         // BatchMode=yes: never block on an interactive password prompt (a
-        // classic hang); ConnectTimeout bounds an unreachable host. The
-        // spawn is still synchronous on the frame thread, but now it fails
-        // fast instead of wedging the editor.
-        fs.* = try core.ShellFs.spawn(self.gpa, &.{
-            "ssh", "-o",               "BatchMode=yes",
-            "-o",  "ConnectTimeout=8", host,
-            "sh",
-        }, self.environ);
-        errdefer fs.deinit();
-        try self.shells.put(self.gpa, try self.gpa.dupe(u8, host), fs);
-        return fs;
+        // classic hang); ConnectTimeout bounds an unreachable host. The spawn
+        // does not wait for the far side at all: the channel is `connecting`
+        // until its first round trip, which is whoever needs it first.
+        const ssh_argv = sshArgv(host);
+        const argv: []const []const u8 = switch (self.spawner) {
+            .ssh => &ssh_argv,
+            .command => |argv| argv,
+        };
+        sh.channel = try core.ShellFs.spawn(self.gpa, argv, self.environ);
+        errdefer sh.channel.deinit();
+        // The provider's authority is assigned when it is mounted in a router.
+        sh.provider = core.ShellProvider.init(self.gpa, &sh.channel, .here);
+        sh.mount = null;
+        const key = try self.gpa.dupe(u8, host);
+        errdefer self.gpa.free(key);
+        try self.shells.put(self.gpa, key, sh);
+        return sh;
+    }
+
+    pub fn shellFor(self: *AttachDeps, host: []const u8) !*core.ShellFs {
+        return &(try self.shell(host)).channel;
+    }
+
+    /// The directory at absolute `path` on `host`'s shell, published as a
+    /// directory target named `weft://shell:<host>/dir<path>` — what `open`
+    /// presents as a listing, and what a shell file's place is. The shell's
+    /// provider is mounted in the system's router on first use, and its
+    /// locus (`shell:<host>`) bound to the channel, so every place made here
+    /// reads `remote` and its status line reports the channel. One target
+    /// per path: asking again returns the live one.
+    pub fn shellDirectory(self: *AttachDeps, ctx: *core.command.Context, host: []const u8, path: []const u8) !@import("weft_semantic").target.Located {
+        const services = ctx.semantic orelse return error.SemanticUnavailable;
+        const router = ctx.filesystems orelse return error.FilesystemsUnavailable;
+        const loci = ctx.loci orelse return error.LociUnavailable;
+        const sh = try self.shell(host);
+        const mount = if (sh.mount) |*m| m else blk: {
+            const authority = router.freshAuthority();
+            sh.provider.authority = authority;
+            try router.register(authority, sh.provider.provider());
+            errdefer router.unregister(authority) catch {};
+            const locus = try loci.shell(host);
+            loci.bindShell(locus, &sh.channel);
+            sh.mount = .{ .owner = try services.acquireOwner(), .locus = locus };
+            break :blk &sh.mount.?;
+        };
+        const wanted = std.mem.trimEnd(u8, path, "/");
+        const key = if (wanted.len == 0) "/" else wanted;
+        for (mount.published.items) |p| {
+            if (!std.mem.eql(u8, p.path, key)) continue;
+            if (services.targets.get(p.registration.ref)) |d| if (d.revision == p.registration.revision) return p.registration.located();
+        }
+        var named: [core.designation.max_len]u8 = undefined;
+        const designation = try (core.designation.Designation{ .authority = .{ .shell = host }, .kind = .directory, .ref = key }).render(&named);
+        const root = try sh.provider.acquireRoot(key);
+        const registration = try fs_runtime.publication.publish(self.gpa, &services.targets, router, mount.owner, .{
+            .display_name = std.fs.path.basenamePosix(key),
+            .directory = .{ .root = root },
+            .designation = designation,
+        });
+        const owned = try self.gpa.dupe(u8, key);
+        errdefer self.gpa.free(owned);
+        try mount.published.append(self.gpa, .{ .path = owned, .registration = registration });
+        return registration.located();
     }
 };
+
+const fs_runtime = @import("weft_fs_runtime");
 
 /// Idempotent: give a buffer its provider bundle (syntax by extension,
 /// LSP when locally placed). Buffers without a path get an empty
@@ -186,7 +294,7 @@ pub fn detachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) void {
 /// object instead of loose provider locals.
 ///
 /// Two-phase, because the pieces are born at different times: the registry exists
-/// BEFORE the session (its capability consumers bind `grammar-add` onto it),
+/// BEFORE the session (its capability consumers bind `syntax.add-grammar` onto it),
 /// while `attach_deps` borrows the session's caps, so it is built AFTER.
 ///
 /// CRITICAL TEARDOWN ORDER — the whole reason this is a distinct cluster:
@@ -206,7 +314,7 @@ pub const Providers = struct {
 
     /// Phase one: the config-extended registries, built before the session.
     /// The grammar registry starts EMPTY — weft ships no languages. Config
-    /// fills it through `grammar-add`; the search path names are resolved
+    /// fills it through `syntax.add-grammar`; the search path names are resolved
     /// against is supplied by `main`.
     pub fn initRegistries(self: *Providers, gpa: std.mem.Allocator) !void {
         self.grammars = .empty;
@@ -241,9 +349,9 @@ pub const Providers = struct {
     }
 };
 
-// ── `grammar-add` is held shut by ARITY. Keep it that way. ───────────
+// ── `syntax.add-grammar` is held shut by ARITY. Keep it that way. ───────────
 //
-// `grammar-add` hands a caller-supplied directory to `std.DynLib.open`
+// `syntax.add-grammar` hands a caller-supplied directory to `std.DynLib.open`
 // (`core/syntax.zig`'s `loadGrammar`) — arbitrary NATIVE code into this
 // process — and it is an ordinary bound command with no permission gate.
 // For its one real caller that is fine and deliberate: config JS is a
@@ -252,13 +360,13 @@ pub const Providers = struct {
 //
 // For a WASM GUEST it would not be fine, and today a guest cannot reach it
 // — but only by accident. The membrane's command runners top out at TWO
-// arguments (`wl_run_str2`); `grammar-add` declares three, so every guest
+// arguments (`wl_run_str2`); `syntax.add-grammar` declares three, so every guest
 // call dies on `error.ArityMismatch` before `loadGrammar` is reached. That
 // is a sandbox escape held shut by a coincidence of signatures.
 //
 // The census below turns the coincidence into a property, and the test
 // under it fails the moment either side moves: a runner gaining the arity
-// to pass three arguments, or `grammar-add` shrinking to a shape a runner
+// to pass three arguments, or `syntax.add-grammar` shrinking to a shape a runner
 // can already call. Whichever fires, the answer is the same — put a real
 // gate on the door BEFORE it becomes reachable, not after.
 
@@ -275,6 +383,8 @@ const contract_data = @import("weft_membrane");
 /// `wl_intent_invoke` is deliberately absent: it resolves a dotted
 /// INTENTION name through the catalog and calls a registered endpoint, so
 /// it can neither name a bare command nor forward guest arguments to one.
+/// Its chosen-context twin `wl_intent_invoke_at` does run a bare command (a
+/// menubar item) — with none — so it is listed.
 const guest_command_runners = [_]struct { name: []const u8, args: usize }{
     // The runners.
     .{ .name = "wl_run", .args = 0 },
@@ -287,18 +397,25 @@ const guest_command_runners = [_]struct { name: []const u8, args: usize }{
     // fact (the palette dispatching a typed line) still cannot widen the call
     // past what the fixed-arity runners already allow.
     .{ .name = "wl_run_argv", .args = 2 },
+    // Its chosen-context twin: the same vector, the same width.
+    .{ .name = "wl_run_argv_at", .args = 2 },
     .{ .name = "wl_run_range", .args = 0 },
     .{ .name = "wl_run_range_arg", .args = 1 },
     // In the `.commands` group, but they only intern a name or read the
     // registry — no `command.run` at all.
     .{ .name = "wl_register", .args = 0 },
     .{ .name = "wl_command_count", .args = 0 },
+    .{ .name = "wl_command_revision", .args = 0 },
     .{ .name = "wl_command_name", .args = 0 },
     .{ .name = "wl_command_summary", .args = 0 },
     .{ .name = "wl_command_owner", .args = 0 },
     .{ .name = "wl_command_arity", .args = 0 },
     .{ .name = "wl_command_arity_required", .args = 0 },
     .{ .name = "wl_command_arg", .args = 0 },
+    .{ .name = "wl_command_meta", .args = 0 },
+    .{ .name = "wl_keys_for", .args = 0 },
+    .{ .name = "wl_command_at", .args = 0 },
+    .{ .name = "wl_intent_invoke_at", .args = 0 },
 };
 
 /// Entries the census must account for, so a new runner cannot slip past
@@ -312,9 +429,24 @@ fn mustBeCensused(entry: contract_data.Entry) bool {
     return entry.group == .commands or std.mem.indexOf(u8, entry.name, "run") != null;
 }
 
+/// How a persistent shell on `host` is reached. The host comes after `--`:
+/// the parsers already refuse one ssh could read as an option
+/// (`durable.validShellHost`), and this keeps a host from ever being one.
+fn sshArgv(host: []const u8) [8][]const u8 {
+    return .{ "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "--", host, "sh" };
+}
+
 const t = std.testing;
 
-test "providers: no guest command runner can reach grammar-add's arity (it DynLib.opens a caller-named directory)" {
+test "providers: ssh is handed its host after `--`, so a host is never an option" {
+    const argv = sshArgv("box");
+    for (argv, 0..) |arg, i| if (std.mem.eql(u8, arg, "--")) {
+        return t.expectEqualStrings("box", argv[i + 1]);
+    };
+    return error.NoOptionEnd;
+}
+
+test "providers: no guest command runner can reach syntax.add-grammar's arity (it DynLib.opens a caller-named directory)" {
     const gpa = t.allocator;
 
     // 1. The census is COMPLETE: every import that could plausibly be a
@@ -330,7 +462,7 @@ test "providers: no guest command runner can reach grammar-add's arity (it DynLi
                 "\nsrc/app/providers.zig: '{s}' is a new membrane import that may run a command.\n" ++
                     "Add it to `guest_command_runners` with the number of arguments it\n" ++
                     "passes to `command.run` (0 if it never calls it) — and if that number\n" ++
-                    "reaches 3, `grammar-add` just became reachable from a wasm guest, which\n" ++
+                    "reaches 3, `syntax.add-grammar` just became reachable from a wasm guest, which\n" ++
                     "means `std.DynLib.open` on a guest-named directory did too.\n" ++
                     "Gate the door before landing the runner, not after.\n",
                 .{entry.name},
@@ -352,7 +484,7 @@ test "providers: no guest command runner can reach grammar-add's arity (it DynLi
         }
     }
 
-    // 3. The property itself: `grammar-add` takes more arguments than any
+    // 3. The property itself: `syntax.add-grammar` takes more arguments than any
     //    guest can pass, so a guest call cannot survive `command.run`'s
     //    arity check to reach `std.DynLib.open`.
     var max_guest_args: usize = 0;
@@ -368,9 +500,9 @@ test "providers: no guest command runner can reach grammar-add's arity (it DynLi
     if (grammar_add_min_args <= max_guest_args) {
         std.debug.print(
             "\nsrc/app/providers.zig: a wasm guest can now pass {d} argument(s) to a command\n" ++
-                "by name, and `grammar-add` acts on {d} — so a guest can reach\n" ++
+                "by name, and `syntax.add-grammar` acts on {d} — so a guest can reach\n" ++
                 "`std.DynLib.open` on a directory it chose. The arity coincidence that held\n" ++
-                "this shut is gone; `grammar-add` needs a real permission gate now.\n",
+                "this shut is gone; `syntax.add-grammar` needs a real permission gate now.\n",
             .{ max_guest_args, grammar_add_min_args },
         );
         return error.GrammarAddIsGuestReachable;

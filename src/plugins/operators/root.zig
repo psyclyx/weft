@@ -2,8 +2,8 @@
 //! privilege beyond the edit door (perms `{}`, grant_max edit). Each operator
 //! AWAITS a `range` (its single arg — a motion's or textobject's returned span,
 //! [FIX 3]) and applies an edit through the gated door, authored as this
-//! plugin's peer. A `view`-grade peer's `op.delete` fails inside the gate with
-//! ZERO permission code here; `op.upcase` on a view doc likewise refuses. The
+//! plugin's peer. A `view`-grade peer's `operators.delete` fails inside the gate with
+//! ZERO permission code here; `operators.upcase` on a view doc likewise refuses. The
 //! range is document-anchored, so it follows concurrent edits directly.
 
 const std = @import("std");
@@ -12,9 +12,10 @@ const weft = @import("weft");
 var xform: [1 << 16]u8 = undefined;
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "op.delete", .arity = weft.Arity.each_extent, .call = delete },
-    .{ .name = "op.upcase", .arity = weft.Arity.each_extent, .call = upcase },
-    .{ .name = "op.lowercase", .arity = weft.Arity.each_extent, .call = lowercase },
+    .{ .name = "operators.delete", .arity = weft.Arity.each_extent, .call = delete, .summary = "Delete the operator's range.", .internal = true },
+    .{ .name = "operators.upcase", .arity = weft.Arity.each_extent, .call = upcase, .summary = "Upper-case the operator's range.", .internal = true },
+    .{ .name = "operators.lowercase", .arity = weft.Arity.each_extent, .call = lowercase, .summary = "Lower-case the operator's range.", .internal = true },
+    .{ .name = "operators.toggle-case", .arity = weft.Arity.each_extent, .call = toggleCase, .summary = "Swap the case of every letter in the operator's range.", .internal = true },
 };
 
 /// Delete the awaited range (the edit door, grade-gated + CRDT-anchored).
@@ -37,6 +38,13 @@ fn upcase() void {
 }
 fn lowercase() void {
     mapCase(std.ascii.toLower);
+}
+fn toggleCase() void {
+    mapCase(struct {
+        fn f(c: u8) u8 {
+            return if (std.ascii.isUpper(c)) std.ascii.toLower(c) else std.ascii.toUpper(c);
+        }
+    }.f);
 }
 
 comptime {

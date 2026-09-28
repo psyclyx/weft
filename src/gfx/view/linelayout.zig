@@ -933,9 +933,10 @@ test "overlay placement: a label covers its cell without moving any text" {
     try doc.insert(gpa, 0, "alpha beta\n");
     var store: core.layers.Layers = .empty;
     defer store.deinit(gpa);
-    // Two jump labels, the way `snipe` publishes them: over the `a` at 4 and
-    // the `a` at 9 (the last character — a two-letter label runs past it).
-    const labels = try store.claimAnnotation(gpa, &doc, "snipe", "snipe");
+    // Two jump labels, the way the `labels` library (helix `gw`) publishes
+    // them: over the `a` at 4 and the `a` at 9 (the last character — a
+    // two-letter label runs past it).
+    const labels = try store.claimAnnotation(gpa, &doc, "labels", "helix");
     labels.begin(gpa);
     try labels.appendSpan(gpa, .{ .start = 4, .end = 4, .kind = @intFromEnum(StyleClass.removed), .message = "s", .placement = .overlay });
     try labels.appendSpan(gpa, .{ .start = 9, .end = 9, .kind = @intFromEnum(StyleClass.removed), .message = "df", .placement = .overlay });

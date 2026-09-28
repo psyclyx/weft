@@ -1,4 +1,4 @@
-//! shell — "insert command output", a `.wasm` plugin. `insert-shell "<cmd>"`
+//! shell — "insert command output", a `.wasm` plugin. `shell.insert-output "<cmd>"`
 //! runs the command off the frame thread and inserts its stdout at the cursor
 //! when it finishes, resolved through its CRDT identity if the buffer moved,
 //! authored as the plugin peer. Perms: proc (it shells out) + timer (the async
@@ -14,11 +14,17 @@ const weft = @import("weft");
 
 const cmds = [_]weft.CommandEntry{
     .{
-        .name = "insert-shell",
+        .name = "shell.insert-output",
         .arity = .one,
         .call = weft.thunk(insertShell),
         .params = "command",
-        .summary = "run a shell command and insert its output at the cursor",
+        .summary = "Run a shell command and insert its output at the cursor.",
+        .label = "Insert Command Output",
+        .menu = "Edit/Insert",
+        .group = "insert",
+        .order = 2,
+        .icon = "terminal",
+        .prompts = true,
     },
 };
 comptime {

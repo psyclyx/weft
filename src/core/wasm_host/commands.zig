@@ -66,6 +66,89 @@ const contract = @import("../membrane/contract.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
+const Door = @import("../plugin_resources.zig").Door;
+const presentations = @import("../presentations.zig");
+const keys_for = @import("../keys_for.zig");
+const standing = @import("../standing.zig");
+const intent_mod = @import("../intent.zig");
+const presentation_codec = @import("weft_membrane").presentation;
+
+// ── What a name is called, and which key runs it (doc/chrome.md §1.2-1.3) ──
+// One body each, run by `wl_*` and `qjs_*` alike: a UI written as a `.wasm`
+// plugin and one written in JS read the same answer from the same code.
+
+/// `command_meta(name, out, cap) -> len`: how `name` — a command, an action,
+/// an intention — is presented HERE (`presentations.of`), in the shared text
+/// form. Answers the whole length and writes only when it fits; -1 when
+/// nothing by that name answers.
+pub fn commandMetaBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = -1;
+    const gpa = d.resources.gpa;
+    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(name);
+    const shown = presentations.of(d.ctx, name) orelse return;
+    var buf: [4096]u8 = undefined;
+    const text = presentation_codec.encode(&buf, shown) catch return;
+    const cap: usize = @intCast(args[3]);
+    if (text.len <= cap) _ = caller.writeMemory(@intCast(args[2]), cap, text) catch return;
+    results[0] = @intCast(text.len);
+}
+
+/// `keys_for(name, out, cap) -> len`: the keys that run `name` where the
+/// person is (`keys_for.personMode`), shortest first, one DISPLAYED sequence
+/// per line (`SPC f s`, not `space f s`). Answers the whole length and writes
+/// only when it fits; 0 when no key runs it here.
+pub fn keysForBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = -1;
+    const ctx = d.ctx;
+    const gpa = d.resources.gpa;
+    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(name);
+    const keys = keys_for.keysFor(ctx, gpa, name, keys_for.personMode(ctx)) catch return;
+    defer keys_for.free(gpa, keys);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    for (keys, 0..) |key, i| {
+        var shown_buf: [256]u8 = undefined;
+        if (i > 0) out.append(gpa, '\n') catch return;
+        out.appendSlice(gpa, ctx.keymap.displayKey(&shown_buf, key)) catch return;
+    }
+    const cap: usize = @intCast(args[3]);
+    if (out.items.len <= cap) _ = caller.writeMemory(@intCast(args[2]), cap, out.items) catch return;
+    results[0] = @intCast(out.items.len);
+}
+
+/// `command_at(where, name, out, cap) -> len`: how `name` stands in a chosen
+/// context (0 active, 1 primary) — whether it would run there and why not,
+/// and the keys that run it there (`standing.encode`'s text form). What a
+/// menu row shows; a reading, so the head never moves. Answers the whole
+/// length and writes only when it fits; -1 when nothing by that name answers
+/// (or `where` is unknown).
+pub fn commandAtBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = -1;
+    const ctx = d.ctx;
+    const gpa = d.resources.gpa;
+    const where = intent_mod.Where.fromWire(@bitCast(args[0])) orelse return;
+    const name = caller.readMemory(gpa, @intCast(args[1]), @intCast(args[2])) catch return;
+    defer gpa.free(name);
+    var s = (standing.of(ctx, gpa, name, where) catch return) orelse return;
+    defer s.deinit(gpa);
+    const text = standing.encode(ctx, gpa, s) catch return;
+    defer gpa.free(text);
+    const cap: usize = @intCast(args[4]);
+    if (text.len <= cap) _ = caller.writeMemory(@intCast(args[3]), cap, text) catch return;
+    results[0] = @intCast(text.len);
+}
+
+pub const hCommandMeta = shared.wasmDoor(commandMetaBody, null);
+pub const hKeysFor = shared.wasmDoor(keysForBody, null);
+pub const hCommandAt = shared.wasmDoor(commandAtBody, null);
+
+/// The two doors both planes run, for the anti-drift gate.
+pub const read_doors = .{
+    .{ .name = "command_meta", .body = commandMetaBody, .wl = hCommandMeta },
+    .{ .name = "keys_for", .body = keysForBody, .wl = hKeysFor },
+};
 
 pub fn hRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
@@ -107,8 +190,10 @@ pub fn hRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         .handler = wpCmdTrampoline,
         .ended = wpCmdEnded,
         .arity = decl.arity,
+        .meta = decl.meta,
         .data = wc,
-    }) catch {
+    }) catch |err| {
+        std.log.warn("plugin {s}: command '{s}' refused: {s}", .{ p.name, wc.name, @errorName(err) });
         results[0] = -1;
         return;
     };
@@ -195,44 +280,92 @@ pub fn hRunArgv(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     const gpa = p.gpa;
     const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(cmd);
-    const argc: usize = @intCast(@max(args[3], 0));
-    if (argc > max_argv) {
-        // Refused OUT LOUD, on the same echo line every other refusal uses:
-        // a guest that asked for a wider call has hit the gate above, and
-        // silence here is the exact failure mode this whole change is about.
-        var buf: [96]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "{s}: too many arguments for a plugin to pass ({d} > {d})", .{
-            cmd, argc, max_argv,
-        }) catch "too many arguments";
-        p.activeCtx().head.echo.clearRetainingCapacity();
-        p.activeCtx().head.echo.appendSlice(gpa, msg) catch {};
-        return;
-    }
-    // The vector first, as bytes, then each string it points at. An
-    // out-of-bounds read refuses the WHOLE call (`readMemory` bounds-checks):
-    // a partially decoded argument list would invoke the command with
-    // something the guest did not say.
-    const vec = caller.readMemory(gpa, @intCast(args[2]), argc * 8) catch return;
-    defer gpa.free(vec);
-
-    var values: [max_argv]command.Value = undefined;
-    var owned: [max_argv][]u8 = undefined;
-    var n: usize = 0;
-    defer for (owned[0..n]) |s| gpa.free(s);
-    while (n < argc) {
-        const ptr = std.mem.readInt(u32, vec[n * 8 ..][0..4], .little);
-        const len = std.mem.readInt(u32, vec[n * 8 + 4 ..][0..4], .little);
-        const s = caller.readMemory(gpa, ptr, len) catch return;
-        owned[n] = s;
-        values[n] = .{ .string = s };
-        n += 1;
-    }
-    invoke(p, cmd, values[0..argc]);
+    var argv: Argv = .{};
+    defer argv.deinit(gpa);
+    if (!argv.read(p, caller, cmd, args[2], args[3])) return;
+    invoke(p, cmd, argv.values[0..argv.n]);
 }
 
-/// Arguments one `wl_run_argv` call may carry — and a SECURITY BOUND, not a
-/// buffer size. `app/providers.zig`'s census gate turns on the fact that no
-/// guest command runner passes three arguments: `grammar-add` needs three, and
+/// `wl_run_argv_at(where, cmd, vec, argc)`: `wl_run_argv` in a CHOSEN
+/// context (`intent.runAt`) — what a menubar row that asks for an argument
+/// runs once it has one: File › Save As… `<path>` saves the editor the menu
+/// describes, not the sidebar that holds the keys. 0 ran (the command
+/// reports its own refusal), -1 no such command or an unknown `where`.
+///
+/// HEAD-GATED, like `wl_intent_invoke_at`: running in the primary context
+/// moves which entry the head is on for the call, a dispatching entry's
+/// business, never a background callback's.
+pub fn hRunArgvAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    results[0] = -1;
+    if (!shared.requireDispatch(p, caller, "wl_run_argv_at")) return;
+    const where = intent_mod.Where.fromWire(@bitCast(args[0])) orelse return;
+    const cmd = caller.readMemory(gpa, @intCast(args[1]), @intCast(args[2])) catch return;
+    defer gpa.free(cmd);
+    var argv: Argv = .{};
+    defer argv.deinit(gpa);
+    if (!argv.read(p, caller, cmd, args[3], args[4])) return;
+    var buf: [256]u8 = undefined;
+    results[0] = switch (intent_mod.runAt(p.activeCtx(), where, cmd, argv.values[0..argv.n], &buf)) {
+        .invoked => 0,
+        .unknown => -1,
+        .refused => |why| blk: {
+            p.activeCtx().head.echo.say(gpa, why) catch {};
+            break :blk 0;
+        },
+    };
+}
+
+/// A run door's arguments, read out of guest memory: the `(ptr, len)` vector
+/// first, as bytes, then each string it points at.
+const Argv = struct {
+    values: [max_argv]command.Value = undefined,
+    owned: [max_argv][]u8 = undefined,
+    n: usize = 0,
+
+    fn deinit(self: *Argv, gpa: std.mem.Allocator) void {
+        for (self.owned[0..self.n]) |s| gpa.free(s);
+    }
+
+    /// False when the call is refused: wider than a plugin may pass (said on
+    /// the echo line), or an argument out of the guest's bounds. An
+    /// out-of-bounds read refuses the WHOLE call (`readMemory` bounds-checks):
+    /// a partially decoded argument list would invoke the command with
+    /// something the guest did not say.
+    fn read(self: *Argv, p: *WasmPlugin, caller: *wasm.Caller, cmd: []const u8, vec_ptr: i32, argc_in: i32) bool {
+        const gpa = p.gpa;
+        const argc: usize = @intCast(@max(argc_in, 0));
+        if (argc > max_argv) {
+            // Refused OUT LOUD, on the same echo line every other refusal
+            // uses: a guest that asked for a wider call has hit the gate
+            // below, and silence here is the exact failure mode this whole
+            // change is about.
+            var buf: [96]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "{s}: too many arguments for a plugin to pass ({d} > {d})", .{
+                cmd, argc, max_argv,
+            }) catch "too many arguments";
+            p.activeCtx().head.echo.say(gpa, msg) catch {};
+            return false;
+        }
+        const vec = caller.readMemory(gpa, @intCast(vec_ptr), argc * 8) catch return false;
+        defer gpa.free(vec);
+        while (self.n < argc) {
+            const ptr = std.mem.readInt(u32, vec[self.n * 8 ..][0..4], .little);
+            const len = std.mem.readInt(u32, vec[self.n * 8 + 4 ..][0..4], .little);
+            const s = caller.readMemory(gpa, ptr, len) catch return false;
+            self.owned[self.n] = s;
+            self.values[self.n] = .{ .string = s };
+            self.n += 1;
+        }
+        return true;
+    }
+};
+
+/// Arguments one `wl_run_argv`/`wl_run_argv_at` call may carry — and a
+/// SECURITY BOUND, not a buffer size. `app/providers.zig`'s census gate turns
+/// on the fact that no guest command runner passes three arguments:
+/// `syntax.add-grammar` needs three, and
 /// what it does with them is `std.DynLib.open` on a caller-named directory.
 /// Arity is the gate. A wider door here would open that one, which is why the
 /// census lists this runner with the number below and the test fails if they
@@ -245,6 +378,20 @@ pub fn hCommandCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     _ = args;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = @intCast(p.activeCtx().commands.count());
+}
+
+/// Where the command registry and the config's presentations stand: moves
+/// whenever what a typed name could mean changes (a command bound, unbound,
+/// described), so a guest's cache of a reading keys on it. Only equality is
+/// meaningful; it wraps.
+pub fn hCommandRevision(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const ctx = p.activeCtx();
+    const described: u64 = if (ctx.presentations) |pr| pr.revision else 0;
+    // Both only ever count up, so their sum moves whenever either does.
+    results[0] = @bitCast(@as(u32, @truncate(ctx.commands.revision +% described)));
 }
 
 pub fn hCommandName(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -272,8 +419,8 @@ pub fn hCommandSummary(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
 ///
 /// A palette that wants to group by producer had exactly one way to guess
 /// before this: parse the name. That is a convention nobody enforces, and it
-/// is wrong for the cases grouping exists to fix — `motion.line-start` is
-/// vim's, `zig` is `modes`', `pair-paren` is `autopair`'s, and none of them
+/// is wrong for the cases grouping exists to fix — `motions.line-start` is
+/// vim's, `zig` is `modes`', `autopair.open-paren` is `autopair`'s, and none of them
 /// say so. The registry knew all three at bind time.
 ///
 /// A fact, not a policy: what to DO with a namespace is the asker's.

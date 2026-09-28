@@ -65,7 +65,7 @@ const record_max = 1 << 16;
 ///   u32 count, then per row:
 ///     u8  availability (0 enabled, 1 disabled, 2 checking)
 ///     u8  has_order, i32 order
-///     5 × (u32 len, bytes): intention, provider, reason, label, group
+///     6 × (u32 len, bytes): intention, provider, reason, label, group, icon
 ///
 /// with the presentation already completed from the intention table
 /// (`intent.presentation`), so every row has a label and a group. Returns
@@ -89,7 +89,7 @@ pub fn hOffersList(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     };
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(p.gpa);
-    encodeOffers(p.gpa, &out, &plane.catalog, snap) catch {
+    encodeOffers(p.gpa, &out, plane, ctx, snap) catch {
         results[0] = -1;
         return;
     };
@@ -103,15 +103,17 @@ pub fn hOffersList(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
 pub fn encodeOffers(
     gpa: std.mem.Allocator,
     out: *std.ArrayList(u8),
-    cat: *const catalog.Catalog,
+    plane: *const intent_mod.Plane,
+    ctx: ?*@import("../command.zig").Context,
     snap: *const catalog.Snapshot,
 ) std.mem.Allocator.Error!void {
+    const cat = &plane.catalog;
     try out.appendNTimes(gpa, 0, 4);
     var count: u32 = 0;
     for (snap.candidates, 0..) |c, i| {
         if (i != 0 and snap.candidates[i - 1].intention == c.intention) continue; // the leader only
         const mark = out.items.len;
-        const shown = intent_mod.presentation(cat, c);
+        const shown = intent_mod.presentation(plane, ctx, c);
         try out.append(gpa, switch (c.availability) {
             .enabled => 0,
             .disabled => 1,
@@ -124,7 +126,7 @@ pub fn encodeOffers(
             .disabled => |d| d.reason,
             .checking => "checking",
         };
-        for ([_][]const u8{ cat.intentionName(c.intention), c.owner, reason, shown.label, shown.group }) |s| {
+        for ([_][]const u8{ cat.intentionName(c.intention), c.owner, reason, shown.label, shown.group, shown.icon }) |s| {
             try putU32(gpa, out, @intCast(s.len));
             try out.appendSlice(gpa, s);
         }
@@ -144,10 +146,12 @@ fn putU32(gpa: std.mem.Allocator, out: *std.ArrayList(u8), v: u32) std.mem.Alloc
 }
 
 /// `wl_intent_invoke_at(where, name, out, cap)`: `wl_intent_invoke` for a
-/// chosen context — resolved and run THERE (`Plane.invokeNamedAt`), so a
-/// toolbar's Undo undoes the editor it describes, not the toolbar. Same
-/// result convention: 0 invoked, -1 not an intention (or unknown `where`),
-/// else the refusal's length.
+/// chosen context — resolved and run THERE (`Plane.invokeAt`), so a
+/// toolbar's Undo undoes the editor it describes, not the toolbar. A name
+/// that is no intention but a command runs as that command there, with no
+/// arguments: a menubar's File › Save saves the editor while the sidebar
+/// holds the keys. Same result convention: 0 invoked, -1 neither an
+/// intention nor a command (or unknown `where`), else the refusal's length.
 ///
 /// HEAD-GATED, unlike `wl_intent_invoke`: running in the primary context
 /// moves which entry the head is on for the call (`Plane.invokeNamedAt`),
@@ -173,7 +177,7 @@ pub fn hIntentInvokeAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
     };
     defer p.gpa.free(name);
     var buf: [reason_max]u8 = undefined;
-    results[0] = switch (plane.invokeNamedAt(ctx, where, name, &buf)) {
+    results[0] = switch (plane.invokeAt(ctx, where, name, &buf)) {
         .invoked => 0,
         .unknown => -1,
         .refused => |why| @intCast(caller.writeMemory(@intCast(args[3]), @intCast(args[4]), why) catch 0),
@@ -334,7 +338,7 @@ test "wl_offers_list's record: one row per offered intention, presentation compl
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
-    try encodeOffers(gpa, &out, &plane.catalog, snap);
+    try encodeOffers(gpa, &out, &plane, null, snap);
 
     // Read it back the way the SDK's `Offers.next` does.
     const bytes = out.items;
@@ -346,7 +350,7 @@ test "wl_offers_list's record: one row per offered intention, presentation compl
         const availability = bytes[at];
         const has_order = bytes[at + 1] != 0;
         at += 6;
-        var parts: [5][]const u8 = undefined;
+        var parts: [6][]const u8 = undefined;
         for (&parts) |*part| {
             const n = std.mem.readInt(u32, bytes[at..][0..4], .little);
             part.* = bytes[at + 4 ..][0..n];

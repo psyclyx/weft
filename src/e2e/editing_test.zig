@@ -54,7 +54,7 @@ test "workflow: vim — insert text, escape, and it lands in the buffer" {
     const got = try ed.textAlloc();
     defer gpa.free(got);
     try t.expectEqualStrings("hello weft", got);
-    ed.snapshot("vim-insert");
+    ed.snapshot("vim.insert");
 }
 
 test "workflow: vim — dw deletes a word (operator + motion compose)" {
@@ -68,9 +68,9 @@ test "workflow: vim — dw deletes a word (operator + motion compose)" {
     ed.typeText("alpha bravo charlie");
     ed.press("Escape", "");
     // Back to the start of the line, then delete the first word with `dw`.
-    ed.press("0", ""); // motion.line-start (via vim/n/*)
+    ed.press("0", ""); // motions.line-start (vim's motion key)
     ed.press("d", ""); // enter operator-pending
-    ed.press("w", ""); // word motion → op.delete applies
+    ed.press("w", ""); // word motion → operators.delete applies
     const got = try ed.textAlloc();
     defer gpa.free(got);
     // "alpha " is gone (the word + its trailing space, vim `dw`).
@@ -85,10 +85,10 @@ test "workflow: autopair — typing an open paren inserts the matched pair" {
     try loadVim(&ed);
     // The natural way: bind the pair keys (a config would). Then in insert, `(`
     // is a bound key (not plain text) → the pair is inserted, caret between.
-    try ed.keymap.bind(gpa, "insert", "parenleft", "pair-paren", core.Keymap.prio_config, "test");
+    try ed.keymap.bind(gpa, "insert", "parenleft", "autopair.open-paren", core.Keymap.prio_config, "test");
 
     ed.press("i", "");
-    ed.press("parenleft", "("); // bound → pair-paren, not literal text
+    ed.press("parenleft", "("); // bound → autopair.open-paren, not literal text
     const got = try ed.textAlloc();
     defer gpa.free(got);
     try t.expectEqualStrings("()", got);
@@ -104,7 +104,7 @@ test "workflow: vim — x deletes the char under the cursor" {
     ed.typeText("abc");
     ed.press("Escape", "");
     ed.press("0", ""); // to line start
-    ed.press("x", ""); // delete-forward
+    ed.press("x", ""); // edit.delete-after
     const got = try ed.textAlloc();
     defer gpa.free(got);
     try t.expectEqualStrings("bc", got);
@@ -177,7 +177,7 @@ test "workflow: vim — Y yanks a line, p pastes it below" {
     ed.press("i", "");
     ed.typeText("line");
     ed.press("Escape", "");
-    ed.press("Y", ""); // yank-line
+    ed.press("Y", ""); // vim.yank-line
     ed.press("p", ""); // paste below
     const got = try ed.textAlloc();
     defer gpa.free(got);
@@ -222,10 +222,10 @@ test "workflow: modes — opening a file detects its language on activate, witho
     // editor's echo line). What this test asserts instead is the structural
     // guarantee: opening a file never lands language text on `ed.echoText()`
     // via this path, for either extension.
-    ed.runStr("open", "/tmp/weft-nonexistent-main.zig");
+    ed.runStr("file.open", "/tmp/weft-nonexistent-main.zig");
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "zig") == null);
 
-    ed.runStr("open", "/tmp/weft-nonexistent-app.js");
+    ed.runStr("file.open", "/tmp/weft-nonexistent-app.js");
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "javascript") == null);
 }
 
@@ -243,7 +243,7 @@ test "workflow: intentions — Return resolves its fallback list through the cat
     try t.expectEqualStrings("std.editing.insert-line-break", arm_names[1]);
 
     // In a text entry nothing offers activation, so the SECOND arm wins and
-    // the line break lands exactly as the old `insert-newline` bind did.
+    // the line break lands exactly as the old `edit.insert-newline` bind did.
     ed.typeText("ab\ncd");
     const got = try ed.textAlloc();
     defer gpa.free(got);

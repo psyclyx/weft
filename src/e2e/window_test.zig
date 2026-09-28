@@ -54,15 +54,15 @@ test "app/window: vsplit into two panes, each renders its own buffer" {
 
     // Split via the REAL window command → intent → applyIntents. Both panes
     // start on buffer A; focus stays on the original (left) half.
-    ed.run("window-vsplit");
+    ed.run("window.split-right");
     ed.applyWindow();
     try t.expectEqual(@as(usize, 2), ed.paneCount());
 
     // Move focus to the right pane and open a second buffer there — the real
     // "focused pane follows the active buffer" invariant carries it.
-    ed.run("window-focus-right");
+    ed.run("window.focus-right");
     ed.applyWindow();
-    ed.runStr("buffer-create", "*bravo*");
+    ed.runStr("buffer.create", "*bravo*");
     ed.applyWindow();
     try t.expectEqualStrings("*bravo*", ed.bufferName());
     ed.press("i", "");
@@ -101,9 +101,9 @@ test "app/window: a further split tiles three panes and still composites" {
     ed.press("Escape", "");
 
     // vsplit, then split the focused half horizontally → three panes.
-    ed.run("window-vsplit");
+    ed.run("window.split-right");
     ed.applyWindow();
-    ed.run("window-split");
+    ed.run("window.split-below");
     ed.applyWindow();
     try t.expectEqual(@as(usize, 3), ed.paneCount());
 
@@ -132,7 +132,7 @@ test "app/window: a further split tiles three panes and still composites" {
 
 /// The current name field in the focused semantic entry.
 fn focusedRowName(ed: *Editor, gpa: std.mem.Allocator) !?[]u8 {
-    if (ed.head.scene_selection.field == null) return null;
+    if (ed.head.scene_selection.path() == null) return null;
     return try ed.draftHere(gpa);
 }
 
@@ -192,7 +192,7 @@ test "e2e/sidebar: a config fragment docks a files sidebar, and Return opens in 
     // Focus the sidebar deliberately (directional focus reaches it; cycling
     // never would) — the active entry follows the pane, so its rows are what
     // keys act on.
-    ed.run("window-focus-left");
+    ed.run("window.focus-left");
     ed.applyWindow();
     try t.expectEqual(browser, ed.buffers.active_id);
 
@@ -245,7 +245,7 @@ test "e2e/sidebar: a config fragment docks a files sidebar, and Return opens in 
     // primary focus still names the editor pane, and that record is the only
     // thing the primary context — all a follower hears — reads focus from.
     try t.expectEqual(primary.pane().id, ed.head.primary_focus.?.pane);
-    ed.run("window-focus-right");
+    ed.run("window.focus-right");
     ed.applyWindow();
     try t.expectEqual(primary, window_layout.headFocus(ed.win_layout, ed.head));
     const pixels = try ed.renderComposite();
@@ -323,10 +323,10 @@ test "e2e/sidebar: a companion follows primary focus and never its own" {
     // Split the editor pane and open another file in the right half: ordinary
     // panes are focus sources, so the entry the primary context names moves,
     // and the companion retargets on it.
-    ed.run("window-vsplit");
+    ed.run("window.split-right");
     ed.applyWindow();
-    ed.run("window-focus-right");
-    ed.runStr("open", "sub/inner.txt");
+    ed.run("window.focus-right");
+    ed.runStr("file.open", "sub/inner.txt");
     ed.applyWindow();
     try t.expect(outline.retargets > 0);
     const followed = outline.retargets;
@@ -338,7 +338,7 @@ test "e2e/sidebar: a companion follows primary focus and never its own" {
 
     // Back to the left half — another ordinary pane on another entry, so
     // another retarget.
-    ed.run("window-focus-left");
+    ed.run("window.focus-left");
     ed.applyWindow();
     try t.expect(outline.retargets > followed);
     const before_companion = outline.retargets;
@@ -352,7 +352,7 @@ test "e2e/sidebar: a companion follows primary focus and never its own" {
     // Now focus the COMPANION itself. That is not a primary-focus change, so
     // no key of the primary context moved and the follower is never even
     // told — it cannot chase its own subject.
-    ed.run("window-focus-left");
+    ed.run("window.focus-left");
     ed.applyWindow();
     try t.expectEqual(panel, window_layout.headFocus(ed.win_layout, ed.head));
     try t.expectEqual(before_companion, outline.retargets);
@@ -372,7 +372,7 @@ test "e2e/files: the listing is an ordinary buffer, navigable by key" {
     try core.file.writeBytesMakingDirs(gpa, "nested", "nested/inner.txt", "INNER\n");
 
     try ed.grantRooted("files", "fs_read", "/");
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     try t.expect(std.mem.startsWith(u8, ed.bufferName(), "files:"));
 
     // The scene renders the provider-owned entries.
@@ -417,7 +417,7 @@ test "e2e/files: directory navigation retains drafts and cursors in one object e
     const ed = &app.ed;
     try core.file.writeBytes(gpa, "alpha.txt", "alpha\n");
     try core.file.writeBytesMakingDirs(gpa, "child", "child/inner.txt", "inner\n");
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     const browser = ed.buffers.active_id;
     const count = ed.buffers.count();
     const root_view = ed.toolView().?;
@@ -471,7 +471,7 @@ test "e2e/files: semantic rows scroll beyond one screen without a text document"
         defer gpa.free(name);
         try core.file.writeBytes(gpa, name, "contents\n");
     }
-    ed.runStr("open", ".");
+    ed.runStr("file.open", ".");
     const view_ref = ed.toolView().?;
     const instance = ed.session.system.semantic.views.get(view_ref).?;
     try t.expectEqual(@as(usize, 80), instance.focus_order.len);

@@ -30,6 +30,8 @@ const core = @import("weft_core");
 const layout = @import("../layout.zig");
 const region = @import("../region.zig");
 const fonts = @import("../fonts.zig");
+const icons = @import("../icons.zig");
+const chrome_mod = @import("chrome.zig");
 const statusline = @import("statusline.zig");
 const popup = @import("popup.zig");
 const semantic = @import("semantic.zig");
@@ -77,18 +79,47 @@ pub const Run = struct {
         cell: []text_engine.Cell,
         prop: struct { x: f32, em: f32, color: [4]f32 },
     },
+    /// Glyphs outside this box are not drawn — a chrome label that must not
+    /// spill past its tab or menu. Null: unclipped, as every text run is.
+    clip: ?region.Rect = null,
 };
 
-/// A solid rectangle painted through the unit-square record: selection
-/// backgrounds, caret, peer carets, HUD row highlights. `pub` for the
-/// extracted submodules only (see `Run`).
-pub const Rect = struct { x: f32, y: f32, w: f32, h: f32, color: [4]f32 };
+/// A box-shaped paint, in paint order with the other rects of its layer:
+/// selection backgrounds, caret, peer carets, HUD row highlights — a sharp
+/// filled rect, the default — and, for chrome (`chrome.zig`), a rounded or
+/// outlined or blurred box, or a vector icon drawn into the box and tinted
+/// `color`. One list, so a chrome style's pill, its icon and a highlight
+/// over it keep the order they were appended in. `pub` for the extracted
+/// submodules only (see `Run`).
+pub const Rect = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [4]f32,
+    shape: Shape = .fill,
+
+    pub const Shape = union(enum) {
+        /// A sharp, pixel-crisp fill.
+        fill,
+        rounded: Rounded,
+        /// The icon scaled into the box (its viewBox is square; the box
+        /// should be too).
+        icon: *const icons.Icon,
+    };
+
+    /// `scene.RRectItem`'s knobs: radius, an outline instead of a fill when
+    /// `stroke_width > 0`, a soft edge when `blur > 0`.
+    pub const Rounded = struct { radius: f32, stroke_width: f32 = 0, blur: f32 = 0 };
+};
 
 /// Where selection `i`'s caret draws under `place` (`hud.CaretPlace`): its
 /// head, or — `inside`, on a forward selection — the start of the last
-/// character it covers.
+/// character it covers. An inclusive selection's caret is on that character
+/// whatever the place (`Editor.Ends.caretIn`).
 pub fn caretDrawOffset(ed: *const core.TextSnapshot, i: usize, place: hud_mod.CaretPlace) usize {
     const ends = ed.selectionEnds(i);
+    if (ends.inclusive) return ends.caretIn(ed.text());
     if (place == .head or ends.head <= ends.anchor) return ends.head;
     const rope = ed.text();
     var off = ends.head - 1;
@@ -99,6 +130,26 @@ pub fn caretDrawOffset(ed: *const core.TextSnapshot, i: usize, place: hud_mod.Ca
 gpa: Allocator,
 face_set: fonts.FaceSet,
 theme: Theme,
+/// How chrome looks (`theme/chrome`, doc/chrome.md §3.2). Resolved from the
+/// theme slot each frame (`resolveChrome`), so a rebind is the next frame's.
+chrome: chrome_mod.Style = .text,
+/// The bundled icon set, parsed once at init.
+icon_set: icons.Set,
+/// Whether the theme's icon set is the bundled one (`theme/icons`); `none`
+/// turns every icon off, whatever the chrome style.
+icons_on: bool = true,
+/// The tooltip the current build's hovered element offers — due or not, so
+/// what the pointer rests on is known before the frame that shows it.
+build_tip: ?chrome_mod.Tip = null,
+/// The frame's tooltip, whichever pane's element offered it, until the pane
+/// that paints tooltips (`Hud.tooltips`) draws it — when it is `due`. Reset
+/// with the frame; between frames, what the last one's pointer rested on
+/// (`hoveredCommand`).
+frame_tip: ?struct { tip: chrome_mod.Tip, at: [2]f32, due: bool } = null,
+/// What the last frame's hovered element runs, owned past the frame's
+/// arenas — `hoveredCommand`.
+hovered_buf: [128]u8 = undefined,
+hovered_len: usize = 0,
 
 em: f32,
 cell_w: f32,
@@ -133,6 +184,9 @@ pane_maps: [max_pane_maps]PaneMap = undefined,
 pane_map_count: usize = 0,
 semantic_last_view: ?@import("weft_semantic").view.Ref = null,
 semantic_last_node: ?@import("weft_semantic").scene.NodeId = null,
+/// Where each open menu panel taller than the frame is scrolled to — a
+/// pane's `top_row`, for the floating menu (`menu.Scroll`).
+menu_scroll: @import("menu.zig").Scroll = .{},
 /// The current build's content origin (its frame inset by `margin`) — a
 /// pane renders into its own region, so layout and HUD baselines derive
 /// from here rather than the whole framebuffer. Defaults to the
@@ -157,11 +211,14 @@ pub fn init(gpa: Allocator, font_bytes: []const u8, em: f32) !View {
     const ascent: f32 = @floatFromInt(lm.ascent);
     const descent: f32 = @floatFromInt(lm.descent);
     const gap: f32 = @floatFromInt(lm.line_gap);
+    var icon_set = try icons.Set.parse(gpa, "lucide", &icons.lucide);
+    errdefer icon_set.deinit();
 
     return .{
         .gpa = gpa,
         .face_set = face_set,
         .theme = (Theme{}).linearized(),
+        .icon_set = icon_set,
         .em = em,
         .cell_w = em * @as(f32, @floatFromInt(advance)) / upem,
         .line_h = em * (ascent - descent + gap) / upem,
@@ -172,8 +229,47 @@ pub fn init(gpa: Allocator, font_bytes: []const u8, em: f32) !View {
 
 pub fn deinit(self: *View) void {
     self.layout_arena.deinit();
+    self.icon_set.deinit();
     self.face_set.deinit();
     self.* = undefined;
+}
+
+/// The icon `name`, when the chrome style draws icons and the theme's set
+/// has one by that name; null otherwise, and the style draws text alone.
+pub fn icon(self: *const View, name: []const u8) ?*const icons.Icon {
+    if (!self.icons_on or !self.chrome.showsIcons()) return null;
+    return self.icon_set.get(name);
+}
+
+/// The slots a chrome style and icon set are chosen through: `theme/chrome`
+/// (`text`, `text-icons`, `widget`) and `theme/icons` (`lucide`, `none`).
+/// Value-shaped and first-wins, like every `theme/<leaf>`; the view declares
+/// them because the view is what reads them.
+pub const chrome_slot = "theme/chrome";
+pub const icons_slot = "theme/icons";
+
+pub fn declareChromeSlots(container: *core.container.Container) !void {
+    try container.declareSlot(.{ .name = chrome_slot, .shape = .value, .composition = .first_wins });
+    try container.declareSlot(.{ .name = icons_slot, .shape = .value, .composition = .first_wins });
+}
+
+/// Read the chrome style and icon set from their slots. Called at the top of
+/// every frame, so whatever last bound `theme/chrome` — a config, a theme,
+/// `theme.set-chrome` — is what the frame draws. An unbound or misspelt
+/// value leaves the style as it was: a typo must not restyle the editor.
+pub fn resolveChrome(self: *View, container: *const core.container.Container, facts: core.facts.Facts) void {
+    if (slotValue(container, facts, chrome_slot)) |name| {
+        if (chrome_mod.Style.parse(name)) |style| self.chrome = style;
+    }
+    if (slotValue(container, facts, icons_slot)) |name| self.icons_on = !std.mem.eql(u8, name, "none");
+}
+
+fn slotValue(container: *const core.container.Container, facts: core.facts.Facts, slot: []const u8) ?[]const u8 {
+    const winner = container.resolveOne(slot, facts) orelse return null;
+    return switch (winner.provider) {
+        .value => |v| v,
+        else => null,
+    };
 }
 
 /// Change the text scale and every metric derived from it together. The next
@@ -189,6 +285,14 @@ pub fn setEm(self: *View, em: f32) void {
 /// Rows that fit in a rect of pixel height `h` (its usable body height).
 pub fn rowsIn(self: *const View, h: f32) usize {
     return @intFromFloat(@max(1, @floor((h - 2 * margin) / self.line_h)));
+}
+
+/// What the element the pointer rested on in the last frame runs ("" for
+/// nothing, or an element that runs nothing) — what the shell looks a
+/// tooltip's key hint up by when the pointer settles, before the frame
+/// that shows the tooltip is built (doc/model.md §2.7).
+pub fn hoveredCommand(self: *const View) []const u8 {
+    return self.hovered_buf[0..self.hovered_len];
 }
 
 pub fn colsIn(self: *const View, w: f32) usize {
@@ -296,6 +400,8 @@ pub fn resetFrame(self: *View) void {
     self.semantic_active = false;
     self.build_hits = &.{};
     self.build_chrome = &.{};
+    self.frame_tip = null;
+    self.hovered_len = 0;
     self.pane_map_count = 0;
 }
 
@@ -363,6 +469,16 @@ pub fn cellsRect(self: *const View, y: f32, col: usize, cols: usize) region.Rect
     };
 }
 
+/// `r` cut to what lies inside `bounds` (empty, at `r`'s corner, when they
+/// do not meet).
+fn clipTo(r: region.Rect, bounds: region.Rect) region.Rect {
+    const x0 = @max(r.x, bounds.x);
+    const y0 = @max(r.y, bounds.y);
+    const x1 = @min(r.x + r.w, bounds.x + bounds.w);
+    const y1 = @min(r.y + r.h, bounds.y + bounds.h);
+    return .{ .x = x0, .y = y0, .w = @max(0, x1 - x0), .h = @max(0, y1 - y0) };
+}
+
 /// The pane under (x, y): the one whose floating overlay covers the point
 /// (it paints on top), else the one whose last-built rect contains it.
 pub fn paneAtPoint(self: *const View, x: f32, y: f32) ?*const PaneMap {
@@ -401,9 +517,11 @@ fn settleRows(editor: *const core.TextSnapshot, top_row: *usize, body_rows: usiz
 }
 
 /// A pane's frame carved into regions (no element computes an offset against
-/// another): content is the frame inset by `margin`; a top tab strip and a
-/// bottom HUD (status line + optional panel) are cut off it, and the body is
-/// what remains.
+/// another). The status line is cut off the FRAME, edge to edge, before any
+/// inset: it is the pane's own bottom row, flush with its sides, never a bar
+/// floating inside the margin (doc/chrome.md §4.2). Content is what remains,
+/// inset by `margin`; a top tab strip and the panel above the status line
+/// are cut off it, and the body is the rest.
 const Regions = struct {
     content: region.Rect,
     tab: ?region.Rect,
@@ -413,11 +531,17 @@ const Regions = struct {
 };
 
 fn carve(self: *const View, frame: region.Rect, hud: Hud) Regions {
+    // A pane that declares no status line (a one-row strip) gives the row
+    // to its body.
+    const status_cut = frame.cutBottom(if (hud.status_line) self.line_h else 0);
+    const rest = status_cut.rest;
+    // A pane that is only its status line has no body to inset: its content
+    // is empty, never negative.
     const content: region.Rect = .{
-        .x = frame.x + margin,
-        .y = frame.y + margin,
-        .w = frame.w - 2 * margin,
-        .h = frame.h - 2 * margin,
+        .x = rest.x + margin,
+        .y = rest.y + margin,
+        .w = @max(0, rest.w - 2 * margin),
+        .h = @max(0, rest.h - 2 * margin),
     };
     var stack = content;
     var tab: ?region.Rect = null;
@@ -426,10 +550,7 @@ fn carve(self: *const View, frame: region.Rect, hud: Hud) Regions {
         tab = c.strip;
         stack = c.rest;
     }
-    // A pane that declares no status line (a one-row strip) gives the row
-    // to its body.
-    const status_cut = stack.cutBottom(if (hud.status_line) self.line_h else 0);
-    const panel_cut = status_cut.rest.cutBottom(@as(f32, @floatFromInt(hud.panelRows())) * self.line_h);
+    const panel_cut = stack.cutBottom(@as(f32, @floatFromInt(hud.panelRows())) * self.line_h);
     return .{ .content = content, .tab = tab, .status = status_cut.strip, .panel = panel_cut.strip, .body = panel_cut.rest };
 }
 
@@ -480,6 +601,7 @@ pub fn build(
 ) !Built {
     self.build_hits = &.{};
     self.build_chrome = &.{};
+    self.build_tip = null;
     const regions = self.carve(frame, hud);
     const content = regions.content;
     self.origin_x = content.x;
@@ -535,7 +657,7 @@ pub fn build(
         const styles = try linelayout.resolveStyleInputs(scratch, hud, rope, top_row.*, rows_visible, total_rows);
         // Every block caret flips the glyph it covers, not only the primary's.
         var flips: std.ArrayList(usize) = .empty;
-        if (hud.cursor_on and hud.cursor_style == .block) for (0..ed.selectionCount()) |i|
+        if (hud.cursor_on and hud.cursor_style == .block and !hud.row_focus) for (0..ed.selectionCount()) |i|
             try flips.append(scratch, caretDrawOffset(ed, i, hud.caret_place));
 
         // Lay out the body's visible rows into the frame arena (the geometry
@@ -561,6 +683,13 @@ pub fn build(
         }
         self.frame_layout = .{ .lines = try lines.toOwnedSlice(la) };
 
+        // A focus that is a ROW (doc/chrome.md §5.2) wears the wash a scene's
+        // focused row does, beneath any selection, and draws no caret.
+        if (hud.row_focus) {
+            var wash = self.theme.background;
+            for (0..3) |i| wash[i] = wash[i] * 0.8 + self.theme.selection[i] * 0.2;
+            try decoration.rowRect(self, scratch, &rects, cursor_off, body_rect.x, body_rect.w, wash);
+        }
         // Every selection draws, the primary like any other: one wash per
         // selection and one caret per head (the single-selection case is the
         // one-iteration loop of what this always drew).
@@ -568,7 +697,7 @@ pub fn build(
             if (ed.selectionRange(i)) |r| try decoration.selectionRects(self, scratch, &rects, r, self.theme.selection);
         }
         for (hud.flash) |fl| try decoration.selectionRects(self, scratch, &rects, fl, self.theme.accent);
-        if (hud.cursor_on) {
+        if (hud.cursor_on and !hud.row_focus) {
             try decoration.caretRect(self, scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
             for (0..ed.selectionCount()) |i| {
                 if (i == ed.primary) continue;
@@ -599,40 +728,48 @@ pub fn build(
     var chrome: std.ArrayList(hud_mod.ChromeHit) = .empty;
     const chrome_gpa = self.layout_arena.allocator();
 
-    // Top buffer-tab strip, into its own region.
+    const sink: chrome_mod.Sink = .{ .v = self, .scratch = scratch, .runs = &runs, .rects = &rects };
+
+    // Top buffer-tab strip, into its own region: each tab a `tab` role,
+    // laid out and painted by the chrome style.
     if (hud.tabs) |tabs| {
-        var tbuf: [1024]u8 = undefined;
-        var parts: [128]hud_mod.TabPart = undefined;
-        const strip = hud_mod.buildTabStripParts(&tbuf, tabs, &parts);
-        try statusline.appendPlainRun(self, scratch, &runs, &rects, strip.text, tab_rect.?.y + self.ascent, cols_visible, self.theme.status, null);
-        for (strip.parts) |part| {
-            if (part.col >= cols_visible) break;
-            try chrome.append(chrome_gpa, .{
-                .rect = self.cellsRect(tab_rect.?.y, part.col, @min(part.cols, cols_visible - part.col)),
-                .kind = .tab,
-                .index = part.index,
-                .part = part.part,
-                .entry = tabs[part.index].id,
-            });
+        const strip = tab_rect.?;
+        for (try chrome_mod.layoutTabs(self, scratch, tabs, strip)) |tb| {
+            const tab = tabs[tb.index];
+            const box = clipTo(tb.box, strip);
+            const close = clipTo(tb.close, strip);
+            const on_close = hud.pointer.onChrome(.tab, tb.index, .close);
+            const state: chrome_mod.State = .{
+                .selected = tab.active,
+                .hover = on_close or hud.pointer.onChrome(.tab, tb.index, .body),
+                .pressed = hud.pointer.pressed and hud.pointer.onChrome(.tab, tb.index, .body),
+            };
+            try chrome_mod.paintTab(sink, state, .{ .label = tab.name, .icon = "file" }, box, if (close.w > 0) close else null, on_close);
+            if (state.hover) self.build_tip = .{ .label = if (on_close) "Close" else tab.path };
+            if (box.w <= 0) continue;
+            // The body is the tab less its close glyph, so the two parts'
+            // hit regions never overlap.
+            try chrome.append(chrome_gpa, .{ .rect = .{ .x = box.x, .y = box.y, .w = @max(0, @min(box.w, close.x - box.x)), .h = box.h }, .kind = .tab, .index = tb.index, .part = .body, .entry = tab.id });
+            if (close.w > 0) try chrome.append(chrome_gpa, .{ .rect = close, .kind = .tab, .index = tb.index, .part = .close, .entry = tab.id });
         }
     }
 
-    if (hud.status_line) try statusline.buildHud(self, scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible, .{ .list = &chrome, .gpa = chrome_gpa });
+    if (hud.status_line) try statusline.buildHud(self, scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible, .{ .list = &chrome, .gpa = chrome_gpa, .of = hud.status_of });
     self.build_chrome = chrome.items;
     self.build_float = null;
 
     // Thin pane dividers: a 1px line on each internal (shared) edge of
     // the pane's frame. Drawn on the frame boundary — outside the
-    // `content` inset — so it never touches a glyph. Subtle: the dim
-    // status grey, like the very slight lines between vim splits.
+    // `content` inset — so it never touches a glyph. A `separator`: the
+    // chrome style picks its colour (the dim status grey under the text
+    // styles, like the very slight lines between vim splits).
     {
         const bd = hud.pane_border;
-        const c = self.theme.status;
         const th: f32 = 1;
-        if (bd.left) try rects.append(scratch, .{ .x = frame.x, .y = frame.y, .w = th, .h = frame.h, .color = c });
-        if (bd.right) try rects.append(scratch, .{ .x = frame.x + frame.w - th, .y = frame.y, .w = th, .h = frame.h, .color = c });
-        if (bd.top) try rects.append(scratch, .{ .x = frame.x, .y = frame.y, .w = frame.w, .h = th, .color = c });
-        if (bd.bottom) try rects.append(scratch, .{ .x = frame.x, .y = frame.y + frame.h - th, .w = frame.w, .h = th, .color = c });
+        if (bd.left) try chrome_mod.paintSeparator(sink, .{ .x = frame.x, .y = frame.y, .w = th, .h = frame.h }, .vertical);
+        if (bd.right) try chrome_mod.paintSeparator(sink, .{ .x = frame.x + frame.w - th, .y = frame.y, .w = th, .h = frame.h }, .vertical);
+        if (bd.top) try chrome_mod.paintSeparator(sink, .{ .x = frame.x, .y = frame.y, .w = frame.w, .h = th }, .horizontal);
+        if (bd.bottom) try chrome_mod.paintSeparator(sink, .{ .x = frame.x, .y = frame.y + frame.h - th, .w = frame.w, .h = th }, .horizontal);
     }
 
     // Everything from here on floats: it paints after the pane's text, so
@@ -688,7 +825,27 @@ pub fn build(
         self.build_hits = self.semantic_hits;
     }
 
-    var built = try render.render(self, world_to_pixel, runs.items, rects.items, float);
+    // A tooltip is the topmost thing a FRAME draws — its own layer, so no
+    // popup's text beneath it shows through its box, painted by the pane that
+    // paints last (`Hud.tooltips`), so a toolbar button's tooltip hangs over
+    // the editor below it instead of being clipped to the strip. Only the
+    // element the pointer rests on offers one, once the delay has passed
+    // (`Hud.pointer`). Its key hint is frame input (`Hud.key_hint`), found by
+    // the shell when the pointer settled — a build asks nothing.
+    if (self.build_tip) |tip| if (hud.pointer.at) |at| {
+        self.frame_tip = .{ .tip = tip, .at = at, .due = hud.pointer.tooltip };
+        const n = @min(tip.command.len, self.hovered_buf.len);
+        @memcpy(self.hovered_buf[0..n], tip.command[0..n]);
+        self.hovered_len = if (n == tip.command.len) n else 0;
+    };
+    const top: render.Layers = .{ .rects = rects.items.len, .runs = runs.items.len };
+    if (hud.tooltips) if (self.frame_tip) |ft| if (ft.due) {
+        var shown = ft.tip;
+        if (shown.key_hint.len == 0) shown.key_hint = hud.key_hint.of(shown.command);
+        try chrome_mod.paintTooltip(sink, shown, ft.at, hud.float_bounds orelse frame);
+    };
+
+    var built = try render.render(self, world_to_pixel, runs.items, rects.items, &.{ float, top });
     if (hud.brand_mark) if (dashboardMarkSize(self, body_rect)) |size| {
         const first = built.items.len;
         built.items = try self.gpa.realloc(built.items, first + 2);

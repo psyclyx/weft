@@ -1,7 +1,7 @@
 //! modes — language activation (design §3/§6.2), a `.wasm` plugin. When a
 //! buffer takes focus the host calls `on_activate`; modes reads the path,
 //! detects the language by extension, and echoes it (a hook a richer mode set
-//! layers language keymaps/facts onto). It also provides `lang-run`, a
+//! layers language keymaps/facts onto). It also provides `modes.run`, a
 //! self-adapting "run this file" that picks the interpreter by extension —
 //! language awareness in the command, so it is always correct. perms
 //! `{proc, timer}`.
@@ -38,7 +38,7 @@ fn langFor(path: []const u8) ?Lang {
 }
 
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "lang-run", .arity = .whole, .call = langRun },
+    .{ .name = "modes.run", .arity = .whole, .call = langRun, .summary = "Run the current file with its language's runner.", .label = "Run File", .menu = "Run", .group = "run", .order = 1, .icon = "play" },
 };
 
 fn describeExtra() void {
@@ -53,7 +53,7 @@ fn describeExtra() void {
 /// no dispatching head to route through here (unlike `on_fill`/`on_poll`,
 /// `on_activate` has no natural "the async thing that just landed" moment to
 /// defer through a self-dispatched command either — it fires synchronously
-/// off the SAME buffer-switch that would make the echo redundant a frame
+/// off the SAME buffer.switch that would make the echo redundant a frame
 /// later anyway). Downgraded to `weft.log` — still observable (the process
 /// log), no longer a false promise of a user-visible echo this entry can't
 /// honor. A per-head-aware activation echo is real future work, not solved
@@ -89,7 +89,7 @@ fn runSubst(template: []const u8, path: []const u8) void {
             w += 1;
         }
     }
-    weft.runStr("buffer-create", "*run*");
+    weft.runStr("buffer.create", "*run*");
     weft.procToBuffer(cmd_buf[0..w], "*run*", 0);
 }
 

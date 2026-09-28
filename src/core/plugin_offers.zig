@@ -82,7 +82,7 @@ pub const Publisher = struct {
             .provider = try plane.catalog.provider(name),
             .handle = undefined,
         };
-        self.handle = try plane.invokers.register(gpa, name, invokeRow, self);
+        self.handle = try plane.invokers.register(gpa, name, invokeRow, commandOfRow, self);
     }
 
     pub fn deinit(self: *Publisher, gpa: Allocator) void {
@@ -202,6 +202,11 @@ fn invokeRow(data: ?*anyopaque, ctx: *command.Context, payload: u32) anyerror!vo
     _ = try command.run(ctx.commands, ctx, name, &.{});
 }
 
+fn commandOfRow(data: ?*anyopaque, _: *command.Context, payload: u32) ?[]const u8 {
+    const self: *Publisher = @ptrCast(@alignCast(data orelse return null));
+    return self.commandAt(payload);
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
@@ -233,15 +238,15 @@ test "plugin offers: a row resolves to its command, scoped to the plugin's own t
     defer fixture.deinit();
 
     try fixture.publisher.begin(t.allocator, "git", 7);
-    try fixture.publisher.add(t.allocator, "plugin.git.stage", "git-stage", "", .whole);
-    try fixture.publisher.add(t.allocator, "plugin.git.unstage", "git-unstage", "not-staged", .whole);
+    try fixture.publisher.add(t.allocator, "plugin.git.stage", "git.stage", "", .whole);
+    try fixture.publisher.add(t.allocator, "plugin.git.unstage", "git.unstage", "not-staged", .whole);
     try fixture.publisher.commit(t.allocator);
 
     const inside: catalog.Context = .{ .key = 1, .revision = 1, .facts = .{ .tool = "git" } };
     const staged = try fixture.resolve("plugin.git.stage", inside);
     try t.expectEqual(@as(u64, 7), staged.decision.revision);
     try t.expectEqualStrings(
-        "git-stage",
+        "git.stage",
         fixture.publisher.commandAt(intent.Endpoint.of(staged.decision.endpoint).payload).?,
     );
 
@@ -261,14 +266,14 @@ test "plugin offers: republishing replaces the table whole, and retracting says 
     defer fixture.deinit();
 
     try fixture.publisher.begin(t.allocator, "git", 1);
-    try fixture.publisher.add(t.allocator, "plugin.git.stage", "git-stage", "", .whole);
-    try fixture.publisher.add(t.allocator, "plugin.git.refresh", "git-refresh", "", .whole);
+    try fixture.publisher.add(t.allocator, "plugin.git.stage", "git.stage", "", .whole);
+    try fixture.publisher.add(t.allocator, "plugin.git.refresh", "git.refresh", "", .whole);
     try fixture.publisher.commit(t.allocator);
 
     // The next model ordinal publishes a SMALLER table: the dropped row is
     // gone from the catalog, and the endpoint it minted no longer resolves.
     try fixture.publisher.begin(t.allocator, "git", 2);
-    try fixture.publisher.add(t.allocator, "plugin.git.refresh", "git-refresh", "", .whole);
+    try fixture.publisher.add(t.allocator, "plugin.git.refresh", "git.refresh", "", .whole);
     try fixture.publisher.commit(t.allocator);
 
     const ctx: catalog.Context = .{ .key = 1, .revision = 1, .facts = .{ .tool = "git" } };
@@ -293,7 +298,7 @@ test "plugin offers: an endpoint outliving its table is refused, never run" {
     defer fixture.deinit();
 
     try fixture.publisher.begin(t.allocator, "git", 1);
-    try fixture.publisher.add(t.allocator, "plugin.git.stage", "git-stage", "", .whole);
+    try fixture.publisher.add(t.allocator, "plugin.git.stage", "git.stage", "", .whole);
     try fixture.publisher.commit(t.allocator);
     const token = fixture.publisher.handle.endpoint(0);
 

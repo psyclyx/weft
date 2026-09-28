@@ -1,12 +1,12 @@
 //! net — raw network access (design §4 Group D `net.connect`), a `.wasm` plugin
-//! (perms `{net}`). `net-open`/`net-open-tls` dial a host, streaming the socket
-//! into a buffer; `net-send` writes bytes; `net-close` hangs up. This is the
+//! (perms `{net}`). `net.open`/`net.open-tls` dial a host, streaming the socket
+//! into a buffer; `net.send` writes bytes; `net.close` hangs up. This is the
 //! TRANSPORT primitive — HTTP/nREPL/etc. framing is built in the guest over it
 //! (design: only TLS is native).
 //!
 //! Connections are INSTANCES, like REPLs and consoles: every open takes a fresh
 //! buffer (`*net*`, `*net:2*`, …) and is addressed by it, so a second dial never
-//! hangs up the first. `net-send`/`net-close` act on the connection whose buffer
+//! hangs up the first. `net.send`/`net.close` act on the connection whose buffer
 //! is focused, else the most recent — echoing which. Host-side sessions were
 //! already multi-instance (`net_session.zig`); this table is the guest's own
 //! buffer→handle index.
@@ -23,7 +23,7 @@ var sni_buf: [256]u8 = undefined;
 /// `params` is the command's argument shape, written the way a person reads
 /// it back (`describeCommand`): it is what the palette shows beside the row,
 /// what the `:` line hints while you type, and what gets ASKED for when you
-/// run `net-open` without saying where.
+/// run `net.open` without saying where.
 const Cmd = struct {
     name: []const u8,
     handler: *const fn () void,
@@ -31,10 +31,10 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "net-open", .arity = .whole, .call = open, .params = "host:port", .summary = "dial a host, streaming the socket into its own buffer" },
-    .{ .name = "net-open-tls", .arity = .whole, .call = openTls, .params = "host:port sni", .summary = "dial a host over TLS, verifying the given SNI name" },
-    .{ .name = "net-send", .arity = .whole, .call = send, .params = "bytes", .summary = "write bytes to this buffer's connection" },
-    .{ .name = "net-close", .arity = .whole, .call = close, .summary = "hang up this buffer's connection; others stay live" },
+    .{ .name = "net.open", .arity = .whole, .call = open, .params = "host:port", .summary = "Dial a host, streaming the socket into its own buffer.", .label = "Open Connection", .icon = "network", .prompts = true },
+    .{ .name = "net.open-tls", .arity = .whole, .call = openTls, .params = "host:port sni", .summary = "Dial a host over TLS, verifying the given SNI name.", .label = "Open TLS Connection", .icon = "network", .prompts = true },
+    .{ .name = "net.send", .arity = .whole, .call = send, .params = "bytes", .summary = "Write bytes to this buffer's connection.", .label = "Send to Connection", .prompts = true },
+    .{ .name = "net.close", .arity = .whole, .call = close, .summary = "Hang up this buffer's connection, leaving the others live.", .label = "Close Connection" },
 };
 
 fn describeExtra() void {

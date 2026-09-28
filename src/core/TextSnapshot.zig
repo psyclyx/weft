@@ -85,9 +85,9 @@ pub fn selectionRange(self: *const TextSnapshot, i: usize) ?Range {
     return .{ .start = @min(e.anchor, e.head), .end = @max(e.anchor, e.head) };
 }
 
-/// The primary selection's head.
+/// The primary selection's caret (`Editor.Ends.caretIn`).
 pub fn cursorOffset(self: *const TextSnapshot) usize {
-    return self.selections[self.primary].head;
+    return self.selections[self.primary].caretIn(&self.rope);
 }
 
 /// Is `row` hidden by a fold (its line start inside an invisible range)?

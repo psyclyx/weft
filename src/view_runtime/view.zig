@@ -78,6 +78,34 @@ pub const Instance = struct {
         };
     }
 
+    /// A row's primary field and the node that shows it (doc/chrome.md §5.2).
+    pub const PrimaryField = struct { node: semantic.scene.NodeId, ref: semantic.scene.FieldRef };
+
+    /// The field editing the row focused by `path` would edit: the primary
+    /// field of the deepest node on the path that is one or holds one as a
+    /// child, else the focused leaf itself when it is a field (a scene that
+    /// marks nothing primary). Null when the row holds no field at all.
+    pub fn primaryField(self: *const Instance, path: semantic.focus.Path) ?PrimaryField {
+        var index = path.nodes.len;
+        while (index > 0) {
+            index -= 1;
+            const at = self.node(path.nodes[index]) orelse continue;
+            switch (at.content) {
+                .field => |value| if (value.primary) return .{ .node = at.id, .ref = value.ref },
+                .container => |container| for (container.children) |child| switch (child.content) {
+                    .field => |value| if (value.primary) return .{ .node = child.id, .ref = value.ref },
+                    else => {},
+                },
+                else => {},
+            }
+        }
+        const leaf = self.node(path.leaf() orelse return null) orelse return null;
+        return switch (leaf.content) {
+            .field => |value| .{ .node = leaf.id, .ref = value.ref },
+            else => null,
+        };
+    }
+
     pub fn focusPath(self: *const Instance, id: semantic.scene.NodeId, output: []semantic.scene.NodeId) Error!?semantic.focus.Path {
         var depth: usize = 0;
         const found = try buildPath(&self.scene, id, output, &depth);
@@ -231,6 +259,7 @@ fn cloneNode(gpa: std.mem.Allocator, node: semantic.scene.Node) std.mem.Allocato
             .ref = field_value.ref,
             .placeholder = try gpa.dupe(u8, field_value.placeholder),
             .single_line = field_value.single_line,
+            .primary = field_value.primary,
         } },
         .action => |action| .{ .action = .{
             .action = try gpa.dupe(u8, action.action),

@@ -3,16 +3,17 @@
 //! an `*output*` buffer and fills it asynchronously with the command's stdout via
 //! the native `proc` surface — the output lands authored as this plugin's peer,
 //! off the frame thread. perms `{proc, timer}`; grant_max edit (it only writes
-//! its own tool buffer). The command line comes either as an arg (`run-command`)
-//! or from the current buffer line (`run-line`, for scratch/command notes).
+//! its own tool buffer). The command line comes either as an arg (`run.command`)
+//! or from the current buffer line (`run.line`, for scratch/command notes).
 //! Navigation is `output.zig`'s: each row's location is captured when the fill
 //! lands, and Return visits the focused row's location.
 
 const std = @import("std");
 const weft = @import("weft");
 const output = @import("weft_output");
+const statusline = @import("weft_statusline");
 
-/// Scratch for the shell command line built from a buffer slice (`run-line`),
+/// Scratch for the shell command line built from a buffer slice (`run.line`),
 /// which borrows `weft`'s read scratch and so must be copied before use.
 var cmd_buf: [1 << 12]u8 = undefined;
 
@@ -29,9 +30,9 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "run-command", .call = runCommand, .arity = .whole, .params = "command", .summary = "run a shell command, streaming it into *output*" },
-    .{ .name = "run-line", .arity = .one, .call = runLine, .summary = "run the current line as a shell command" },
-    .{ .name = "output-visit", .call = output.visit, .arity = .one, .summary = "open the location the focused output row names" },
+    .{ .name = "run.command", .call = runCommand, .arity = .whole, .params = "command", .summary = "Run a shell command, streaming its output into *output*.", .label = "Run Command", .menu = "Terminal", .group = "run", .order = 1, .prompts = true },
+    .{ .name = "run.line", .arity = .one, .call = runLine, .summary = "Run the current line as a shell command.", .label = "Run Line", .menu = "Run", .group = "run", .order = 2 },
+    .{ .name = "run.visit-output", .call = output.visit, .arity = .one, .summary = "Open the location the focused output row names.", .internal = true },
 };
 
 fn describeExtra() void {
@@ -41,7 +42,9 @@ fn describeExtra() void {
 fn initExtra() void {
     // `*output*` is navigable: Return jumps to the stack frame or compile error
     // the focused row points at, j/k walk, q goes back.
-    output.installMode("output", "output-visit");
+    output.installMode("output", "run.visit-output");
+    // A running command on the status line, beside a running build (94).
+    statusline.bind(.{ .all = &.{} }, .core, 93);
 }
 
 // A shell, spelled out. `run` is the one consumer that genuinely wants one —
@@ -50,7 +53,19 @@ fn initExtra() void {
 // than a string that happens to reach a shell, and it is why every OTHER
 // consumer of this library no longer has a shell in its path at all.
 fn shell(line: []const u8) void {
-    output.show(&.{ "sh", "-c", line }, out_name, "output", .{ .want_err = true });
+    output.show(&.{ "sh", "-c", line }, out_name, "output", .{ .want_err = true, .running = .{ .key = running_key, .what = "run" } });
+}
+
+// ── A running command, on the status line (doc/chrome.md §4.3) ──────────────
+
+/// Said on the place a command started in while it runs (`output.Running`).
+const running_key = "run.running";
+
+fn onSlotFire(session: i32) callconv(.c) void {
+    const handle: u32 = @bitCast(session);
+    _ = statusline.ask(handle) orelse return;
+    if (output.runningHere(running_key) == null) return statusline.tell(handle, &.{});
+    statusline.tell(handle, &.{.{ .text = "running…", .role = .accent, .priority = 55, .icon = "play", .tooltip = "A shell command is running" }});
 }
 
 /// Run the command line passed as arg 0; no-op if none was given.
@@ -68,4 +83,5 @@ fn runLine() void {
 
 comptime {
     weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra }).exportAll();
+    weft.exportCallback("on_slot_fire", &onSlotFire);
 }

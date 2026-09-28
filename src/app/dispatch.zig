@@ -5,7 +5,7 @@
 //! editing path around the ABI, and no synthesis of text from a key. Vertical
 //! motion and paging are view-computed (goal-x over rendered geometry), the
 //! interactive override the core's scalar-column fallback can't do. Also the
-//! menu command handlers (`menu-escape`, `which-key-now`).
+//! menu command handlers (`mode.leave-menu`, `which-key.show`).
 //!
 //! **Menu enter/return (task #19 item 2): paired transients, not a bare
 //! `enterMode`.** A bound key whose command NAMES a declared menu mode
@@ -16,15 +16,15 @@
 //! `git-commit-menu`. Entering one now PUSHES a paired
 //! transient (`core/ctx.zig`'s `Ctx.pushTransient`, backed by
 //! `core.Head.transient_stack`) instead of a bare `Head.enterMode`; the
-//! matching leaf auto-pop and `menu-escape` are the POP, reconstructed from
+//! matching leaf auto-pop and `mode.leave-menu` are the POP, reconstructed from
 //! the known stack depth (`ourTransientTop`/`popOurTransient` below) rather
 //! than threaded through as a live handle — the stack, not a Zig scope, is
 //! the durable record spanning however many keypresses the menu stays open.
 //! NOT migrated to PAIRED TRANSIENTS this pass (deliberately — see
 //! `ctx.zig`'s module doc): guest-initiated `weft.setMode` (every plugin's
-//! OWN direct menu entry — the `weft.transient` flag menus `git-push`/
-//! `git-pull`/`git-fetch` (sticky, and now generated rather than
-//! hand-written), `git-reset-menu`, vim's `op-pending`/`op-to`, helix's
+//! OWN direct menu entry — the `weft.transient` flag menus `git.push`/
+//! `git.pull`/`git.fetch` (sticky, and now generated rather than
+//! hand-written), `git-reset-menu`, vim's `op-pending`/`op-inner`/`op-around`, helix's
 //! `helix-op`, files's `files-confirm`) stays
 //! on the legacy `Head.menu_return` table (not `Head.transient_stack`),
 //! which therefore CANNOT be deleted — it is still the only record for
@@ -33,15 +33,15 @@
 //! `hSetMode` now captures a `Ctx` and calls `Ctx.enterMode`, not raw
 //! `Head.enterMode`/`Head.enterModeRaw` — without changing WHICH table
 //! (`menu_return` vs `transient_stack`) a guest menu lands in. The leaf
-//! auto-pop / `menu-escape` logic below checks WHICH mechanism owns the
+//! auto-pop / `mode.leave-menu` logic below checks WHICH mechanism owns the
 //! currently-open menu (`ourTransientTop`) and falls back to the legacy
 //! `menuReturn` lookup when it isn't ours (also now through the door, both
 //! below) — so all paths keep their exact pre-migration observable
 //! behavior. See `src/e2e/menu_test.zig` for the paired-transient path
-//! driven through this REAL dispatch (enter/leaf/auto-pop, `menu-escape`,
+//! driven through this REAL dispatch (enter/leaf/auto-pop, `mode.leave-menu`,
 //! sticky re-enter, nested LIFO, a leaf's own buffer switch mid-menu, and
 //! the interaction-boundary leak tripwire below) and `project_test.zig`'s
-//! spine test for the real `git-commit-dispatch` → `git-commit` (buffer
+//! spine test for the real `git.commit-dispatch` → `git.commit` (buffer
 //! switch mid-menu) → an ordinary draft entry saved to commit, unmodified
 //! by this migration.
 
@@ -82,7 +82,7 @@ fn popOurTransient(ctx: *core.command.Context, depth: usize) void {
     handle.deinit();
 }
 
-/// `menu-escape` (Escape / C-g, bound in the GLOBAL layer so it works anywhere)
+/// `mode.leave-menu` (Escape / C-g, bound in the GLOBAL layer so it works anywhere)
 /// — leave the current MENU back to its recorded return target. Outside a menu
 /// it is a NO-OP: Escape must never force a mode change, or it drops you into
 /// the editing base (`normal`) inside a read-only projection like git/files —
@@ -116,7 +116,7 @@ pub fn menuEscapeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     return .nil;
 }
 
-/// `which-key-now` (F1) — toggle a which-key peek at the CURRENT mode's keys.
+/// `which-key.show` (F1) — toggle a which-key peek at the CURRENT mode's keys.
 /// It does NOT force-enter a hardcoded "leader": in normal you see the top-level
 /// bindings (the leader prefix among them), in a submenu you see that submenu,
 /// in the git status view its own keys. The shell no longer assumes the root menu is named
@@ -135,7 +135,10 @@ pub fn whichKeyNowHandler(ctx: *core.command.Context, data: ?*anyopaque, args: [
 /// the adjacent row. This is the interactive replacement for the core's
 /// scalar-column `moveVertical` — monospace stays exact (uniform
 /// advances), proportional text tracks the visual column.
-fn visualVertical(ed: *core.Editor, view: *view_mod.View, dir: i32) !void {
+/// Move the caret one VISUAL line up (`dir < 0`) or down, holding its goal
+/// column over rendered geometry — what `cursor.up`/`cursor.down` do in a
+/// pane (`core.pointer.Panes.vertical`), which core cannot measure.
+pub fn visualVertical(ed: *core.Editor, view: *view_mod.View, dir: i32) !void {
     const rope = ed.text();
     const cur = ed.cursorOffset();
     const gx = ed.goalX() orelse try view.xOfOffsetOnRow(rope, cur);
@@ -143,56 +146,10 @@ fn visualVertical(ed: *core.Editor, view: *view_mod.View, dir: i32) !void {
     const pt = rope.offsetToPoint(cur);
     const rows = rope.lineCount();
     // Skip folded rows (shared fold-aware successor — the git status buffer's
-    // j/k bind to cursor-up/down, which land here).
+    // j/k bind to cursor.up/down, which land here).
     const target_row = ed.nextVisibleRow(pt.row, if (dir < 0) -1 else 1, rows) orelse return;
     const target = try view.xToOffsetOnRow(rope, target_row, gx);
     ed.moveToVisual(target, gx);
-}
-
-// ── View-aware motion commands (shell) ──────────────────────────────
-// The interactive, geometry-aware override of the core's scalar-column
-// cursor-up/down and paging — registered by the shell (data = the live `View`),
-// so they SHADOW the core `cursor-*` by late binding and dispatch UNIFORMLY
-// through the keymap. No `if (cmd_name == "cursor-up")` special-case in the hot
-// loop, and paging becomes an ordinary rebindable command (bound in the global
-// layer) instead of a hardcoded keysym branch.
-
-fn viewOf(data: ?*anyopaque) *view_mod.View {
-    return @ptrCast(@alignCast(data.?));
-}
-
-pub fn cursorUpHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    _ = args;
-    if (ctx.semantic) |services| if (try services.moveHeadFocus(ctx.head, ctx.gpa, .previous)) return .nil;
-    const ed = ctx.textEditor() catch return .nil;
-    try visualVertical(ed, viewOf(data), -1);
-    return .nil;
-}
-
-pub fn cursorDownHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    _ = args;
-    if (ctx.semantic) |services| if (try services.moveHeadFocus(ctx.head, ctx.gpa, .next)) return .nil;
-    const ed = ctx.textEditor() catch return .nil;
-    try visualVertical(ed, viewOf(data), 1);
-    return .nil;
-}
-
-fn pageBy(ctx: *core.command.Context, view: *view_mod.View, dir: i32) !void {
-    const rows = view.bodyRows();
-    const ed = ctx.textEditor() catch return;
-    for (0..rows) |_| try visualVertical(ed, view, dir);
-}
-
-pub fn scrollPageUpHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    _ = args;
-    try pageBy(ctx, viewOf(data), -1);
-    return .nil;
-}
-
-pub fn scrollPageDownHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    _ = args;
-    try pageBy(ctx, viewOf(data), 1);
-    return .nil;
 }
 
 // ── Dot-repeat: record the last CHANGE as keystrokes, replay on demand ──────
@@ -321,7 +278,7 @@ pub fn replayDot(ctx: *core.command.Context) void {
     dot.suppress = true;
 }
 
-/// Command handler for `repeat-change` (bound to `.`): replay the last change.
+/// Command handler for `edit.repeat` (bound to `.`): replay the last change.
 pub fn repeatChangeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = data;
     _ = args;
@@ -332,7 +289,7 @@ pub fn repeatChangeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: 
 // ── Macros: the keystroke stream into a named register, and back ──────────
 //
 // The same shape as dot-repeat, one level up: a macro is every key between
-// `macro-record-start` and `macro-record-stop`, and playing it re-feeds them
+// `macro.record-start` and `macro.record-stop`, and playing it re-feeds them
 // through `dispatchSpec` — so it composes exactly as the typing did, whatever
 // grammar or plugin the keys reached. The storage is `ctx.head.macros`
 // (per-head); which keys start, stop and play is the grammar's (vim `q`/`@`,
@@ -352,8 +309,9 @@ fn macroRecord(ctx: *core.command.Context, spec: []const u8, commit: core.TextCo
 }
 
 fn say(ctx: *core.command.Context, comptime fmt: []const u8, args: anytype) void {
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.print(ctx.gpa, fmt, args) catch {};
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    ctx.head.echo.say(ctx.gpa, msg) catch {};
 }
 
 /// A register argument: one printable byte. `null` when the argument is
@@ -431,14 +389,14 @@ fn macroPlay(ctx: *core.command.Context, reg: u8, count: usize) !void {
     };
 }
 
-/// `macro-record-start <reg>`.
+/// `macro.record-start <reg>`.
 pub fn macroRecordStartHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = data;
     try macroStart(ctx, (try registerArg(args, 0)) orelse return error.ArityMismatch);
     return .nil;
 }
 
-/// `macro-record-stop`: file the recording under its register.
+/// `macro.record-stop`: file the recording under its register.
 pub fn macroRecordStopHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = data;
     _ = args;
@@ -446,7 +404,7 @@ pub fn macroRecordStopHandler(ctx: *core.command.Context, data: ?*anyopaque, arg
     return .nil;
 }
 
-/// `macro-record-toggle [reg]`: stop if recording, else start into `reg`
+/// `macro.record-toggle [reg]`: stop if recording, else start into `reg`
 /// (default `@`) — helix's `Q`, which needs no register prompt.
 pub fn macroRecordToggleHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = data;
@@ -458,7 +416,7 @@ pub fn macroRecordToggleHandler(ctx: *core.command.Context, data: ?*anyopaque, a
     return .nil;
 }
 
-/// `macro-play [reg] [count]`: with no register, the last one played, else the
+/// `macro.play [reg] [count]`: with no register, the last one played, else the
 /// last one recorded (vim's `@@`, helix's `q`).
 pub fn macroPlayHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = data;
@@ -552,10 +510,16 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // state that shapes the next real key. It must never reach `feed`, or it
     // dead-ends a pending chord: `SPC :` needs Shift to make the colon, and that
     // intervening Shift event would reset the `space` prefix, so `:` then fires
-    // vim-ex instead of the palette. (Same for any leader key with a shifted or
+    // vim.ex instead of the palette. (Same for any leader key with a shifted or
     // uppercase continuation — `g R`, `SPC C`, …) The compositor emits these as
     // real key events; swallow them here, the one shared dispatch point.
     if (isBareModifier(spec)) return;
+
+    // A new key: its serial, and the end of any paint that was published to
+    // last only until the next key (`Layer.until_key`) — dropped BEFORE the
+    // command runs, so what this key paints survives to the one after.
+    ctx.head.key_serial +%= 1;
+    ctx.caps.layers.expireUntilKey(ctx.gpa);
 
     const macros = &ctx.head.macros;
     macros.key_depth += 1;
@@ -625,7 +589,7 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
             // PAIRED-TRANSIENT push (task #19 item 2, doc/cwa-prior-docs-audit.md §5,
             // `ctx.zig`'s `Ctx.pushTransient`): `Head.transient_stack` durably
             // records the pre-push mode as this frame's return target, so
-            // leaving (the leaf auto-pop below, or `menu-escape`) is the
+            // leaving (the leaf auto-pop below, or `mode.leave-menu`) is the
             // MATCHING pop, not an independent `menuReturn` lookup.
             if (arm == .command and ctx.keymap.modeHasTag(cmd_name, "menu")) {
                 if (std.mem.eql(u8, ctx.head.currentMode(), cmd_name)) {
@@ -695,7 +659,19 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // key there is simply unhandled — nothing is synthesized (§10.1). This IS
     // the hot typing→commit path — fence it so an accidental blocking API here
     // trips in Debug.
-    const commit_cmd = ctx.head.commitCommand(ctx.keymap) orelse return;
+    // Rows focused under `row` take the key as type-ahead (core's, over any
+    // rows — doc/chrome.md §5.2) only where no text commit claims it: the
+    // one predicate, `type_ahead.rowsTakeKeys`, asked before any row moves,
+    // so a picker's query, a prompt's line or snipe's character opened over
+    // a focused row gets its letters.
+    const jumped = core.type_ahead.feed(ctx, commit.bytes) catch |err| blk: {
+        std.log.warn("type-ahead failed: {t}", .{err});
+        break :blk true;
+    };
+    if (jumped) return;
+    // A begun field edit commits too (`scene_edit.textCommit`); anywhere nothing
+    // does, the key is unhandled.
+    const commit_cmd = core.scene_edit.textCommit(ctx.semantic, ctx.keymap, ctx.head, ctx.head.currentMode()) orelse return;
     core.task.beginHotSection();
     defer core.task.endHotSection();
     _ = core.command.run(ctx.commands, ctx, commit_cmd, &.{.{ .string = commit.bytes }}) catch |err| {
@@ -823,8 +799,7 @@ fn echoDisabled(ctx: *core.command.Context, plane: *const core.intent.Plane, d: 
     const why = if (d.reason.message.len > 0) d.reason.message else d.reason.reason;
     var buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{s}: {s}", .{ plane.catalog.intentionName(d.intention), why }) catch why;
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    ctx.head.echo.say(ctx.gpa, msg) catch {};
 }
 
 fn echoAmbiguity(ctx: *core.command.Context, plane: *const core.intent.Plane, a: core.catalog.Ambiguity) void {
@@ -834,7 +809,6 @@ fn echoAmbiguity(ctx: *core.command.Context, plane: *const core.intent.Plane, a:
         a.a.owner,
         a.b.owner,
     }) catch "intention: ambiguous";
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    ctx.head.echo.say(ctx.gpa, msg) catch {};
     std.log.warn("dispatch: {s}", .{msg});
 }

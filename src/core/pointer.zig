@@ -47,6 +47,7 @@ const command = @import("command.zig");
 const Context = command.Context;
 const Value = command.Value;
 const Buffers = @import("Buffers.zig");
+const scene_edit = @import("scene_edit.zig");
 
 const ok: Value = .nil;
 
@@ -79,6 +80,10 @@ pub const Chrome = struct {
     part: Part = .body,
     /// The entry a tab shows.
     entry: ?Buffers.Id = null,
+    /// The pane a status segment describes, when the status line it is on
+    /// is PRESENTED by another pane (a bar showing the primary context's
+    /// status): its command acts there, not in the pane it is drawn in.
+    acts_in: ?PaneRef = null,
     /// A segment's command, `name [argument]`, copied (the segment itself
     /// lives in last frame's arena). Empty: not clickable.
     command_buf: [max_command]u8 = undefined,
@@ -138,14 +143,25 @@ pub const Gesture = struct {
     kind: Kind = .none,
     button: u8 = 0,
     clicks: u8 = 0,
+    /// A single click that came after the double-click window of the
+    /// previous press, but not long after (the platform's `slow_click_ms`):
+    /// on the row it already focused, a list control's "rename".
+    slow: bool = false,
+    /// The scene node the previous press went down on, if any.
+    prior: ?NodeRef = null,
     mods: Mods = .{},
     /// Where the pointer is now.
     hit: Hit = .{},
     /// Where the button of the gesture in progress went down.
     origin: Hit = .{},
     /// Whether a drag has already anchored its selection at `origin`.
-    /// Cleared by every press; set by `pointer-drag-select`.
+    /// Cleared by every press; set by `pointer.drag-select`.
     selecting: bool = false,
+    /// Whether this gesture's first click BEGAN an edit (a slow click on
+    /// the focused row). Its double click is then an activation that ends
+    /// the edit on the way, not a double click inside a name being edited.
+    /// Set by `pointer.click` on each first click.
+    began_edit: bool = false,
 };
 
 /// Layout operations a pointer command needs and core cannot perform:
@@ -160,6 +176,12 @@ pub const Panes = struct {
     /// Scroll `pane` by `rows` (negative is up), keeping what the pane
     /// focuses — the caret, a scene's focused row — inside the new view.
     scroll: *const fn (*anyopaque, *Context, PaneRef, i32) void,
+    /// Move the focused pane's caret one VISUAL line (`dir` < 0 is up),
+    /// holding its goal column over the geometry the pane rendered. False
+    /// when there is nothing to measure against, and `cursor.up`/`down`
+    /// then move by logical line. One command, a door for what core cannot
+    /// see — not a second registration shadowing the first.
+    vertical: ?*const fn (*anyopaque, *Context, i32) bool = null,
 };
 
 // ── Keyspecs ────────────────────────────────────────────────────────
@@ -177,6 +199,12 @@ pub fn gestureName(buf: []u8, kind: Kind, button: u8, clicks: u8) []const u8 {
         .wheel, .hover, .none => return "",
     } catch "";
 }
+
+/// Hover has no keyspec: the keymap never sees it. The one place it is an
+/// input is an active interaction that binds it by this name (a menu whose
+/// highlight follows the pointer), handed it when the pointer comes to rest
+/// on a new target (`app/pointer.zig`).
+pub const hover_input = @import("weft_view_runtime").interaction.hover_input;
 
 pub const WheelDir = enum { up, down, left, right };
 
@@ -325,10 +353,21 @@ fn cPointerClick(ctx: *Context, args: struct {}) anyerror!Value {
     if (!focusHitPane(ctx)) return activateInPlace(ctx);
     const hit = ctx.head.pointer.hit;
     if (hit.node) |node| {
+        // A list focused by ROWS reads the pointer as a list control does
+        // (doc/chrome.md §5.2), whatever the grammar bound: a double click
+        // activates the row the first click focused, and a slow second
+        // click on the focused row edits its name.
+        const rows = if (ctx.semantic) |services| services.granularityFor(ctx.head) == .row else false;
+        if (rows and ctx.head.pointer.clicks >= 2) return if (ctx.head.pointer.clicks == 2) cPointerActivate(ctx, .{}) else ok;
+        const again = rows and slowClickOnFocus(ctx, node);
         // A click is THE selection, as it is in text: marked rows go.
         ctx.head.scene_selection.collapse();
         try focusNode(ctx, node);
         if (isActionNode(ctx, node)) _ = try activateActionNode(ctx);
+        ctx.head.pointer.began_edit = if (again) scene_edit.begin(ctx.semantic.?, ctx.head, ctx.gpa) catch |err| switch (err) {
+            error.ActionRefused, error.ReadOnly => false,
+            else => return err,
+        } else false;
         return ok;
     }
     const off = hit.offset orelse return ok;
@@ -343,14 +382,17 @@ fn cPointerClick(ctx: *Context, args: struct {}) anyerror!Value {
 /// A click on the pane's chrome: a tab's body shows its entry, its close
 /// glyph closes it, and a status segment runs the command it declared. The
 /// pane is focused first, so a segment's command acts for the entry of the
-/// status line it sits in.
+/// status line it sits in — which, on a bar presenting another context's
+/// status, is that context's pane.
 fn clickChrome(ctx: *Context, chrome: Chrome) anyerror!Value {
-    _ = focusHitPane(ctx);
+    if (chrome.acts_in) |pane| {
+        if (ctx.panes) |panes| _ = panes.focus(panes.context, ctx, pane);
+    } else _ = focusHitPane(ctx);
     switch (chrome.kind) {
         .tab => {
             const entry = chrome.entry orelse return ok;
             if (chrome.part == .close) return closeEntry(ctx, entry);
-            _ = try command.run(ctx.commands, ctx, "buffer-switch", &.{.{ .integer = entry }});
+            _ = try command.run(ctx.commands, ctx, "buffer.switch", &.{.{ .integer = entry }});
         },
         .status => try runLine(ctx, chrome.command()),
     }
@@ -368,7 +410,7 @@ fn runLine(ctx: *Context, line: []const u8) !void {
     _ = try command.run(ctx.commands, ctx, name, if (rest.len > 0) &.{.{ .string = rest }} else &.{});
 }
 
-/// Close `entry` through the ordinary `buffer-close` (which refuses a dirty
+/// Close `entry` through the ordinary `buffer.close-unmodified` (which refuses a dirty
 /// one), coming back to the entry that was active when it was another one —
 /// a borrow (`Buffers.withEntry`), so the round trip records no jump.
 fn closeEntry(ctx: *Context, entry: Buffers.Id) anyerror!Value {
@@ -377,7 +419,7 @@ fn closeEntry(ctx: *Context, entry: Buffers.Id) anyerror!Value {
 }
 
 fn closeActive(ctx: *Context) anyerror!Value {
-    return command.run(ctx.commands, ctx, "buffer-close", &.{});
+    return command.run(ctx.commands, ctx, "buffer.close-unmodified", &.{});
 }
 
 /// Close the tab under the pointer, wherever on the tab it is (a middle
@@ -428,10 +470,25 @@ fn cPointerActivate(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (!focusHitPane(ctx)) return activateInPlace(ctx);
     const node = ctx.head.pointer.hit.node orelse return ok;
+    if (ctx.semantic) |services| if (scene_edit.begun(services, ctx.head)) {
+        // A double click inside a name ALREADY being edited is the field's,
+        // as it is in any text field: it selects a word there, and neither
+        // commits the edit nor activates the row — whichever command a
+        // grammar bound the gesture to (ide's `double-mouse-1` comes here
+        // over a scene). One whose first click began the edit is not.
+        if (!ctx.head.pointer.began_edit and onEditedField(ctx, node)) {
+            _ = try scene_edit.selectWord(services, ctx.head, ctx.gpa);
+            return ok;
+        }
+        // Elsewhere the gesture is an activation, and the edit ends first:
+        // one begun on the way (a slow first click) or left untyped applies
+        // nothing; a typed one is committed, as leaving its row commits it.
+        _ = try scene_edit.commit(services, ctx.head, ctx.gpa);
+    };
     try focusNode(ctx, node);
     if (isActionNode(ctx, node)) return activateActionNode(ctx);
     // Opening a row's target is what a double click on a listing is FOR.
-    _ = try command.run(ctx.commands, ctx, "target-open-focused", &.{});
+    _ = try command.run(ctx.commands, ctx, "target.open", &.{});
     return ok;
 }
 
@@ -465,6 +522,30 @@ fn cScrollWheelDown(ctx: *Context, args: struct {}) anyerror!Value {
 
 // ── Action nodes ────────────────────────────────────────────────────
 
+/// Whether this press is a slow second click on the row the head already
+/// focuses, which the previous press went down on too — the list-control
+/// gesture for editing a row's name. Not while that row is being edited:
+/// a click inside an edit places its caret.
+fn slowClickOnFocus(ctx: *Context, node: NodeRef) bool {
+    const g = &ctx.head.pointer;
+    if (!g.slow or g.clicks != 1) return false;
+    const prior = g.prior orelse return false;
+    if (!prior.view.eql(node.view) or prior.node != node.node) return false;
+    const selection = &ctx.head.scene_selection;
+    if (selection.edit != null) return false;
+    const view = selection.view orelse return false;
+    return view.eql(node.view) and selection.head() == node.node;
+}
+
+/// Whether `node` is the field node being edited — the focus's leaf while
+/// an edit holds it.
+fn onEditedField(ctx: *Context, node: NodeRef) bool {
+    const selection = &ctx.head.scene_selection;
+    if (selection.edit == null) return false;
+    const view = selection.view orelse return false;
+    return view.eql(node.view) and selection.head() == node.node;
+}
+
 fn isActionNode(ctx: *Context, node: NodeRef) bool {
     const services = ctx.semantic orelse return false;
     const instance = services.views.get(node.view) orelse return false;
@@ -473,7 +554,7 @@ fn isActionNode(ctx: *Context, node: NodeRef) bool {
 }
 
 /// Activate the focused scene node when it is an `action` node. The same
-/// reference answers a click (`pointer-click`) and a key
+/// reference answers a click (`pointer.click`) and a key
 /// (`std.target.activate`, derived for action nodes by `view_offers.zig`),
 /// so the two cannot disagree.
 pub fn activateFocusedAction(ctx: *Context) anyerror!Value {
@@ -493,17 +574,17 @@ fn cActivateFocusedAction(ctx: *Context, args: struct {}) anyerror!Value {
 }
 
 pub const table = [_]command.Command{
-    command.define("pointer-focus-pane", "Focus the pane under the pointer.", cPointerFocusPane),
-    command.define("pointer-focus-point", "Focus the pane and the node or caret under the pointer, keeping a selection the point is inside.", cPointerFocusPoint),
-    command.define("pointer-click", "Focus the pane under the pointer and act at the point: place the caret, focus a node, run an action node.", cPointerClick),
-    command.define("pointer-add-selection", "Add a caret (in text) or the row (in a scene) under the pointer to the selection.", cPointerAddSelection),
-    command.define("pointer-drag-select", "Select from where the button went down to the pointer.", cPointerDragSelect),
-    command.define("pointer-extend-selection", "Extend the selection from the caret to the pointer.", cPointerExtendSelection),
-    command.define("pointer-activate", "Activate the node under the pointer (run its action, or open its target).", cPointerActivate),
-    command.define("pointer-close-tab", "Close the tab under the pointer.", cPointerCloseTab),
-    command.define("scroll-wheel-up", "Scroll the pane under the pointer up one wheel step.", cScrollWheelUp),
-    command.define("scroll-wheel-down", "Scroll the pane under the pointer down one wheel step.", cScrollWheelDown),
-    command.define("activate-focused-action", "Run the action the focused action node names.", cActivateFocusedAction),
+    command.define("pointer.focus-pane", "Focus the pane under the pointer.", cPointerFocusPane).present(.{ .internal = true }),
+    command.define("pointer.focus-point", "Focus the pane and the node or caret under the pointer, keeping a selection the point is inside.", cPointerFocusPoint).present(.{ .internal = true }),
+    command.define("pointer.click", "Focus the pane under the pointer and act there, placing the caret, focusing a node or running an action.", cPointerClick).present(.{ .internal = true }),
+    command.define("pointer.add-selection", "Add a caret in text, or the row in a scene, under the pointer to the selection.", cPointerAddSelection).present(.{ .internal = true }),
+    command.define("pointer.drag-select", "Select from where the button went down to the pointer.", cPointerDragSelect).present(.{ .internal = true }),
+    command.define("pointer.extend-selection", "Extend the selection from the caret to the pointer.", cPointerExtendSelection).present(.{ .internal = true }),
+    command.define("pointer.activate", "Activate the node under the pointer, running its action or opening its target.", cPointerActivate).present(.{ .internal = true }),
+    command.define("pointer.close-tab", "Close the tab under the pointer.", cPointerCloseTab).present(.{ .internal = true }),
+    command.define("scroll.wheel-up", "Scroll the pane under the pointer up one wheel step.", cScrollWheelUp).present(.{ .internal = true }),
+    command.define("scroll.wheel-down", "Scroll the pane under the pointer down one wheel step.", cScrollWheelDown).present(.{ .internal = true }),
+    command.define("view.run-focused-action", "Run the action the focused action node names.", cActivateFocusedAction).present(.{ .internal = true }),
 };
 
 pub fn install(gpa: std.mem.Allocator, commands: *command.Commands) !void {
