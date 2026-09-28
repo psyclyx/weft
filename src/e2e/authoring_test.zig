@@ -1554,6 +1554,7 @@ test "authoring/files: refresh reconciles external churn without retargeting a d
     var clean_field: ?semantic.scene.FieldRef = null;
     var clean_target: ?semantic.scene.TargetLink = null;
     for (view.scene.content.container.children) |row| {
+        if (row.content != .container) continue;
         const name_node = row.content.container.children[2];
         const field_ref = name_node.content.field.ref;
         var snapshot = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
@@ -1596,6 +1597,7 @@ test "authoring/files: refresh reconciles external churn without retargeting a d
     var saw_removed = false;
     var saw_dirty_stale = false;
     for (view.scene.content.container.children) |row| {
+        if (row.content != .container) continue;
         const name_node = row.content.container.children[2];
         var snapshot = try ed.session.system.semantic.fields.get(name_node.content.field.ref).?.snapshot(gpa);
         defer snapshot.deinit();
@@ -1649,7 +1651,12 @@ test "authoring/files: refresh rollback restores retained fields after an interl
     var tail_field: ?semantic.scene.FieldRef = null;
     var removed_name: []const u8 = undefined;
     var retained_name: []const u8 = undefined;
-    for (view.scene.content.container.children, 0..) |row, index| {
+    var index: usize = 0;
+    for (view.scene.content.container.children) |row| {
+        // The listing's own leading `..` row is not a model entry; it takes
+        // no ordinal among the fixture rows below.
+        if (row.content != .container) continue;
+        defer index += 1;
         if (index >= fixture_names.len) return error.TestExpectedEqual;
         const name_node = row.content.container.children[2];
         const field_ref = name_node.content.field.ref;
@@ -1724,7 +1731,9 @@ test "authoring/files: a durable raw-name copy survives rename, deletion, and a 
     ed.runStr("file.open", "source");
     const source_view_ref = ed.toolView().?;
     const source_view = ed.session.system.semantic.views.get(source_view_ref).?;
-    const source_row = source_view.scene.content.container.children[0];
+    // children[0] is the listing's own leading `..` row; the one real entry
+    // follows it.
+    const source_row = source_view.scene.content.container.children[1];
     const source_field_ref = source_row.content.container.children[2].content.field.ref;
     const source_field = ed.session.system.semantic.fields.get(source_field_ref).?;
     var source_snapshot = try source_field.snapshot(gpa);
@@ -1755,12 +1764,13 @@ test "authoring/files: a durable raw-name copy survives rename, deletion, and a 
     const destination_view_ref = ed.toolView().?;
     try t.expect(!destination_view_ref.eql(source_view_ref));
     const empty_view = ed.session.system.semantic.views.get(destination_view_ref).?;
-    try t.expectEqual(@as(usize, 0), empty_view.scene.content.container.children.len);
+    // An otherwise-empty directory still shows its own `..` row.
+    try t.expectEqual(@as(usize, 1), empty_view.scene.content.container.children.len);
     ed.chord("SPC v p");
 
     const pasted_view = ed.session.system.semantic.views.get(destination_view_ref).?;
-    try t.expectEqual(@as(usize, 1), pasted_view.scene.content.container.children.len);
-    const pasted_field_ref = pasted_view.scene.content.container.children[0].content.container.children[2].content.field.ref;
+    try t.expectEqual(@as(usize, 2), pasted_view.scene.content.container.children.len);
+    const pasted_field_ref = pasted_view.scene.content.container.children[1].content.container.children[2].content.field.ref;
     var pasted_snapshot = try ed.session.system.semantic.fields.get(pasted_field_ref).?.snapshot(gpa);
     defer pasted_snapshot.deinit();
     try t.expectEqualStrings(raw_name, pasted_snapshot.value.bytes);
@@ -1790,11 +1800,13 @@ test "authoring/files: symlink rows stay links through generic copy, delete, and
     const source_view_ref = ed.toolView().?;
     const source_view = ed.session.system.semantic.views.get(source_view_ref).?;
     const source_rows = source_view.scene.content.container.children;
-    try t.expectEqual(@as(usize, 3), source_rows.len);
+    // 3 entries, plus the listing's own leading `..` row.
+    try t.expectEqual(@as(usize, 4), source_rows.len);
 
     var found_link = false;
     var link_leaf: ?semantic.scene.NodeId = null;
     for (source_rows) |row| {
+        if (row.content != .container) continue;
         const columns = row.content.container.children;
         const field_ref = columns[2].content.field.ref;
         var snapshot = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
@@ -1861,11 +1873,12 @@ test "authoring/files: symlink rows stay links through generic copy, delete, and
     ed.runStr("file.open", "destination");
     const destination_view_ref = ed.toolView().?;
     const empty = ed.session.system.semantic.views.get(destination_view_ref).?;
-    try t.expectEqual(@as(usize, 0), empty.scene.content.container.children.len);
+    // An otherwise-empty directory still shows its own `..` row.
+    try t.expectEqual(@as(usize, 1), empty.scene.content.container.children.len);
     ed.chord("SPC v p");
     const pasted = ed.session.system.semantic.views.get(destination_view_ref).?;
-    try t.expectEqual(@as(usize, 1), pasted.scene.content.container.children.len);
-    const pasted_row = pasted.scene.content.container.children[0];
+    try t.expectEqual(@as(usize, 2), pasted.scene.content.container.children.len);
+    const pasted_row = pasted.scene.content.container.children[1];
     const pasted_columns = pasted_row.content.container.children;
     try t.expectEqualStrings("↗", pasted_columns[0].content.label);
     var pasted_name = try ed.session.system.semantic.fields.get(pasted_columns[2].content.field.ref).?.snapshot(gpa);
@@ -1917,7 +1930,8 @@ test "authoring/files: Vim named semantic register crosses delete and another vi
     ed.press("quotedbl", "");
     ed.press("a", "");
     ed.press("p", "");
-    try t.expectEqual(@as(usize, 1), ed.session.system.semantic.views.get(ed.toolView().?).?.scene.content.container.children.len);
+    // The pasted entry, plus the listing's own leading `..` row.
+    try t.expectEqual(@as(usize, 2), ed.session.system.semantic.views.get(ed.toolView().?).?.scene.content.container.children.len);
     ed.chord("SPC v a");
     ed.press("y", "y");
     const disk = try core.file.readAlloc(gpa, "destination/kept.txt");
@@ -1936,7 +1950,8 @@ test "authoring/files: generic create and permissions actions apply from an empt
     core.file.deleteFile(gpa, "workspace/.seed");
     ed.runStr("file.open", "workspace");
     const view_ref = ed.toolView().?;
-    try t.expectEqual(@as(usize, 0), ed.session.system.semantic.views.get(view_ref).?.scene.content.container.children.len);
+    // An otherwise-empty directory still shows its own `..` row.
+    try t.expectEqual(@as(usize, 1), ed.session.system.semantic.views.get(view_ref).?.scene.content.container.children.len);
 
     // Creation is an open semantic action declared by config. The provider
     // returns an ordinary field focus; Vim supplies only its normal insert
@@ -1970,8 +1985,10 @@ test "authoring/files: generic create and permissions actions apply from an empt
     ed.press("Escape", "");
 
     const staged = ed.session.system.semantic.views.get(view_ref).?;
-    try t.expectEqual(@as(usize, 2), staged.scene.content.container.children.len);
+    // The two created entries, plus the listing's own leading `..` row.
+    try t.expectEqual(@as(usize, 3), staged.scene.content.container.children.len);
     for (staged.scene.content.container.children) |row| {
+        if (row.content != .container) continue;
         const columns = row.content.container.children;
         try t.expectEqual(@as(usize, 4), columns.len);
         try t.expectEqualStrings("files.metadata", columns[0].role);
@@ -1991,6 +2008,7 @@ test "authoring/files: generic create and permissions actions apply from an empt
     const refreshed = ed.session.system.semantic.views.get(view_ref).?;
     var found_mode = false;
     for (refreshed.scene.content.container.children) |row| {
+        if (row.content != .container) continue;
         const columns = row.content.container.children;
         var name = try ed.session.system.semantic.fields.get(columns[2].content.field.ref).?.snapshot(gpa);
         defer name.deinit();
@@ -2445,12 +2463,15 @@ test "input: a tool entry's field takes commits only — an unbound key and Tab 
 /// Find a semantic name field by its provider's current draft value.
 fn filesRowNamed(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?*const semantic.scene.Node {
     const view = ed.session.system.semantic.views.get(ed.toolView() orelse return null) orelse return null;
-    for (view.scene.content.container.children) |*row| for (row.content.container.children) |*node| {
-        if (!std.mem.eql(u8, node.role, "files.name")) continue;
-        var snap = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(gpa);
-        defer snap.deinit();
-        if (std.mem.eql(u8, snap.value.bytes, want)) return node;
-    };
+    for (view.scene.content.container.children) |*row| {
+        if (row.content != .container) continue;
+        for (row.content.container.children) |*node| {
+            if (!std.mem.eql(u8, node.role, "files.name")) continue;
+            var snap = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(gpa);
+            defer snap.deinit();
+            if (std.mem.eql(u8, snap.value.bytes, want)) return node;
+        }
+    }
     return null;
 }
 

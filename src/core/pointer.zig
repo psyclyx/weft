@@ -322,6 +322,10 @@ fn cPointerAddSelection(ctx: *Context, args: struct {}) anyerror!Value {
     if (!focusHitPane(ctx)) return ok;
     const hit = ctx.head.pointer.hit;
     if (hit.node) |node| {
+        // An action node (a listing's `..`, a menu item read as a row) is a
+        // shortcut, not an entry: it names nothing a bulk transfer could
+        // act on, so C-click leaves the mark set exactly as it was.
+        if (isActionNode(ctx, node)) return ok;
         const scene = &ctx.head.scene_selection;
         const same_view = if (scene.view) |v| v.eql(node.view) else false;
         const kept = if (same_view) scene.primaryRows() else null;

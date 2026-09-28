@@ -906,7 +906,8 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     core.file.deleteFile(gpa, "create-dir/.seed");
     ed.runStr("file.open", "create-dir");
     const create_view = ed.toolView().?;
-    try t.expectEqual(@as(usize, 0), ed.session.system.semantic.views.get(create_view).?.scene.content.container.children.len);
+    // An otherwise-empty directory still shows its own `..` row.
+    try t.expectEqual(@as(usize, 1), ed.session.system.semantic.views.get(create_view).?.scene.content.container.children.len);
     ed.chord("SPC v n");
     ed.press("i", "");
     ed.typeText("made.txt");
@@ -954,7 +955,8 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.press("quotedbl", "");
     ed.press("a", "");
     ed.press("p", "");
-    try t.expectEqual(@as(usize, 1), ed.session.system.semantic.views.get(ed.toolView().?).?.scene.content.container.children.len);
+    // The pasted entry, plus the listing's own leading `..` row.
+    try t.expectEqual(@as(usize, 2), ed.session.system.semantic.views.get(ed.toolView().?).?.scene.content.container.children.len);
     ed.chord("SPC v a");
     ed.press("y", "y");
     const copied = try core.file.readAlloc(gpa, "copy-destination/source.txt");

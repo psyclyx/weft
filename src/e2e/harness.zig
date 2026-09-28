@@ -841,6 +841,7 @@ pub const Editor = struct {
         const view_ref = self.toolView() orelse return error.NoFilesView;
         const instance = self.session.system.semantic.views.get(view_ref) orelse return error.StaleView;
         for (instance.scene.content.container.children) |row| {
+            if (row.content != .container) continue;
             for (row.content.container.children) |node| {
                 if (!std.mem.eql(u8, node.role, "files.name") or node.content != .field) continue;
                 var snap = try self.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(self.gpa);

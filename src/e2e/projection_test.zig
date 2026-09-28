@@ -657,6 +657,7 @@ pub fn openOk(ed: *Editor, spec: []const u8) bool {
 fn nameNode(ed: *Editor, view: semantic_model.view.Ref, name: []const u8) !semantic_model.scene.NodeId {
     const instance = ed.session.system.semantic.views.get(view) orelse return error.StaleView;
     for (instance.scene.content.container.children) |row| {
+        if (row.content != .container) continue;
         for (row.content.container.children) |node| {
             if (!std.mem.eql(u8, node.role, "files.name") or node.content != .field) continue;
             var snap = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(ed.gpa);

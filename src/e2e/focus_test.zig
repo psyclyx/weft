@@ -98,6 +98,7 @@ fn nameNode(ed: *Editor, name: []const u8) !h.semantic_model.scene.NodeId {
     const view_ref = ed.toolView() orelse sidebarView(ed) orelse return error.NoFilesView;
     const instance = ed.session.system.semantic.views.get(view_ref) orelse return error.StaleView;
     for (instance.scene.content.container.children) |row| {
+        if (row.content != .container) continue;
         for (row.content.container.children) |node| {
             if (!std.mem.eql(u8, node.role, "files.name") or node.content != .field) continue;
             var snap = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(ed.gpa);
