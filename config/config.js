@@ -446,6 +446,11 @@ weft.bind("normal", "SPC o a", "llm.ask-line"); // one-shot: each ask is its own
 weft.bind("normal", "SPC o h", "http.get");     // fetch a URL into its own *http* buffer
 weft.bind("normal", "SPC o p", "problems.open");     // the diagnostics list, in the bottom panel
 weft.bind("normal", "SPC o t", "terminal.open");     // the shell, in the bottom panel
+weft.bind("normal", "SPC o T", "terminal.new");      // another shell beside it
+// A terminal read as text: its prompts are landmarks (doc/terminal.md §7).
+weft.bind("normal", "[ [", ["std.navigation.landmark-prev"]);
+weft.bind("normal", "] ]", ["std.navigation.landmark-next"]);
+weft.bind("normal", "SPC t o", ["std.selection.landmark-body"]); // a command's output
 weft.bind("normal", "SPC o P", "panel.toggle"); // hide or show whichever the panel holds
 weft.bind("normal", "SPC u", "undo-tree.open");     // the undo history as a tree, docked right
 

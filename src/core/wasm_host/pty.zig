@@ -183,11 +183,29 @@ pub fn hGridPublish(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
         const line = title[0 .. std.mem.indexOfAny(u8, title, "\r\n") orelse title.len];
         b.setTitle(gpa, line[0..@min(line.len, 256)]) catch {};
     }
+    if (applied.cwd) |dir| followCwd(p, b, dir);
     _ = grid_mirror.ensureDocument(gpa, bufs, b) catch return;
     if (b.declared_posture != .capture) grid_mirror.sync(gpa, bufs, b) catch |err| {
         std.log.warn("grid: the text of {s} could not follow its cells: {t}", .{ b.name, err });
     };
     results[0] = 0;
+}
+
+/// The program behind grid entry `b` says it is in local directory `dir`
+/// (a shell's OSC 7): the entry's place becomes that directory, so what is
+/// opened or started from it — a relative file, another terminal — lands
+/// where the shell is. A directory that is not one, or no embedding to say
+/// what place it is, leaves the place as it was.
+fn followCwd(p: *WasmPlugin, b: *Buffers.Buffer, dir: []const u8) void {
+    if (dir.len == 0 or dir[0] != '/') return;
+    const ctx = p.activeCtx();
+    const realizer = ctx.realizer orelse return;
+    switch (@import("../place.zig").realize(b.place, realizer)) {
+        .path => |now| if (std.mem.eql(u8, std.mem.trimEnd(u8, now, "/"), std.mem.trimEnd(u8, dir, "/"))) return,
+        else => {},
+    }
+    const place = realizer.placeOf(ctx, dir) orelse return;
+    ctx.buffers.setPlace(b.id, place);
 }
 
 /// `wl_entry_extent(name, out) -> 1|0`: the room the pane showing the entry

@@ -120,6 +120,9 @@ pub const Tag = enum(u8) {
     /// Rows above the screen (a terminal's scrollback): `HistoryHead`, then
     /// `count` rows, each a little-endian `u32` cell count and its cells.
     history = 2,
+    /// Where the program is: an absolute local directory (a shell's OSC 7
+    /// cwd, decoded). The entry's place becomes it.
+    cwd = 3,
     _,
 };
 

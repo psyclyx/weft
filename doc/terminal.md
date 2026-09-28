@@ -311,7 +311,69 @@ its cell, in the shape the grammar's mode asks for.
 **Back in.** `i` (vim, helix), a click, or C-` resume capture as before; a
 drag in the pane selects instead of resuming.
 
-## 7. What stayed
+## 7. Shell integration
+
+A shell tells its terminal where its prompts are, when a command runs and
+ends, and where it is — if something asks it to. weft asks automatically,
+as ghostty, kitty and VS Code do. `weft.set("terminal", "integration",
+"off")` opts out; a `shell` setting that is a whole command line (anything
+with a space) is run as written, uninjected.
+
+**Injection** (`src/plugins/terminal/shell/`, packaged by
+`nix/shell-integration.nix` so it reaches the runtime; the plugin bakes the
+path in at build time — `build.zig`'s `terminal_build.shell_integration`,
+from `WEFT_SHELL_INTEGRATION` — and the same variable in the environment
+overrides it at spawn). A bare shell program starts through `launch`:
+
+- **zsh**: `ZDOTDIR` points at weft's `zsh/`. Its `.zshenv` puts the user's
+  `ZDOTDIR` back (unset when they had none), sources the user's `.zshenv`,
+  and loads `weft-integration.zsh` into an interactive shell; zsh then reads
+  the user's `.zshrc` from the restored `ZDOTDIR` as it would have. The
+  integration sets itself up at the first prompt, after the user's config,
+  so its marks wrap the prompt the user chose, and its precmd hook goes last.
+- **bash**: `--rcfile bash/weft.bash`, which sources `~/.bashrc` first, as an
+  interactive bash would have, then sets `PROMPT_COMMAND` (first, to see the
+  status) and `PS0`.
+- **fish**: weft's directory goes first on `XDG_DATA_DIRS`, so fish sources
+  `fish/vendor_conf.d/weft.fish`, which puts `XDG_DATA_DIRS` back and wraps
+  `fish_prompt` at the first prompt.
+
+Each then sources `${XDG_CONFIG_HOME:-~/.config}/weft/shell/<shell>` when it
+exists: the user's own hook. `TERM_PROGRAM=weft` stays, for an rc file to
+test, as `INSIDE_EMACS` is tested.
+
+The scripts are weft's own (MIT). Ghostty's, pinned in npins, were read for
+the injection technique but not copied: its zsh and bash integrations are
+GPLv3, derived from kitty's, so reusing them would put GPL code in weft's
+tree.
+
+**What the shell says, and what weft does with it:**
+
+| sequence | from | becomes |
+|---|---|---|
+| OSC 133 A / B | around the prompt | the cells' marks (`Cell.mark.prompt`, `.input`), read from ghostty's semantic content |
+| OSC 133 C / D;N | a command starts / ends | (the key routing of §8) |
+| OSC 7 `file://host/path` | every prompt, every `cd` | the `cwd` section: the entry's PLACE becomes that directory (`followCwd`, through `place.Realizer.placeOf`), so a relative file opened from it, or a new terminal started from it, is where the shell is |
+| OSC 0/2 | the title | the `title` section: `Buffer.title`, the tab's label |
+
+**Landmarks.** A row that starts a prompt — a prompt row under a row that is
+not all prompt, so a two-row prompt is one landmark and a command that
+printed nothing does not merge two — is a LANDMARK
+(`grid_mirror.landmark`). In a terminal read as text:
+
+- `std.navigation.landmark-prev` / `-next` move the caret to the previous or
+  next prompt, at the start of its command line (`grid.landmark-prev`,
+  `grid.landmark-next`);
+- `std.selection.landmark-body` selects the output of the command at the
+  caret: the rows after its command line up to the next prompt, trailing
+  blank rows left out (`grid.select-landmark-body`).
+
+Core offers the three only on an entry with landmarks, so a grammar binds
+the word and every other entry's key keeps its meaning: vim and helix `[[` /
+`]]` and `SPC t o`, ide C-Up / C-Down (as VS Code's terminal), emacs
+`C-c C-p` / `C-c C-n` / `C-c C-o` (as comint).
+
+## 8. What stayed
 
 - `terminal.session` is still published on the place the shell starts in.
 - `[process exited N]` is written onto the screen, and the next key or C-`
@@ -325,7 +387,7 @@ mode, its input line, and `TERM=dumb`/`--noediting`.
 person edits and searches, with output appended as a CRDT peer. That is a
 different thing from a screen, so moving them is not a rename.
 
-## 8. Not done
+## 9. Not done
 
 - **A remote pty.** A shell in a peer's or ssh's place needs the pty door
   answered by that place's authority (§1).
@@ -337,3 +399,8 @@ different thing from a screen, so moving them is not a rename.
 - **Search matches** are not highlighted on the cells; the caret lands on
   them.
 - **Kitty graphics and hyperlinks (OSC 8)**, and a terminal status segment.
+- **fish's integration is untested**: no fish in the test environment. zsh
+  and bash are tested end to end (§7).
+- **OSC 7's host is not checked.** A shell on another machine (over ssh)
+  reporting its directory moves the entry's place to the local directory of
+  that name, when there is one.

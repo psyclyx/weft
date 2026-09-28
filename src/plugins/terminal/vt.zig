@@ -40,6 +40,8 @@ pub const Vt = struct {
     hist_mark: c.GhosttyTrackedGridRef = null,
     /// The title changed (OSC 0/2) since it was last published.
     title_dirty: bool = false,
+    /// The program said where it is (OSC 7) since that was last published.
+    pwd_dirty: bool = false,
 
     pub const Error = error{VtUnavailable};
 
@@ -77,11 +79,26 @@ pub const Vt = struct {
         _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_USERDATA, @ptrCast(self));
         _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_WRITE_PTY, @ptrCast(&writePty));
         _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, @ptrCast(&titleChanged));
+        _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_PWD_CHANGED, @ptrCast(&pwdChanged));
     }
 
     fn titleChanged(_: c.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
         const self: *Vt = @ptrCast(@alignCast(userdata orelse return));
         self.title_dirty = true;
+    }
+
+    fn pwdChanged(_: c.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
+        const self: *Vt = @ptrCast(@alignCast(userdata orelse return));
+        self.pwd_dirty = true;
+    }
+
+    /// Where the program says it is (OSC 7, 9 or 1337 — the raw value, a
+    /// `file://host/path` URI or a bare path), borrowed until the next write.
+    pub fn pwd(self: *Vt) []const u8 {
+        var s: c.GhosttyString = undefined;
+        if (c.ghostty_terminal_get(self.term, c.GHOSTTY_TERMINAL_DATA_PWD, @ptrCast(&s)) != c.GHOSTTY_SUCCESS) return "";
+        if (s.ptr == null) return "";
+        return s.ptr[0..s.len];
     }
 
     /// The title the program set (OSC 0/2), borrowed until the next write.
@@ -239,7 +256,7 @@ pub const Vt = struct {
         if (c.ghostty_render_state_update(self.render, self.term) != c.GHOSTTY_SUCCESS) return;
         var dirty: c.GhosttyRenderStateDirty = c.GHOSTTY_RENDER_STATE_DIRTY_FALSE;
         _ = c.ghostty_render_state_get(self.render, c.GHOSTTY_RENDER_STATE_DATA_DIRTY, &dirty);
-        if (dirty == c.GHOSTTY_RENDER_STATE_DIRTY_FALSE and !self.all_dirty and !history and !self.title_dirty) return;
+        if (dirty == c.GHOSTTY_RENDER_STATE_DIRTY_FALSE and !self.all_dirty and !history and !self.title_dirty and !self.pwd_dirty) return;
         const all = self.all_dirty or dirty == c.GHOSTTY_RENDER_STATE_DIRTY_FULL;
         self.all_dirty = false;
 
@@ -290,7 +307,48 @@ pub const Vt = struct {
             weft.grid.appendSection(msg, weft.allocator, .title, self.title()) catch return;
             self.title_dirty = false;
         }
+        if (self.pwd_dirty) {
+            var buf: [4096]u8 = undefined;
+            if (decodePwd(self.pwd(), &buf)) |dir| weft.grid.appendSection(msg, weft.allocator, .cwd, dir) catch return;
+            self.pwd_dirty = false;
+        }
         _ = weft.gridPublish(name, msg.items);
+    }
+
+    /// The local directory an OSC 7/9/1337 value names, into `out`: the path
+    /// of a `file://host/path` URI, percent-decoded; the path of a
+    /// `kitty-shell-cwd://host/path` one as it is; a bare absolute path as it
+    /// is. Null for anything else.
+    pub fn decodePwd(raw: []const u8, out: []u8) ?[]const u8 {
+        var s = raw;
+        var encoded = false;
+        if (std.mem.startsWith(u8, s, "file://")) {
+            s = s["file://".len..];
+            encoded = true;
+        } else if (std.mem.startsWith(u8, s, "kitty-shell-cwd://")) {
+            s = s["kitty-shell-cwd://".len..];
+        } else if (s.len == 0 or s[0] != '/') return null;
+        if (s.len > 0 and s[0] != '/') s = s[std.mem.indexOfScalar(u8, s, '/') orelse return null ..];
+        if (s.len > out.len) return null;
+        if (!encoded) {
+            @memcpy(out[0..s.len], s);
+            return out[0..s.len];
+        }
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < s.len) : (i += 1) {
+            if (s[i] == '%' and i + 2 < s.len) {
+                if (std.fmt.parseInt(u8, s[i + 1 .. i + 3], 16)) |byte| {
+                    out[n] = byte;
+                    n += 1;
+                    i += 2;
+                    continue;
+                } else |_| {}
+            }
+            out[n] = s[i];
+            n += 1;
+        }
+        return out[0..n];
     }
 
     /// The history section's payload into `out`, when core's copy of the
@@ -401,6 +459,14 @@ pub const Vt = struct {
         var rgb: c.GhosttyColorRgb = undefined;
         if (c.ghostty_render_state_row_cells_get(self.cells_it, c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR, @ptrCast(&rgb)) == c.GHOSTTY_SUCCESS)
             out.bg = pack(rgb);
+        // What the shell said the cell is (OSC 133): prompt, typed input, or
+        // the output it did not mark.
+        var semantic: c.GhosttyCellSemanticContent = c.GHOSTTY_CELL_SEMANTIC_OUTPUT;
+        _ = c.ghostty_cell_get(raw, c.GHOSTTY_CELL_DATA_SEMANTIC_CONTENT, @ptrCast(&semantic));
+        out.mark = .{
+            .prompt = semantic == c.GHOSTTY_CELL_SEMANTIC_PROMPT,
+            .input = semantic == c.GHOSTTY_CELL_SEMANTIC_INPUT,
+        };
         var styled: bool = false;
         _ = c.ghostty_render_state_row_cells_get(self.cells_it, c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING, @ptrCast(&styled));
         if (!styled) return out;

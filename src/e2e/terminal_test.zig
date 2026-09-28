@@ -671,3 +671,149 @@ test "e2e/terminal: out of capture under ide, a drag selects the terminal's cell
     ed.press("C-c", "");
     try t.expectEqualStrings("me-please", ed.head.clipboard.text());
 }
+
+// ── Shell integration (doc/terminal.md §7) ───────────────────────────
+
+/// Whether `program` is on the PATH the tests run with.
+fn have(app: *IdeApp, program: []const u8) !bool {
+    var buf: [128]u8 = undefined;
+    const found = try app.proj.oracle(try std.fmt.bufPrint(&buf, "command -v {s} >/dev/null && echo yes || echo no", .{program}));
+    defer app.ed.gpa.free(found);
+    return std.mem.startsWith(u8, found, "yes");
+}
+
+/// The directory the terminal entry's place is, or "".
+fn placeDir(ed: *Editor) []const u8 {
+    const b = named(ed, term) orelse return "";
+    return switch (core.place.realize(b.place, ed.ctx.realizer)) {
+        .path => |p| p,
+        else => "",
+    };
+}
+
+/// The integration injected into `shell` (a bare program, so `launch` runs
+/// it): the prompt's cells are marked, `cd` moves the entry's place, the
+/// prompts are landmarks the grammar's keys move between, and a command's
+/// output can be selected whole.
+fn integrationCase(app: *IdeApp, shell: []const u8) !void {
+    const gpa = app.ed.gpa;
+    const ed = &app.ed;
+    try ide.openFile(ed, "x.txt", "x\n");
+    try hermeticShellHome(app);
+    {
+        const made = try app.proj.oracle("mkdir -p sub/deeper");
+        gpa.free(made);
+    }
+    try ed.setConfig("terminal", "shell", shell);
+    ed.press("C-grave", "");
+    ed.applyWindow();
+    try waitFor(ed, test_prompt);
+
+    // The prompt's cells say they are the prompt (OSC 133 A/B).
+    {
+        const row = rowReading(ed, test_prompt) orelse return screenFailed(ed, error.NoPromptRow);
+        try t.expect(row[0].mark.prompt);
+    }
+    // TERM_PROGRAM says weft, for an rc file to test.
+    enter(ed, "echo \"prog=$TERM_PROGRAM\"");
+    try waitFor(ed, "\nprog=weft\n");
+
+    // OSC 7: the entry's place follows the shell's directory.
+    enter(ed, "cd sub/deeper");
+    const want = try std.fmt.allocPrint(gpa, "{s}/sub/deeper", .{app.proj.root});
+    defer gpa.free(want);
+    {
+        const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+        while (core.task.nowNs() < deadline and !std.mem.eql(u8, placeDir(ed), want)) ed.settle(1);
+        try t.expectEqualStrings(want, placeDir(ed));
+    }
+
+    // Two commands, then out of capture: the prompts are landmarks.
+    enter(ed, "echo landmark-one");
+    try waitFor(ed, "\nlandmark-one\n");
+    enter(ed, "echo landmark-two; echo second-line");
+    try waitFor(ed, "\nsecond-line\n");
+    ed.press("C-backslash", "");
+    {
+        const text = try waitText(ed, term, "second-line");
+        gpa.free(text);
+    }
+    // The caret is on the last prompt (where the shell's cursor was): C-Up
+    // is the one before it.
+    ed.press("C-Up", "");
+    {
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expect(std.mem.indexOf(u8, line, "echo landmark-two") != null);
+    }
+    // The caret starts where the command line does.
+    {
+        const te = ed.buffers.active().textEditor().?;
+        const rope = te.text();
+        const range = rope.lineRange(rope.offsetToPoint(te.cursorOffset()).row);
+        const at = te.cursorOffset() - range.start;
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expectEqualStrings("echo landmark-two; echo second-line", std.mem.trim(u8, line[at..], " "));
+    }
+    // The command's output, selected whole.
+    ed.run("grid.select-landmark-body");
+    {
+        const te = ed.buffers.active().textEditor().?;
+        const r = te.selectedRange() orelse return error.NothingSelected;
+        const out = try gpa.alloc(u8, r.end - r.start);
+        defer gpa.free(out);
+        te.text().copyRange(out, r);
+        try t.expectEqualStrings("landmark-two\nsecond-line", out);
+    }
+    // From the end of that output: its own prompt, then the one before.
+    ed.press("C-Up", "");
+    ed.press("C-Up", "");
+    {
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expect(std.mem.indexOf(u8, line, "echo landmark-one") != null);
+    }
+    ed.press("C-Down", "");
+    {
+        const line = try caretLine(ed);
+        defer gpa.free(line);
+        try t.expect(std.mem.indexOf(u8, line, "echo landmark-two") != null);
+    }
+}
+
+test "e2e/terminal: bash gets weft's integration injected — marked prompts, cd moves the entry's place, prompts are landmarks" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    if (!try have(&app, "bash")) return error.SkipZigTest;
+    try integrationCase(&app, "bash");
+}
+
+test "e2e/terminal: zsh gets weft's integration injected through ZDOTDIR, its own startup files still read" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    // zsh is not in the nix shell itself; the host's may be on PATH.
+    if (!try have(&app, "zsh")) return error.SkipZigTest;
+    try integrationCase(&app, "zsh");
+}
+
+test "e2e/terminal: integration off, or a whole command line, runs the shell as it is" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ed.setConfig("terminal", "integration", "off");
+    try ide.openFile(ed, "x.txt", "x\n");
+    try hermeticShellHome(&app);
+    try ed.setConfig("terminal", "shell", "bash");
+    ed.press("C-grave", "");
+    ed.applyWindow();
+    try waitFor(ed, test_prompt);
+    const row = rowReading(ed, test_prompt) orelse return screenFailed(ed, error.NoPromptRow);
+    try t.expect(!row[0].mark.prompt);
+}

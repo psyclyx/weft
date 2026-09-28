@@ -96,6 +96,9 @@ pub const Grid = struct {
     /// What the entry's document holds of these rows (`grid_mirror`), or
     /// null before it was first written.
     mirror: ?Mirror = null,
+    /// Some cell ever said it is part of a prompt (a shell with integration):
+    /// the rows have LANDMARKS to move between (`grid_mirror.landmark`).
+    landmarks: bool = false,
 
     /// The document is history rows `[start, end)` (absolute), one line
     /// each, then the screen's rows.
@@ -108,6 +111,8 @@ pub const Grid = struct {
     pub const Applied = struct {
         /// A new title (borrowed from the message), when it carried one.
         title: ?[]const u8 = null,
+        /// Where the program now is (borrowed), when the message said.
+        cwd: ?[]const u8 = null,
     };
 
     pub fn deinit(self: *Grid, gpa: Allocator) void {
@@ -141,6 +146,7 @@ pub const Grid = struct {
         var it = m.sections();
         while (it.next()) |s| switch (s.tag) {
             .title => applied.title = s.bytes,
+            .cwd => applied.cwd = s.bytes,
             .history => history = try wire.History.parse(s.bytes),
             _ => {},
         };
@@ -159,8 +165,12 @@ pub const Grid = struct {
         }
         for (0..h.rows_sent) |i| {
             const r = m.row(i);
-            const dst = std.mem.sliceAsBytes(self.cells[@as(usize, r.index) * h.cols ..][0..h.cols]);
-            @memcpy(dst, r.cells);
+            const dst_cells = self.cells[@as(usize, r.index) * h.cols ..][0..h.cols];
+            @memcpy(std.mem.sliceAsBytes(dst_cells), r.cells);
+            if (!self.landmarks) for (dst_cells) |c| if (c.mark.prompt) {
+                self.landmarks = true;
+                break;
+            };
         }
         if (history) |hist| try self.applyHistory(gpa, hist);
         self.cursor = .{

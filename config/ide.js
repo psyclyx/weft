@@ -312,6 +312,11 @@ weft.plugin("terminal");     // a shell on a real terminal; C-\ hands the keys b
 weft.plugin("breadcrumbs");  // path › symbol › symbol for the caret
 bindWorkspace("C-j", "panel.toggle");
 bindWorkspace("C-grave", "terminal.open");
+bindWorkspace("C-S-grave", "terminal.new");
+// A terminal read as text: its prompts are landmarks (doc/terminal.md §7),
+// C-Up / C-Down as in VS Code's terminal.
+weft.bind("ide", "C-Up", ["std.navigation.landmark-prev"]);
+weft.bind("ide", "C-Down", ["std.navigation.landmark-next"]);
 bindWorkspace("C-S-m", "problems.open");
 
 // The undo history as a tree, docked right (config/undo.js): Edit ▸ Undo

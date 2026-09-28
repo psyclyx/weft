@@ -638,6 +638,29 @@ fn cPostureResume(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+/// `grid.landmark-prev` / `-next`: the caret to the landmark before (after)
+/// it in a grid read as text — a shell's previous (next) prompt, at its
+/// command line (`grid_mirror.landmark`).
+fn cGridLandmarkPrev(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (!@import("grid_mirror.zig").moveToLandmark(ctx.buffer(), .prev)) return .{ .string = "no prompt above" };
+    return ok;
+}
+
+fn cGridLandmarkNext(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (!@import("grid_mirror.zig").moveToLandmark(ctx.buffer(), .next)) return .{ .string = "no prompt below" };
+    return ok;
+}
+
+/// `grid.select-landmark-body`: select what follows the landmark at the
+/// caret up to the next — the output of the command at a shell's prompt.
+fn cGridSelectLandmarkBody(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (!try @import("grid_mirror.zig").selectLandmarkBody(ctx.gpa, ctx.buffer())) return .{ .string = "no command output here" };
+    return ok;
+}
+
 /// Quit — refused while anything would be lost: a file's unsaved edits, a
 /// listing's unapplied draft, or text with no file behind it (a scratch, a
 /// parked one), which closing keeps but quitting cannot. The refusal names
@@ -1082,6 +1105,9 @@ const table = [_]command.Command{
     command.define("mode.set", "Switch the keymap mode.", cSetMode).present(.{ .internal = true }),
     command.define("mode.break-out", "Leave a capturing mode for the mode it replaced.", cPostureBreakOut).present(.{ .internal = true }),
     command.define("mode.resume-capture", "Take raw input again after a break-out.", cPostureResume).present(.{ .internal = true }),
+    command.define("grid.landmark-prev", "Move to the landmark before the caret in a terminal read as text: the previous prompt.", cGridLandmarkPrev).present(.{ .label = "Previous Prompt" }),
+    command.define("grid.landmark-next", "Move to the landmark after the caret in a terminal read as text: the next prompt.", cGridLandmarkNext).present(.{ .label = "Next Prompt" }),
+    command.define("grid.select-landmark-body", "Select what follows the landmark at the caret: the output of the command at that prompt.", cGridSelectLandmarkBody).present(.{ .label = "Select Command Output" }),
     command.define("app.quit", "Quit the editor, refusing while anything unsaved would be lost.", cQuit).present(.{ .label = "Quit", .icon = "log-out" }),
     command.define("app.quit-force", "Quit the editor, discarding anything unsaved.", cQuitForce).present(.{ .label = "Quit Without Saving" }),
     command.define("edit.insert-newline", "Insert a line break at the cursor.", cInsertNewline).present(.{ .label = "Insert Newline" }),

@@ -181,9 +181,20 @@ pub const Realized = union(enum) {
 pub const Realizer = struct {
     ctx: *anyopaque,
     realizeFn: *const fn (ctx: *anyopaque, p: Place) ?[]const u8,
+    /// The inverse, for a LOCAL directory: the place it is — its container,
+    /// published without being shown. `cmd` is the dispatching
+    /// `command.Context` (opaque here: core's place module does not import
+    /// the command layer). Null where the embedding cannot say.
+    placeFn: ?*const fn (ctx: *anyopaque, cmd: *anyopaque, dir: []const u8) ?Place = null,
 
     pub fn realize(self: Realizer, p: Place) ?[]const u8 {
         return self.realizeFn(self.ctx, p);
+    }
+
+    /// The place local directory `dir` (absolute) is, or null.
+    pub fn placeOf(self: Realizer, cmd: *anyopaque, dir: []const u8) ?Place {
+        const f = self.placeFn orelse return null;
+        return f(self.ctx, cmd, dir);
     }
 };
 

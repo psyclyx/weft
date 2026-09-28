@@ -120,18 +120,37 @@ fn init() void {
 
 var command_buf: [1024]u8 = undefined;
 
+/// Where weft's shell integration lives (nix/shell-integration.nix), as the
+/// build baked it in; `WEFT_SHELL_INTEGRATION` in the environment overrides
+/// it where the shell is started.
+const shell_integration = @import("terminal_build").shell_integration;
+
 /// What runs, under `/bin/sh -c`: the `shell` setting — a whole command line
 /// (anything with a space) as written, a bare program (`bash`, `/bin/zsh`) or
 /// by default `$SHELL`, exec'd. It gets a terminal's environment: TERM names
 /// an xterm-compatible terminal with 256 colours and COLORTERM says truecolor,
-/// which is what the emulator speaks.
+/// which is what the emulator speaks, and TERM_PROGRAM says weft, for an rc
+/// file to test.
+///
+/// A bare program starts through the shell integration's `launch`, which
+/// injects weft's integration into zsh, bash and fish as their own startup
+/// files allow (doc/terminal.md §7) — unless `integration` is `off`, or the
+/// integration is not where it should be. A whole command line is run as
+/// written: what it starts is its own business.
 fn invocation() []const u8 {
+    // Asked first: `weft.config` answers in one scratch, which the next
+    // question overwrites.
+    const integrated = !std.mem.eql(u8, weft.config("integration"), "off");
     const v = weft.config("shell");
     const env = "export TERM=xterm-256color COLORTERM=truecolor TERM_PROGRAM=weft; ";
     if (std.mem.indexOfAny(u8, v, " \t") != null)
         return std.fmt.bufPrint(&command_buf, "{s}{s}", .{ env, v }) catch v;
     const program = if (v.len > 0) v else "${SHELL:-/bin/sh}";
-    return std.fmt.bufPrint(&command_buf, "{s}exec \"{s}\"", .{ env, program }) catch "exec /bin/sh";
+    if (!integrated)
+        return std.fmt.bufPrint(&command_buf, "{s}exec \"{s}\"", .{ env, program }) catch "exec /bin/sh";
+    return std.fmt.bufPrint(&command_buf,
+        \\{s}WEFT_SHELL_INTEGRATION="${{WEFT_SHELL_INTEGRATION:-{s}}}"; export WEFT_SHELL_INTEGRATION; if [ -x "$WEFT_SHELL_INTEGRATION/launch" ]; then exec "$WEFT_SHELL_INTEGRATION/launch" "{s}"; fi; exec "{s}"
+    , .{ env, shell_integration, program, program }) catch "exec /bin/sh";
 }
 
 /// The size a terminal starts at: the room its pane had last frame, or a

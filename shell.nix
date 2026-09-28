@@ -114,6 +114,10 @@ pkgs.mkShell {
   # plugin, and the C headers it is compiled against.
   WEFT_GHOSTTY_VT_WASM = "${libghostty-vt-wasm}";
 
+  # The shell integration the terminal plugin injects (nix/shell-integration.nix):
+  # build.zig bakes this path into the plugin.
+  WEFT_SHELL_INTEGRATION = "${pkgs.callPackage ./nix/shell-integration.nix { }}";
+
   # Where weft looks up a grammar BY NAME (colon-separated, like PATH). One
   # variable, not one per language: weft ships no list of languages, so the
   # set that exists is whatever this directory holds and config asks for.

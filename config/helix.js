@@ -220,6 +220,12 @@ weft.bind("helix-normal", "SPC o c", "console.open");
 weft.bind("helix-normal", "SPC o C", "console.send");
 weft.bind("helix-normal", "SPC o a", "llm.ask-line");
 weft.bind("helix-normal", "SPC o h", "http.get");
+weft.bind("helix-normal", "SPC o t", "terminal.open");  // the shell, in the bottom panel
+weft.bind("helix-normal", "SPC o T", "terminal.new");   // another shell beside it
+// A terminal read as text: its prompts are landmarks (doc/terminal.md §7).
+weft.bind("helix-normal", "[ [", ["std.navigation.landmark-prev"]);
+weft.bind("helix-normal", "] ]", ["std.navigation.landmark-next"]);
+weft.bind("helix-normal", "SPC t o", ["std.selection.landmark-body"]); // a command's output
 
 weft.bind("helix-normal", "SPC A a", "acp.start");
 weft.bind("helix-normal", "SPC A s", "acp.send");

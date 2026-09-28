@@ -1,0 +1,49 @@
+#!/bin/sh
+# launch — start a shell with weft's shell integration injected, the way
+# ghostty, kitty and VS Code do: the user's own startup files still run, and
+# the integration loads after them (doc/terminal.md §7).
+#
+#   launch PROGRAM [ARG...]
+#
+# The terminal plugin runs `exec "$WEFT_SHELL_INTEGRATION/launch" <program>`
+# for a bare shell program. Anything this script does not know is run as it
+# is: integration is an addition, never a condition for the shell to start.
+#
+#   zsh   ZDOTDIR points at weft's zsh/ directory; its .zshenv puts the
+#         user's ZDOTDIR back, sources the user's .zshenv, and loads the
+#         integration for an interactive shell. zsh then reads the user's
+#         .zshrc from the restored ZDOTDIR as ever.
+#   bash  --rcfile weft's bash/weft.bash, which reads ~/.bashrc first, as an
+#         interactive bash would have, then the integration.
+#   fish  weft's directory goes first on XDG_DATA_DIRS, so fish sources
+#         fish/vendor_conf.d/weft.fish, which puts XDG_DATA_DIRS back.
+#
+# Each then sources ${XDG_CONFIG_HOME:-~/.config}/weft/shell/<shell>, the
+# user's own hook, when it exists.
+
+dir=${WEFT_SHELL_INTEGRATION:-$(dirname "$0")}
+program=$1
+shift
+
+case ${program##*/} in
+zsh)
+	if [ "${ZDOTDIR+set}" = set ]; then
+		WEFT_ZSH_ZDOTDIR=$ZDOTDIR
+		export WEFT_ZSH_ZDOTDIR
+	fi
+	ZDOTDIR=$dir/zsh
+	export ZDOTDIR
+	;;
+bash)
+	exec "$program" --rcfile "$dir/bash/weft.bash" "$@"
+	;;
+fish)
+	if [ "${XDG_DATA_DIRS+set}" = set ]; then
+		WEFT_FISH_XDG_DATA_DIRS=$XDG_DATA_DIRS
+		export WEFT_FISH_XDG_DATA_DIRS
+	fi
+	XDG_DATA_DIRS=$dir${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}
+	export XDG_DATA_DIRS
+	;;
+esac
+exec "$program" "$@"
