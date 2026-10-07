@@ -8,10 +8,16 @@
 //! swapchain. Key repeat is the consumer's concern (repeat rate/delay are
 //! surfaced from the compositor for milestone 4's input layer).
 
+comptime {
+    if (@import("builtin").os.tag != .linux) @compileError("platform/wayland.zig is Linux-only");
+}
+
 const std = @import("std");
 const linux = std.os.linux;
 const platform = @import("root.zig");
 const resize = @import("resize.zig");
+const clipboard_pipes = @import("clipboard_pipes.zig");
+const KeyQueue = @import("key_queue.zig").KeyQueue;
 
 /// Monotonic clock in nanoseconds (raw syscall; matches core/task.zig).
 fn nowNs() u64 {
@@ -38,7 +44,6 @@ pub const PointerEvent = platform.PointerEvent;
 
 pub const Window = struct {
     const max_outputs = 8;
-    const key_queue_len = 128;
     const OutputInfo = struct {
         wl_output: ?*c.wl_output = null,
         registry_name: u32 = 0,
@@ -73,12 +78,8 @@ pub const Window = struct {
     close_requested: bool = false,
     focused: bool = true,
 
-    /// Ordered key events since last drain; overflow drops oldest (and
-    /// counts, loudly, in debug).
-    key_events: [key_queue_len]KeyEvent = undefined,
-    key_head: usize = 0,
-    key_tail: usize = 0,
-    key_dropped: usize = 0,
+    /// Ordered key events since last drain.
+    keys: KeyQueue = .{},
 
     // Key repeat: Wayland delivers only down/up, so the client synthesizes
     // repeats for the most-recently-held key that the xkb keymap marks
@@ -96,7 +97,7 @@ pub const Window = struct {
 
     // The clipboard (`wl_data_device`, doc/configs.md §3.3). `clip` is the
     // last-known selection text; `xfers` moves it through pipes without
-    // blocking (`clipboard.zig`). With no data-device manager (a compositor
+    // blocking (`clipboard_pipes.zig`). With no data-device manager (a compositor
     // without one) the clipboard is `clip` alone — in memory, like headless.
     // Primary selection (`zwp_primary_selection_v1`, middle-click paste) is
     // not bound: it needs a generated protocol header this build does not
@@ -110,7 +111,7 @@ pub const Window = struct {
     /// A drag-and-drop offer over the window — never accepted, only released.
     dnd_offer: ?*Offer = null,
     clip: platform.clipboard.Store = .{},
-    xfers: ?platform.clipboard.Transfers = null,
+    xfers: ?clipboard_pipes.Transfers = null,
     /// The serial of the newest input event: `set_selection` must name one,
     /// so a compositor can refuse a client that grabs the clipboard unasked.
     input_serial: u32 = 0,
@@ -163,7 +164,7 @@ pub const Window = struct {
         // size the compositor actually granted.
         if (c.wl_display_roundtrip(display) < 0) return error.WaylandRoundtripFailed;
         self.refreshBufferScale();
-        self.xfers = platform.clipboard.Transfers.init() catch null;
+        self.xfers = clipboard_pipes.Transfers.init() catch null;
         if (self.data_device_manager) |mgr| if (self.seat) |seat| {
             self.data_device = c.wl_data_device_manager_get_data_device(mgr, seat);
             if (self.data_device) |dev| _ = c.wl_data_device_add_listener(dev, &data_device_listener, self);
@@ -272,7 +273,7 @@ pub const Window = struct {
         if (o.ours) return;
         const mime = o.bestMime() orelse return;
         if (self.xfers == null) return;
-        const fds = platform.clipboard.pipe() orelse return;
+        const fds = clipboard_pipes.pipe() orelse return;
         c.wl_data_offer_receive(o.offer, mime, fds[1]);
         _ = std.c.close(fds[1]);
         self.xfers.?.receive(std.heap.c_allocator, &self.clip, fds[0]);
@@ -288,7 +289,7 @@ pub const Window = struct {
         const now = nowNs();
         var guard: u32 = 0;
         while (now >= self.repeat_next_ns and guard < 8) : (guard += 1) {
-            self.pushKeyEvent(rk);
+            self.keys.push(rk);
             self.repeat_next_ns += interval;
         }
         // Resync after a long stall instead of catching up all at once.
@@ -302,6 +303,17 @@ pub const Window = struct {
     /// the actual `prepare_read`/`flush`/`read_events` dance.
     pub fn fd(self: *const Window) i32 {
         return c.wl_display_get_fd(self.display);
+    }
+
+    /// The scheduler's wait: the display socket is one of `fds`, so a plain
+    /// `poll` already wakes for compositor events.
+    pub fn wait(_: *Window, fds: []std.posix.pollfd, timeout_ms: i32) usize {
+        return std.posix.poll(fds, timeout_ms) catch 0;
+    }
+
+    /// The display and surface a GPU context presents through.
+    pub fn surfaceSource(self: *const Window) platform.SurfaceSource {
+        return .{ .wayland = .{ .display = self.display, .surface = self.surface } };
     }
 
     /// Next due time for synthesized key-repeat, or null when no key is
@@ -358,22 +370,7 @@ pub const Window = struct {
 
     /// Next key event in press order, or null.
     pub fn nextKeyEvent(self: *Window) ?KeyEvent {
-        if (self.key_head == self.key_tail) return null;
-        const ev = self.key_events[self.key_head % key_queue_len];
-        self.key_head += 1;
-        return ev;
-    }
-
-    fn pushKeyEvent(self: *Window, ev: KeyEvent) void {
-        if (self.key_tail - self.key_head >= key_queue_len) {
-            self.key_head += 1; // drop oldest
-            self.key_dropped += 1;
-            if (std.debug.runtime_safety) {
-                std.log.warn("key event queue overflow ({d} dropped)", .{self.key_dropped});
-            }
-        }
-        self.key_events[self.key_tail % key_queue_len] = ev;
-        self.key_tail += 1;
+        return self.keys.next();
     }
 
     /// Next pointer event in arrival order, or null.
@@ -861,7 +858,7 @@ fn keyboardKey(
     // keysym so typing bindings read naturally (`G`, `dollar`), and only
     // an UNCONSUMED shift (a key with no shifted level, e.g. Return/Tab)
     // becomes an explicit `S-`.
-    const chorded = mods.ctrl or mods.alt;
+    const chorded = mods.ctrl or mods.alt or mods.logo;
     var ev = KeyEvent{
         .keysym = if (chorded)
             baseKeysym(xkb_state, keycode)
@@ -875,7 +872,7 @@ fn keyboardKey(
         const n = c.xkb_state_key_get_utf8(xkb_state, keycode, @ptrCast(&ev.utf8), ev.utf8.len);
         if (n > 0 and n < ev.utf8.len) ev.utf8_len = @intCast(n);
     }
-    self.pushKeyEvent(ev);
+    self.keys.push(ev);
 
     // Arm/disarm key repeat. A new repeatable press becomes the target
     // (holding a second key takes over); releasing the held key stops it.

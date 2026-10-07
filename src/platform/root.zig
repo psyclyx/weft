@@ -9,11 +9,12 @@
 //! the ONE live implementation; nothing here changes what it does.
 //!
 //! ## comptime, not vtable
-//! Exactly one Platform is compiled in, chosen at build time (there is no
-//! `-Dplatform` flag today). A vtable buys runtime polymorphism nothing here
-//! uses; `assertPlatform` is a duck-typed declaration set checked at compile
-//! time. If runtime selection becomes useful later, this exact declaration
-//! list is the vocabulary a small dispatch value must carry.
+//! Exactly one Platform is compiled in, chosen by the target OS: Wayland
+//! (`wayland.zig`) on Linux, Cocoa (`cocoa.zig`) on macOS. A vtable buys
+//! runtime polymorphism nothing here uses; `assertPlatform` is a duck-typed
+//! declaration set checked at compile time. If runtime selection becomes
+//! useful later, this exact declaration list is the vocabulary a small
+//! dispatch value must carry.
 //!
 //! ## the decl surface, enumerated by audit
 //! - `init`/`deinit` — lifecycle. A Platform owns its own heap address:
@@ -24,7 +25,14 @@
 //!   `render.init(gpa, ctx, …)` is (which needs `ctx` — i.e. the Platform's
 //!   output — to already exist).
 //! - `fd` — the scheduler's event-source registration (`sched.addFd`,
-//!   `main.zig`).
+//!   `main.zig`), or -1 for a platform whose events do not arrive on an fd
+//!   (Cocoa's arrive on a Mach port).
+//! - `wait` — the scheduler's blocking wait, owned by the platform: block until
+//!   one of the scheduler's fds is ready, the platform has events to pump, or
+//!   the timeout passes, and report the ready fds exactly as `poll(2)` does. A
+//!   platform whose events ARE an fd (Wayland) just polls; one whose events are
+//!   not (Cocoa) waits in its own event loop with the fds attached to it, which
+//!   is the only way neither kind of wake can starve the other.
 //! - `pumpEvents` — drain the event queue; called unconditionally every
 //!   scheduler wake (`main.zig`'s loop body), regardless of which source fired.
 //! - `shouldClose` — the frame loop's exit condition.
@@ -47,10 +55,9 @@
 //! - `clipboardFd` — readable when a clipboard transfer can make progress
 //!   (-1 when a platform has none); registered once as a scheduler source,
 //!   serviced inside `pumpEvents`.
-//! Plus fields sampled directly (no method — they're read-mostly state, not
-//! edge-triggered events): `display`/`surface` (raw native handles — see
-//! "the SurfaceSource leak" below). `bufferScale()` is a method so accepted
-//! scale and resize-pending state remain owned by the platform reducer.
+//! - `surfaceSource` — the native handles a GPU context presents through
+//!   (`SurfaceSource`, below). `bufferScale()` is a method so accepted scale
+//!   and resize-pending state remain owned by the platform reducer.
 //!
 //! Pointer input used to be sampled here too (`mouse_x`/`mouse_y`/
 //! `mouse_down`, an edge-triggered left click, and a dead `consumeWheel`):
@@ -60,25 +67,16 @@
 //!
 //! ## leaks found (wayland-specific surface reaching past the seam)
 //!
-//! 1. **`gfx/context.zig`'s `Context.SurfaceSource`** (`{ display: *anyopaque,
-//!    surface: *anyopaque }`) is filled from `window.display`/`window.surface`
-//!    in `main.zig` and fed straight to `vkCreateWaylandSurfaceKHR` inside
-//!    `Context.createSurface`. This is a REAL, not incidental, coupling: Vulkan's
-//!    WSI extension for surface creation is platform-specific by construction
-//!    (`VK_KHR_wayland_surface` vs `VK_KHR_xcb_surface` vs `VK_KHR_win32_surface`
-//!    — there is no backend-neutral "create a surface" call in Vulkan itself).
-//!    `SurfaceSource`'s two `*anyopaque` fields already erase the WAYLAND
-//!    TYPES (`*c.wl_display`/`*c.wl_surface`) down to opaque pointers, so
-//!    `gfx/context.zig` itself doesn't `@cImport` wayland-client.h — but the
-//!    SHAPE (exactly two pointers) is still wayland's shape; an X11 platform
-//!    would need `{ display: *anyopaque, drawable: c_ulong }` (a `Display*` +
-//!    an `xcb_window_t`/`Window`, not two pointers), which `SurfaceSource`
-//!    cannot express without becoming a tagged union keyed by platform. NOT
-//!    fixed here — doing it honestly needs a second platform to design
-//!    against (guessing the shape now risks guessing wrong) — **W-later**,
-//!    tracked for whichever of X/terminal/browser/macOS lands first (a
-//!    terminal has no Vulkan surface at all, which is its own argument for a
-//!    tagged union over a fixed struct).
+//! 1. **The native surface handles.** `gfx/context.zig` used to define
+//!    `SurfaceSource` as `{ display: *anyopaque, surface: *anyopaque }`, filled
+//!    from two `Window` fields and fed to `vkCreateWaylandSurfaceKHR`. A GPU
+//!    API's surface creation is platform-specific by construction
+//!    (`VK_KHR_wayland_surface`, `wl_egl_window`, an `NSView` for NSOpenGL),
+//!    so the coupling is real — but the two-pointer SHAPE was Wayland's. It
+//!    waited for a second platform to design against; macOS was it. FIXED:
+//!    `SurfaceSource` is a tagged union HERE, one variant per platform, which
+//!    a `Window` hands out through `surfaceSource()`, and each GPU context
+//!    switches on it and refuses a variant it cannot present to.
 //! 2. **`app/dispatch.zig:dispatchKey` reached into `wayland.c` directly**
 //!    (`c.xkb_keysym_get_name`) to turn a `KeyEvent.keysym` into a name for
 //!    `core.Keymap.keyspec` — a platform-neutral file (shared by the real
@@ -106,9 +104,24 @@
 //!    trivial, so it stays **W-later**, not patched here.
 
 const std = @import("std");
+const builtin = @import("builtin");
 pub const pointer = @import("pointer.zig");
 pub const PointerEvent = pointer.PointerEvent;
 pub const clipboard = @import("clipboard.zig");
+pub const keysym = @import("keysym.zig");
+
+/// The native handles a GPU context presents through, one variant per
+/// platform (see leak #1 above). Opaque pointers: naming the real types would
+/// drag each platform's C headers into every GPU context that switches here.
+pub const SurfaceSource = union(enum) {
+    wayland: struct {
+        display: *anyopaque, // *wl_display
+        surface: *anyopaque, // *wl_surface
+    },
+    cocoa: struct {
+        view: *anyopaque, // NSView *, the window's content view
+    },
+};
 
 /// One raw modifier state, sampled at key-event time. Portable in principle
 /// (every platform this doc anticipates has some notion of ctrl/alt/shift/
@@ -151,6 +164,8 @@ pub fn assertPlatform(comptime T: type) void {
         "init",
         "deinit",
         "fd",
+        "wait",
+        "surfaceSource",
         "pumpEvents",
         "shouldClose",
         "framebufferSize",
@@ -171,12 +186,6 @@ pub fn assertPlatform(comptime T: type) void {
         if (!@hasDecl(T, name)) @compileError(@typeName(T) ++ ": missing Platform method `" ++ name ++ "`");
         if (@typeInfo(@TypeOf(@field(T, name))) != .@"fn") @compileError(@typeName(T) ++ ": `" ++ name ++ "` must be a function");
     }
-    inline for (.{
-        "display",
-        "surface",
-    }) |name| {
-        if (!@hasField(T, name)) @compileError(@typeName(T) ++ ": missing Platform field `" ++ name ++ "`");
-    }
 }
 
 /// P3's closure proof (doc/rendering.md P3, item 3): a compile-time-only
@@ -192,8 +201,6 @@ pub fn assertPlatform(comptime T: type) void {
 const HeadlessPlatformSkeleton = struct {
     fb_w: u32 = 0,
     fb_h: u32 = 0,
-    display: usize = 0, // stand-in "native handle" — any type satisfies @hasField
-    surface: usize = 0,
     gestures: pointer.Gestures = .{},
     /// No desktop: the clipboard is this store (see `clipboardSet`).
     clip: clipboard.Store = .{},
@@ -208,6 +215,14 @@ const HeadlessPlatformSkeleton = struct {
     fn fd(self: *const HeadlessPlatformSkeleton) i32 {
         _ = self;
         return -1;
+    }
+    fn wait(self: *HeadlessPlatformSkeleton, fds: []std.posix.pollfd, timeout_ms: i32) usize {
+        _ = self;
+        return std.posix.poll(fds, timeout_ms) catch 0;
+    }
+    fn surfaceSource(self: *const HeadlessPlatformSkeleton) SurfaceSource {
+        _ = self;
+        unreachable; // no surface — typecheck-only, see module doc
     }
     fn pumpEvents(self: *HeadlessPlatformSkeleton) void {
         _ = self;
@@ -234,9 +249,9 @@ const HeadlessPlatformSkeleton = struct {
     fn nextPointerEvent(self: *HeadlessPlatformSkeleton) ?PointerEvent {
         return self.gestures.next();
     }
-    fn keysymName(buf: []u8, keysym: u32) []const u8 {
+    fn keysymName(buf: []u8, sym: u32) []const u8 {
         _ = buf;
-        _ = keysym;
+        _ = sym;
         return "";
     }
     fn clipboardText(self: *const HeadlessPlatformSkeleton) []const u8 {
@@ -263,11 +278,20 @@ test "Platform seam: the skeleton typechecks (compile-time only)" {
     comptime assertPlatform(HeadlessPlatformSkeleton);
 }
 
-/// The ONE platform compiled in. Selecting a different one is a build-time
-/// decision (there is no `-Dplatform` flag today); consumers reach it through
-/// this module root rather than by relative path into the implementation, so
-/// the contract above is the only thing between them and it.
-pub const wayland = @import("wayland.zig");
+/// The ONE platform compiled in, chosen by the target OS. Consumers reach it
+/// through this module root rather than by relative path into the
+/// implementation, so the contract above is the only thing between them and
+/// it.
+const native = switch (builtin.os.tag) {
+    .linux => @import("wayland.zig"),
+    .macos => @import("cocoa.zig"),
+    else => @compileError("weft_platform: no desktop platform for " ++ @tagName(builtin.os.tag)),
+};
+pub const Window = native.Window;
+
+comptime {
+    assertPlatform(Window);
+}
 
 test {
     // resize.zig is reached only THROUGH wayland.zig, and a file being
@@ -276,5 +300,8 @@ test {
     _ = @import("resize.zig");
     _ = pointer;
     _ = clipboard;
-    _ = wayland;
+    _ = keysym;
+    _ = @import("cocoa_keys.zig");
+    _ = @import("key_queue.zig");
+    _ = native;
 }

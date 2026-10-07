@@ -83,6 +83,13 @@ const TimerSource = struct {
     name: []const u8,
 };
 
+/// A blocking wait that stands in for `poll(2)` (`Scheduler.waiter`): same
+/// fds, same timeout, same readiness report.
+pub const Waiter = struct {
+    ctx: *anyopaque,
+    wait: *const fn (ctx: *anyopaque, fds: []posix.pollfd, timeout_ms: i32) usize,
+};
+
 pub const Scheduler = struct {
     gpa: Allocator,
     now: *const fn () u64,
@@ -94,6 +101,13 @@ pub const Scheduler = struct {
     /// (doc/contextual-workspace-architecture.md §7's gate) reads this instead of counting
     /// frames, so it measures the scheduler's own wake rate directly.
     steps: u64 = 0,
+    /// The blocking wait itself — `poll(2)` unless something else owns the
+    /// thread's sleep. A desktop platform whose events do not arrive on an fd
+    /// (Cocoa's come through a Mach port) must wait in its own event loop or
+    /// its events would sit unseen until some fd or timer happened to fire;
+    /// it installs a `Waiter` that waits there, with these fds attached, and
+    /// reports readiness exactly as `poll` would.
+    waiter: ?Waiter = null,
 
     pub fn init(gpa: Allocator, now: *const fn () u64) Scheduler {
         return .{ .gpa = gpa, .now = now };
@@ -243,7 +257,10 @@ pub const Scheduler = struct {
         // load) — treat as "nothing ready this time" and let the next step
         // reconsider, rather than propagating a hard failure out of the
         // kernel loop for a syscall hiccup.
-        const ready = posix.poll(buf[0..n_fds], timeout_ms) catch 0;
+        const ready = if (self.waiter) |w|
+            w.wait(w.ctx, buf[0..n_fds], timeout_ms)
+        else
+            posix.poll(buf[0..n_fds], timeout_ms) catch 0;
         self.steps += 1;
         if (ready > 0) any = true;
 

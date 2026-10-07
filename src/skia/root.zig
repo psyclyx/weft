@@ -22,11 +22,18 @@ pub const VulkanInfo = extern struct {
 
 const Shim = opaque {};
 
-extern fn weft_skia_create(vk: ?*const VulkanInfo, want_gpu: c_int, bgra: c_int) ?*Shim;
+/// Resolves one OpenGL entry point by name in the current context; `ctx` is
+/// passed back verbatim (shim.h: `WeftSkiaGlGetProc`).
+pub const GlGetProc = *const fn (ctx: ?*anyopaque, name: [*:0]const u8) callconv(.c) ?*const fn () callconv(.c) void;
+
+extern fn weft_skia_create_raster(bgra: c_int) ?*Shim;
+extern fn weft_skia_create_vulkan(vk: *const VulkanInfo, bgra: c_int) ?*Shim;
+extern fn weft_skia_create_gl(get_proc: GlGetProc, ctx: ?*anyopaque) ?*Shim;
 extern fn weft_skia_destroy(s: ?*Shim) void;
 extern fn weft_skia_is_gpu(s: ?*const Shim) c_int;
 extern fn weft_skia_register_font(s: ?*Shim, font_id: u32, bytes: [*]const u8, len: usize) void;
 extern fn weft_skia_begin(s: ?*Shim, width: u32, height: u32) c_int;
+extern fn weft_skia_begin_framebuffer(s: ?*Shim, fbo: u32, width: u32, height: u32, stencil_bits: u32) c_int;
 extern fn weft_skia_clear(s: ?*Shim, r: f32, g: f32, b: f32, a: f32) void;
 extern fn weft_skia_draw_rect(s: ?*Shim, x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32) void;
 extern fn weft_skia_draw_glyph(s: ?*Shim, font_id: u32, glyph_id: u32, x: f32, y: f32, size: f32, r: f32, g: f32, b: f32, a: f32) void;
@@ -66,6 +73,7 @@ comptime {
 extern fn weft_skia_draw_rrect(s: ?*Shim, rrect: *const RRect) void;
 extern fn weft_skia_clip(s: ?*Shim, on: c_int, x: f32, y: f32, w: f32, h: f32) void;
 extern fn weft_skia_end(s: ?*Shim, row_bytes: *usize) ?[*]const u8;
+extern fn weft_skia_flush(s: ?*Shim) c_int;
 
 /// A rasterized frame: pointer into the shim's buffer (valid until the next
 /// `begin`/`deinit`) plus its dimensions and stride.
@@ -80,12 +88,26 @@ pub const Skia = struct {
     shim: *Shim,
     gpu: bool,
 
-    /// Create the renderer. `bgra` selects the output byte order (match the
-    /// target format). `want_gpu` requests Ganesh; on failure it silently
-    /// falls back to the CPU raster path (query `.gpu` after).
-    pub fn init(vk: ?*const VulkanInfo, want_gpu: bool, bgra: bool) !Skia {
-        const shim = weft_skia_create(vk, @intFromBool(want_gpu), @intFromBool(bgra)) orelse
-            return error.SkiaInitFailed;
+    /// The CPU raster renderer. `bgra` selects the read-back byte order
+    /// (match the target format).
+    pub fn initRaster(bgra: bool) !Skia {
+        return wrap(weft_skia_create_raster(@intFromBool(bgra)) orelse return error.SkiaInitFailed);
+    }
+
+    /// Ganesh on the Vulkan device `vk` names. `error.SkiaGpuUnavailable`
+    /// when Skia cannot bring it up; the caller picks the fallback.
+    pub fn initVulkan(vk: *const VulkanInfo, bgra: bool) !Skia {
+        return wrap(weft_skia_create_vulkan(vk, @intFromBool(bgra)) orelse return error.SkiaGpuUnavailable);
+    }
+
+    /// Ganesh on the OpenGL context current on this thread, its entry points
+    /// resolved through `get_proc`. That context must stay current for every
+    /// later call on the renderer. Frames read back as RGBA.
+    pub fn initGl(get_proc: GlGetProc, ctx: ?*anyopaque) !Skia {
+        return wrap(weft_skia_create_gl(get_proc, ctx) orelse return error.SkiaGpuUnavailable);
+    }
+
+    fn wrap(shim: *Shim) Skia {
         return .{ .shim = shim, .gpu = weft_skia_is_gpu(shim) != 0 };
     }
 
@@ -98,9 +120,21 @@ pub const Skia = struct {
         weft_skia_register_font(self.shim, font_id, bytes.ptr, bytes.len);
     }
 
-    /// Begin a frame and clear to `bg` (a linear color, converted to sRGB).
+    /// Begin a frame on the renderer's internal surface and clear to `bg` (a
+    /// linear color, converted to sRGB). Finished by `end`, which reads it back.
     pub fn begin(self: *Skia, width: u32, height: u32, bg: [4]f32) !void {
         if (weft_skia_begin(self.shim, width, height) != 0) return error.SkiaBeginFailed;
+        self.clear(bg);
+    }
+
+    /// Begin a frame drawn straight into OpenGL framebuffer `fbo` (0: the
+    /// window's own) and clear to `bg`. GL renderers only; finished by `flush`.
+    pub fn beginFramebuffer(self: *Skia, fbo: u32, width: u32, height: u32, stencil_bits: u32, bg: [4]f32) !void {
+        if (weft_skia_begin_framebuffer(self.shim, fbo, width, height, stencil_bits) != 0) return error.SkiaBeginFailed;
+        self.clear(bg);
+    }
+
+    fn clear(self: *Skia, bg: [4]f32) void {
         const c = scene.linearToSrgbColor(bg);
         weft_skia_clear(self.shim, c[0], c[1], c[2], c[3]);
     }
@@ -193,5 +227,10 @@ pub const Skia = struct {
         var row_bytes: usize = 0;
         const px = weft_skia_end(self.shim, &row_bytes) orelse return error.SkiaEndFailed;
         return .{ .pixels = px, .width = width, .height = height, .row_bytes = row_bytes };
+    }
+
+    /// Submit a `beginFramebuffer` frame to the GL context; the caller swaps.
+    pub fn flush(self: *Skia) !void {
+        if (weft_skia_flush(self.shim) != 0) return error.SkiaFlushFailed;
     }
 };

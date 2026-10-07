@@ -51,7 +51,7 @@ pub const setup = @import("setup.zig");
 /// Render targets and the head bound to one.
 pub const render = @import("render.zig");
 pub const render_memory = @import("render_memory.zig");
-pub const headless_vulkan = @import("headless_vulkan.zig");
+pub const headless = @import("headless.zig");
 pub const window_head = @import("window_head.zig");
 
 /// Event-loop sources, scrolling, caret configuration, and the shared

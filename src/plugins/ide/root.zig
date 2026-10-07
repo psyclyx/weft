@@ -753,6 +753,13 @@ fn initExtra() void {
         .{ .key = "C-z", .arms = &.{ "std.history.undo", "edit.undo" } },
         .{ .key = "C-S-z", .arms = &.{ "std.history.redo", "edit.redo" } },
         .{ .key = "C-y", .arms = &.{ "std.history.redo", "edit.redo" } },
+        // The same words under ⌘, a Mac's keys for them (super, `s-`). Elsewhere
+        // the super key rarely reaches a window, so binding both costs nothing.
+        .{ .key = "s-c", .arms = &.{ "std.transfer.yank", "ide.copy" } },
+        .{ .key = "s-x", .arms = &.{ "std.transfer.delete-to-register", "ide.cut" } },
+        .{ .key = "s-v", .arms = &.{ "std.transfer.paste", "ide.paste" } },
+        .{ .key = "s-z", .arms = &.{ "std.history.undo", "edit.undo" } },
+        .{ .key = "S-s-z", .arms = &.{ "std.history.redo", "edit.redo" } },
     };
     for (intended) |b| weft.bindKeys("ide", b.key, b.arms);
     // Up a level in a listing: Alt+Up (Explorer, VS Code; Finder's Cmd+Up).
@@ -784,6 +791,7 @@ fn initExtra() void {
         .{ "C-Home", "ide.doc-start" },                      .{ "C-End", "ide.doc-end" },
         .{ "C-S-Home", "ide.select-doc-start" },             .{ "C-S-End", "ide.select-doc-end" },
         .{ "C-a", "ide.select-all" },                        .{ "S-Tab", "ide.dedent" },
+        .{ "s-a", "ide.select-all" },                        .{ "s-slash", "comment.toggle-selection" },
         .{ "ISO_Left_Tab", "ide.dedent" },                   .{ "C-slash", "comment.toggle-selection" },
         .{ "M-Up", "ide.move-line-up" },                     .{ "M-Down", "ide.move-line-down" },
         .{ "C-S-k", "ide.delete-line" },                     .{ "C-Return", "ide.open-below" },

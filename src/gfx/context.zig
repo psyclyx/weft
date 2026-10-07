@@ -7,6 +7,7 @@ const std = @import("std");
 const vkmod = @import("weft_vk");
 const vk = vkmod.c;
 const swapchain_state = @import("swapchain_state.zig");
+const platform = @import("weft_platform");
 
 pub const max_frames_in_flight = 2;
 
@@ -15,14 +16,6 @@ const instance_extensions = [_][*:0]const u8{
     vk.VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
 };
 const device_extensions = [_][*:0]const u8{vk.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-
-// W-later: platform-specific WSI shape (vkCreateWaylandSurfaceKHR has no
-// backend-neutral form) — see platform.zig's leak #1 for the seam note; the
-// right shape (a tagged union per platform) waits on a second platform.
-pub const SurfaceSource = struct {
-    display: *anyopaque, // *wl_display
-    surface: *anyopaque, // *wl_surface
-};
 
 fn check(result: vk.VkResult) !void {
     if (result != vk.VK_SUCCESS) {
@@ -72,7 +65,7 @@ pub const Context = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
-        source: SurfaceSource,
+        source: platform.SurfaceSource,
         fb_width: u32,
         fb_height: u32,
         app_name: [*:0]const u8,
@@ -129,11 +122,17 @@ pub const Context = struct {
         try check(vk.vkCreateInstance(&create_info, null, &self.instance));
     }
 
-    fn createSurface(self: *Context, source: SurfaceSource) !void {
+    /// WSI is per platform by construction (there is no backend-neutral
+    /// "create a surface" in Vulkan); this target presents to Wayland only.
+    fn createSurface(self: *Context, source: platform.SurfaceSource) !void {
+        const wl = switch (source) {
+            .wayland => |wl| wl,
+            else => return error.UnsupportedSurface,
+        };
         const create_info = vk.VkWaylandSurfaceCreateInfoKHR{
             .sType = vk.VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
-            .display = @ptrCast(source.display),
-            .surface = @ptrCast(source.surface),
+            .display = @ptrCast(wl.display),
+            .surface = @ptrCast(wl.surface),
         };
         try check(vk.vkCreateWaylandSurfaceKHR(self.instance, &create_info, null, &self.surface));
     }

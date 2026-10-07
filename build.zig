@@ -531,9 +531,34 @@ const guests = [_]Guest{
     .{ .name = "breadcrumbs", .import = "guest_breadcrumbs_wasm", .install = true, .libraries = &.{.statusline} },
 };
 
+/// The GPU API Skia renders through (`-Dgpu`). Exactly one is compiled in:
+/// it decides the window's target, the headless target the e2e suite reads
+/// back, and which half of the Skia shim is linked. Vulkan presents to
+/// Wayland; OpenGL presents to Wayland through EGL and to Cocoa through
+/// NSOpenGL, and is the only API on macOS (nixpkgs' Darwin Skia has no
+/// Vulkan, and Vulkan there would mean MoltenVK).
+const Gpu = enum { vulkan, opengl };
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const os = target.result.os.tag;
+    if (os != .linux and os != .macos)
+        std.debug.panic("weft builds for Linux and macOS, not {t}", .{os});
+    const gpu = b.option(Gpu, "gpu", "GPU API to render through: vulkan or opengl (default: vulkan on Linux, opengl on macOS)") orelse
+        if (os == .macos) Gpu.opengl else Gpu.vulkan;
+    if (os == .macos and gpu == .vulkan)
+        std.debug.panic("-Dgpu=vulkan is Linux-only; macOS renders through OpenGL", .{});
+    const gpu_options = b.addOptions();
+    gpu_options.addOption(Gpu, "gpu", gpu);
+    const gpu_options_mod = gpu_options.createModule();
+    // The macOS SDK (frameworks, libobjc, libc++), when targeting macOS: from
+    // SDKROOT, which nixpkgs' apple-sdk exports in the dev shell — natively,
+    // and for the Linux cross check (nix/macos-cross.nix).
+    const macos_sdk: ?[]const u8 = if (os == .macos)
+        b.graph.environ_map.get("SDKROOT") orelse @panic("SDKROOT not set — build inside the nix shell")
+    else
+        null;
     const stemma_opt = depOrOverride(b, "stemma", "NPINS_OVERRIDE_STEMMA", .{ .target = target, .optimize = optimize });
     const stemma_dep = stemma_opt orelse return;
     // Pinned, portable fallback bytes supplied by the build environment. Face
@@ -548,18 +573,36 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // Family → font file, per platform: fontconfig on Linux, CoreText on
+    // macOS. `weft_text`, the view and `FaceSet` see only the bytes.
     const font_provider_impl = b.createModule(.{
-        .root_source_file = b.path(if (target.result.os.tag == .linux)
-            "src/font_provider/fontconfig.zig"
-        else
-            "src/font_provider/unavailable.zig"),
+        .root_source_file = b.path(switch (os) {
+            .linux => "src/font_provider/fontconfig.zig",
+            else => "src/font_provider/coretext.zig",
+        }),
         .target = target,
         .optimize = optimize,
-        .link_libc = target.result.os.tag == .linux,
+        .link_libc = true,
     });
     font_provider_impl.addImport("contract", font_provider_contract);
-    if (target.result.os.tag == .linux)
-        font_provider_impl.linkSystemLibrary("fontconfig", .{});
+    // Which face of a font collection a PostScript name is: pure parsing,
+    // its own module so the Linux suite tests what CoreText relies on.
+    const font_ttc_mod = b.createModule(.{
+        .root_source_file = b.path("src/font_provider/ttc.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    switch (os) {
+        .linux => font_provider_impl.linkSystemLibrary("fontconfig", .{}),
+        else => {
+            addMacosSdk(b, font_provider_impl, macos_sdk.?);
+            font_provider_impl.addIncludePath(b.path("src/font_provider"));
+            font_provider_impl.addCSourceFile(.{ .file = b.path("src/font_provider/coretext.c"), .flags = macosCFlags(b, macos_sdk.?, &.{ "-Wall", "-Wextra", "-Werror" }) });
+            font_provider_impl.linkFramework("CoreText", .{});
+            font_provider_impl.linkFramework("CoreFoundation", .{});
+            font_provider_impl.addImport("ttc", font_ttc_mod);
+        },
+    }
     const font_provider_mod = b.createModule(.{
         .root_source_file = b.path("src/font_provider/root.zig"),
         .target = target,
@@ -587,7 +630,7 @@ pub fn build(b: *std.Build) void {
     // The compiled C++ shim rides with the module that DECLARES these externs,
     // so it enters a link exactly once no matter how many modules import it.
     // Attaching it per-consumer instead gives duplicate symbol definitions.
-    addSkia(b, skia_mod);
+    addSkia(b, skia_mod, gpu, macos_sdk);
     const text_mod = b.createModule(.{
         .root_source_file = b.path("src/text/root.zig"),
         .target = target,
@@ -632,20 +675,24 @@ pub fn build(b: *std.Build) void {
     fs_platform.addImport("weft_fs", architecture.fs);
 
     // The window/input/present seam (src/platform/root.zig's `assertPlatform`
-    // contract plus the one implementation compiled in). It depends on nothing
-    // in this tree — not core, not gfx, not app — and this module edge is what
-    // keeps that true: a platform that reaches up into the editor cannot be
-    // written, it fails to compile.
+    // contract plus the one implementation compiled in — Wayland on Linux,
+    // Cocoa on macOS). It depends on nothing in this tree — not core, not
+    // gfx, not app — and this module edge is what keeps that true: a platform
+    // that reaches up into the editor cannot be written, it fails to compile.
     const platform_mod = b.createModule(.{
         .root_source_file = b.path("src/platform/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    platform_mod.linkSystemLibrary("wayland-client", .{});
-    platform_mod.linkSystemLibrary("xkbcommon", .{});
-    platform_mod.linkSystemLibrary("vulkan", .{});
-    addWaylandProtocols(b, platform_mod);
+    switch (os) {
+        .linux => {
+            platform_mod.linkSystemLibrary("wayland-client", .{});
+            platform_mod.linkSystemLibrary("xkbcommon", .{});
+            addWaylandProtocols(b, platform_mod);
+        },
+        else => addCocoaPlatform(b, platform_mod, macos_sdk.?),
+    }
 
     // ONE Vulkan C import for the whole program. src/vk/root.zig's own doc
     // comment states the invariant — "every module must use these types:
@@ -653,14 +700,37 @@ pub fn build(b: *std.Build) void {
     // types" — and a named module is the only way to keep it once gfx and app
     // are separate modules, since a file shared by relative import would
     // otherwise be compiled into each of them independently, producing exactly
-    // the incompatible types it warns about.
-    const vk_mod = b.createModule(.{
-        .root_source_file = b.path("src/vk/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    vk_mod.linkSystemLibrary("vulkan", .{});
+    // the incompatible types it warns about. Only a Vulkan build has it.
+    const vk_mod: ?*std.Build.Module = if (gpu == .vulkan) vk: {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/vk/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.linkSystemLibrary("vulkan", .{});
+        break :vk mod;
+    } else null;
+
+    // The OpenGL twin of `weft_vk`: the one place weft binds a platform's GL
+    // (EGL, or NSOpenGL/CGL). Only an OpenGL build has it.
+    const gl_mod: ?*std.Build.Module = if (gpu == .opengl) gl: {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/gl/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("weft_platform", platform_mod);
+        switch (os) {
+            .linux => {
+                mod.linkSystemLibrary("egl", .{});
+                mod.linkSystemLibrary("wayland-egl", .{});
+            },
+            else => addCocoaGl(b, mod, macos_sdk.?),
+        }
+        break :gl mod;
+    } else null;
 
     // The editor kernel. It is graphics-free by construction now, not by
     // convention: `weft_core` is given no scene, text, font, skia, gfx, app or
@@ -683,7 +753,8 @@ pub fn build(b: *std.Build) void {
     // The editor's view layer, above core. What is genuinely below core —
     // scene/text/font_provider/skia — is already separate; what is left here
     // reads buffers, panes and heads, so it gets `weft_core` and the app does
-    // not get to reach past it into `view/`.
+    // not get to reach past it into `view/`. It also owns the GPU targets, so
+    // it is where the `-Dgpu` choice lands.
     const gfx_mod = b.createModule(.{
         .root_source_file = b.path("src/gfx/root.zig"),
         .target = target,
@@ -691,7 +762,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     gfx_mod.addImport("weft_core", core_mod);
-    gfx_mod.addImport("weft_vk", vk_mod);
+    gfx_mod.addImport("gpu_options", gpu_options_mod);
+    gfx_mod.addImport("weft_platform", platform_mod);
+    if (vk_mod) |mod| gfx_mod.addImport("weft_vk", mod);
+    if (gl_mod) |mod| gfx_mod.addImport("weft_gl", mod);
     gfx_mod.addImport("weft_scene", scene_mod);
     gfx_mod.addImport("weft_skia", skia_mod);
     gfx_mod.addImport("weft_text", text_mod);
@@ -699,7 +773,6 @@ pub fn build(b: *std.Build) void {
     gfx_mod.addImport("weft_semantic", architecture.semantic);
     gfx_mod.addImport("weft_view_runtime", architecture.view_runtime);
     gfx_mod.addImport("stemma", stemma_dep.module("stemma"));
-    gfx_mod.linkSystemLibrary("vulkan", .{});
 
     // The editor assembled — the only layer that knows core AND gfx AND
     // platform, which is why it is the top of the enforced graph. Nothing below
@@ -722,6 +795,8 @@ pub fn build(b: *std.Build) void {
         .app = app_mod,
         .gfx = gfx_mod,
         .vk = vk_mod,
+        .gl = gl_mod,
+        .gpu_options = gpu_options_mod,
         .platform = platform_mod,
         .fs_platform = fs_platform,
         .font_provider = font_provider_mod,
@@ -751,15 +826,33 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
     b.installArtifact(exe);
-    const desktop = b.addInstallFileWithDir(b.path("packaging/weft.desktop"), .prefix, "share/applications/weft.desktop");
-    b.getInstallStep().dependOn(&desktop.step);
-    const icon = b.addInstallFileWithDir(b.path("assets/brand/weft-app-icon.svg"), .prefix, "share/icons/hicolor/scalable/apps/weft.svg");
-    b.getInstallStep().dependOn(&icon.step);
 
     // The reference plugins ship as external `.wasm` under lib/weft/plugins/,
     // not embedded — weft's binary carries none of them. Load one with e.g.
     // `--plugin zig-out/lib/weft/plugins/vim.wasm`.
-    installPlugins(b);
+    installPlugins(b, .lib);
+
+    switch (os) {
+        // The freedesktop entry and icon a Linux desktop launches weft from.
+        .linux => {
+            const desktop = b.addInstallFileWithDir(b.path("packaging/weft.desktop"), .prefix, "share/applications/weft.desktop");
+            b.getInstallStep().dependOn(&desktop.step);
+            const icon = b.addInstallFileWithDir(b.path("assets/brand/weft-app-icon.svg"), .prefix, "share/icons/hicolor/scalable/apps/weft.svg");
+            b.getInstallStep().dependOn(&icon.step);
+        },
+        // The application bundle macOS launches weft as (Finder, the Dock,
+        // `open`): the install prefix's own layout under `Contents/`, so the
+        // executable finds its plugins at `<exe>/../lib/weft/plugins` from
+        // inside the bundle exactly as it does from `bin/`.
+        else => {
+            const contents = "Applications/weft.app/Contents";
+            const bundled = b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = contents ++ "/MacOS" } } });
+            b.getInstallStep().dependOn(&bundled.step);
+            const plist = b.addInstallFileWithDir(b.path("packaging/macos/Info.plist"), .{ .custom = contents }, "Info.plist");
+            b.getInstallStep().dependOn(&plist.step);
+            installPlugins(b, .{ .custom = contents ++ "/lib" });
+        },
+    }
 
     // The former weft-agent is folded into `weft --headless`
     // (src/headless.zig): one binary, every weft a peer. The old
@@ -939,6 +1032,11 @@ pub fn build(b: *std.Build) void {
     // it in the gate.
     const platform_tests = b.addTest(.{ .root_module = platform_mod });
     test_step.dependOn(&b.addRunArtifact(platform_tests).step);
+    b.step("test-platform", "Run the platform module's tests (contract, keysyms, pointer, clipboard)").dependOn(&b.addRunArtifact(platform_tests).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = font_ttc_mod })).step);
+    // The GL binding owns its tests too (an offscreen context comes up and
+    // resolves GL), in a build that renders through it.
+    if (gl_mod) |mod| test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
     // Core's own suite — the ABI property tests plus the whole wasm-membrane
     // suite — was running inside the `weft` binary because core was compiled
     // into it. It is a module now, so it gets its own binary, and it needs the
@@ -986,7 +1084,6 @@ pub fn build(b: *std.Build) void {
     // relative `view.zig`/`region.zig` imports pull in that subtree and need
     // the subtree's own dependencies resolvable here.
     bench_raster_mod.addImport("weft_core", core_mod);
-    bench_raster_mod.addImport("weft_vk", vk_mod);
     bench_raster_mod.addImport("weft_scene", scene_mod);
     bench_raster_mod.addImport("weft_skia", skia_mod);
     bench_raster_mod.addImport("weft_text", text_mod);
@@ -994,7 +1091,6 @@ pub fn build(b: *std.Build) void {
     bench_raster_mod.addImport("weft_semantic", architecture.semantic);
     bench_raster_mod.addImport("weft_view_runtime", architecture.view_runtime);
     bench_raster_mod.addImport("stemma", stemma_dep.module("stemma"));
-    bench_raster_mod.linkSystemLibrary("vulkan", .{});
     const bench_raster_exe = b.addExecutable(.{ .name = "weft-bench-raster", .root_module = bench_raster_mod });
     const bench_raster_step = b.step("bench-raster", "Time the frame raster path against a real source file");
     bench_raster_step.dependOn(&b.addRunArtifact(bench_raster_exe).step);
@@ -1394,7 +1490,9 @@ const AppDeps = struct {
     core: *std.Build.Module,
     app: *std.Build.Module,
     gfx: *std.Build.Module,
-    vk: *std.Build.Module,
+    vk: ?*std.Build.Module,
+    gl: ?*std.Build.Module,
+    gpu_options: *std.Build.Module,
     platform: *std.Build.Module,
     fs_platform: *std.Build.Module,
     font_provider: *std.Build.Module,
@@ -1424,7 +1522,9 @@ fn configureAppModule(b: *std.Build, mod: *std.Build.Module, deps: AppDeps) void
     mod.addImport("weft_core", deps.core);
     if (mod != deps.app) mod.addImport("weft_app", deps.app);
     mod.addImport("weft_gfx", deps.gfx);
-    mod.addImport("weft_vk", deps.vk);
+    if (deps.vk) |vk| mod.addImport("weft_vk", vk);
+    if (deps.gl) |gl| mod.addImport("weft_gl", gl);
+    mod.addImport("gpu_options", deps.gpu_options);
     mod.addImport("weft_platform", deps.platform);
     mod.addImport("weft_fs_platform", deps.fs_platform);
     mod.addImport("weft_font_provider", deps.font_provider);
@@ -1433,10 +1533,6 @@ fn configureAppModule(b: *std.Build, mod: *std.Build.Module, deps: AppDeps) void
     mod.addImport("weft_text", deps.text);
     mod.addImport("weft_lifecycle", deps.lifecycle);
     mod.addImport("stemma", deps.stemma);
-    // Both binaries render through ordinary Vulkan images; the authoritative
-    // E2E renderer deliberately has no WSI, compositor, or platform-input
-    // dependency, which is why this is shared and the compositor link is not.
-    mod.linkSystemLibrary("vulkan", .{});
     addSyntax(b, mod);
     addWasm(b, mod);
     addQuickjs(b, mod);
@@ -1654,21 +1750,22 @@ fn embedGuests(b: *std.Build, mod: *std.Build.Module) void {
 }
 
 /// Install the reference plugins as external `.wasm` artifacts under
-/// `lib/weft/plugins/`. These are what a user loads with `--plugin`; weft
-/// carries no plugins in-process.
-fn installPlugins(b: *std.Build) void {
+/// `<lib>/weft/plugins/`. These are what a user loads with `--plugin`; weft
+/// carries no plugins in-process. `lib` is the install prefix's, or a macOS
+/// bundle's copy of it.
+fn installPlugins(b: *std.Build, lib: std.Build.InstallDir) void {
     @setEvalBranchQuota(10_000); // the guest list grows; comptime path per entry
     inline for (guests) |g| {
         if (!g.install) continue;
         const guest = buildGuest(b, g);
-        const inst = b.addInstallFileWithDir(guest.getEmittedBin(), .lib, "weft/plugins/" ++ g.name ++ ".wasm");
+        const inst = b.addInstallFileWithDir(guest.getEmittedBin(), lib, "weft/plugins/" ++ g.name ++ ".wasm");
         b.getInstallStep().dependOn(&inst.step);
     }
     // JS plugins (config/plugins/*.js) — resident quickjs plugins (e.g. the ACP
     // agent client) — install verbatim beside the .wasm plugins, loadable by
     // name (`weft.plugin("acp.js")`).
     inline for (js_plugins) |name| {
-        const inst = b.addInstallFileWithDir(b.path("config/plugins/" ++ name), .lib, "weft/plugins/" ++ name);
+        const inst = b.addInstallFileWithDir(b.path("config/plugins/" ++ name), lib, "weft/plugins/" ++ name);
         b.getInstallStep().dependOn(&inst.step);
     }
 }
@@ -1761,34 +1858,70 @@ fn addHostTestDirs(b: *std.Build, mod: *std.Build.Module) void {
     }
 }
 
-/// Skia (default renderer): compile the C++ shim (src/skia/shim.cpp) with
-/// g++ against Skia's headers, then link the object + libskia + libstdc++ into
-/// the Zig exe. Resolved via **pkg-config** (Skia ships a `skia.pc`) — no env
+/// Skia: compile the C++ shim (src/skia/) against Skia's headers, then link it
+/// with libskia. Resolved via **pkg-config** (Skia ships a `skia.pc`) — no env
 /// var; skia is a shell.nix buildInput, so its pkgconfig is on PKG_CONFIG_PATH,
-/// the same idiom every other dep uses. g++ (not Zig's clang) builds the shim
-/// so it resolves its own GNU libstdc++ ABI — which Skia's Ganesh init requires
-/// (it hands Skia a std::function); only the C ABI in shim.h crosses to Zig.
-fn addSkia(b: *std.Build, mod: *std.Build.Module) void {
+/// the same idiom every other dep uses. The shim is the drawing unit plus the
+/// one backend this build renders through (`shim_vulkan.cpp` or
+/// `shim_gl.cpp`); only the C ABI in shim.h crosses to Zig.
+///
+/// The compiler follows the C++ runtime Skia was built against, because the
+/// shim shares objects with it:
+/// - Linux: g++ (not Zig's clang), so the shim resolves GNU libstdc++'s ABI —
+///   which Skia's Ganesh Vulkan init requires (it hands Skia a std::function);
+///   the real libstdc++.so is linked positionally.
+/// - macOS: Zig's clang against the SDK's libc++ headers, linked to the
+///   system libc++ — the one nixpkgs' Darwin Skia links. Zig's own bundled
+///   libc++ would be a second copy with its own allocator and globals.
+fn addSkia(b: *std.Build, mod: *std.Build.Module, gpu: Gpu, macos_sdk: ?[]const u8) void {
+    const sources = [_][]const u8{
+        "src/skia/shim.cpp",
+        switch (gpu) {
+            .vulkan => "src/skia/shim_vulkan.cpp",
+            .opengl => "src/skia/shim_gl.cpp",
+        },
+    };
     // Skia's include dir (`include/skia`) from its pkg-config.
-    const cflags = b.run(&.{ "pkg-config", "--cflags-only-I", "skia" });
-    // libstdc++'s real path — `zig cc`'s `-lstdc++` substitutes LLVM libc++
-    // (missing the GNU symbols), so link the real .so positionally instead;
-    // lld adds it as a DT_NEEDED, resolved at run time via LD_LIBRARY_PATH.
-    const libstdcpp = std.mem.trim(u8, b.run(&.{ "g++", "-print-file-name=libstdc++.so" }), " \t\r\n");
+    const includes = b.run(&.{ "pkg-config", "--cflags-only-I", "skia" });
+    // -fno-exceptions/-fno-rtti match how nixpkgs builds Skia and keep the
+    // shim from pulling the unwinder (_Unwind_Resume) into the Zig link.
+    const common = [_][]const u8{ "-std=c++17", "-O2", "-fno-rtti", "-fno-exceptions" };
 
-    // Separate g++ compile → object; -fno-exceptions/-fno-rtti match how
-    // nixpkgs builds Skia and keep the shim from pulling libgcc's unwinder
-    // (_Unwind_Resume) into the Zig link.
-    const cc = b.addSystemCommand(&.{ "g++", "-std=c++17", "-c", "-O2", "-fPIC", "-fno-rtti", "-fno-exceptions" });
-    var it = std.mem.tokenizeAny(u8, cflags, " \t\r\n");
-    while (it.next()) |tok| cc.addArg(b.dupe(tok));
-    cc.addFileArg(b.path("src/skia/shim.cpp"));
-    cc.addArg("-o");
-    const obj = cc.addOutputFileArg("weft_skia_shim.o");
-    mod.addObjectFile(obj);
-
+    if (macos_sdk != null) {
+        // nixpkgs keeps the system libc++ (its headers, and the stub for
+        // /usr/lib/libc++.1.dylib) beside the SDK rather than in it.
+        const libcxx = b.graph.environ_map.get("WEFT_LIBCXX") orelse
+            @panic("WEFT_LIBCXX not set — build inside the nix shell");
+        var flags: std.ArrayList([]const u8) = .empty;
+        flags.appendSlice(b.allocator, &common) catch @panic("OOM");
+        // `-cxx-isystem`: libc++'s headers must precede the C library's.
+        flags.appendSlice(b.allocator, &.{ "-nostdinc++", "-cxx-isystem", b.pathJoin(&.{ libcxx, "include/c++/v1" }) }) catch @panic("OOM");
+        var it = std.mem.tokenizeAny(u8, includes, " \t\r\n");
+        while (it.next()) |tok| flags.append(b.allocator, b.dupe(tok)) catch @panic("OOM");
+        mod.addCSourceFiles(.{ .files = &sources, .flags = flags.items });
+        // Positionally, as Linux does with libstdc++: `linkSystemLibrary("c++")`
+        // would mean Zig's bundled libc++.
+        mod.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ libcxx, "lib/libc++.1.tbd" }) });
+    } else {
+        // libstdc++'s real path — `zig cc`'s `-lstdc++` substitutes LLVM libc++
+        // (missing the GNU symbols), so link the real .so positionally instead;
+        // lld adds it as a DT_NEEDED, resolved at run time via LD_LIBRARY_PATH.
+        const libstdcpp = std.mem.trim(u8, b.run(&.{ "g++", "-print-file-name=libstdc++.so" }), " \t\r\n");
+        for (sources) |source| {
+            const cc = b.addSystemCommand(&.{ "g++", "-c", "-fPIC" });
+            cc.addArgs(&common);
+            var it = std.mem.tokenizeAny(u8, includes, " \t\r\n");
+            while (it.next()) |tok| cc.addArg(b.dupe(tok));
+            cc.addFileArg(b.path(source));
+            // Edits to the shared private header must rebuild every unit.
+            cc.addFileInput(b.path("src/skia/shim_state.h"));
+            cc.addFileInput(b.path("src/skia/shim.h"));
+            cc.addArg("-o");
+            mod.addObjectFile(cc.addOutputFileArg(b.fmt("{s}.o", .{std.fs.path.stem(source)})));
+        }
+        mod.addObjectFile(.{ .cwd_relative = libstdcpp });
+    }
     mod.linkSystemLibrary("skia", .{}); // -L/-lskia from pkg-config
-    mod.addObjectFile(.{ .cwd_relative = libstdcpp });
 }
 
 /// Built once and shared by every module `addSyntax` touches. It must be ONE
@@ -1879,4 +2012,60 @@ fn depOrOverride(
         .{ env_var, override, fixed, want },
     );
     return b.lazyDependency(name ++ "_local", args);
+}
+
+/// Make the macOS SDK's frameworks and stub libraries (libobjc, libc++)
+/// visible to `mod`. Explicit paths rather than `--sysroot`: a sysroot would
+/// also re-root the absolute nix store paths pkg-config hands back.
+fn addMacosSdk(b: *std.Build, mod: *std.Build.Module, sdk: []const u8) void {
+    mod.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System/Library/Frameworks" }) });
+    mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
+}
+
+/// C-family flags for a source compiled against the macOS SDK: `extra`, then
+/// the SDK's own `usr/include` searched LAST (`-idirafter`). Zig's bundled
+/// Darwin libc headers keep precedence; the SDK only supplies what they lack
+/// and the frameworks reach for (Security.h's libDER).
+fn macosCFlags(b: *std.Build, sdk: []const u8, extra: []const []const u8) []const []const u8 {
+    var flags: std.ArrayList([]const u8) = .empty;
+    flags.appendSlice(b.allocator, extra) catch @panic("OOM");
+    flags.appendSlice(b.allocator, &.{ "-idirafter", b.pathJoin(&.{ sdk, "usr/include" }) }) catch @panic("OOM");
+    return flags.items;
+}
+
+/// Flags for weft's Objective-C sources: ARC, and every warning an error —
+/// these files are compiled against the real AppKit headers, which is how
+/// a Linux cross build checks them at all.
+const objc_flags = [_][]const u8{
+    "-fobjc-arc",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-Wno-unused-parameter",
+    // NSOpenGL is deprecated (macOS 10.14) but supported; it is the API.
+    "-DGL_SILENCE_DEPRECATION",
+};
+
+/// The Cocoa platform's Objective-C half (src/platform/cocoa/): AppKit's
+/// application, window, view, input and pasteboard behind the C ABI in
+/// `window.h`, which `src/platform/cocoa.zig` implements the Platform
+/// contract over.
+fn addCocoaPlatform(b: *std.Build, mod: *std.Build.Module, sdk: []const u8) void {
+    addMacosSdk(b, mod, sdk);
+    mod.addIncludePath(b.path("src/platform/cocoa"));
+    mod.addCSourceFile(.{ .file = b.path("src/platform/cocoa/window.m"), .flags = macosCFlags(b, sdk, &objc_flags) });
+    mod.linkFramework("AppKit", .{});
+    mod.linkFramework("CoreFoundation", .{});
+    mod.linkSystemLibrary("objc", .{});
+}
+
+/// NSOpenGL (a window's context, bound to its view) and CGL (an offscreen
+/// one) behind the C ABI in `src/gl/cocoa.h`.
+fn addCocoaGl(b: *std.Build, mod: *std.Build.Module, sdk: []const u8) void {
+    addMacosSdk(b, mod, sdk);
+    mod.addIncludePath(b.path("src/gl"));
+    mod.addCSourceFile(.{ .file = b.path("src/gl/cocoa.m"), .flags = macosCFlags(b, sdk, &objc_flags) });
+    mod.linkFramework("AppKit", .{});
+    mod.linkFramework("OpenGL", .{});
+    mod.linkSystemLibrary("objc", .{});
 }

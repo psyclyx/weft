@@ -132,7 +132,7 @@ pub fn main() !void {
         var end_ns = try gpa.alloc(u64, iters);
         defer gpa.free(end_ns);
 
-        var renderer = try skia_mod.Skia.init(null, false, false);
+        var renderer = try skia_mod.Skia.initRaster(false);
         defer renderer.deinit();
         for (view.face_set.bytes, 1..) |bytes, id| renderer.registerFont(@intCast(id), bytes);
 

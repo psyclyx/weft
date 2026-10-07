@@ -1,4 +1,4 @@
-//! weft — the assembled editor: a Wayland window presenting a
+//! weft — the assembled editor: a desktop window (Wayland or Cocoa) presenting a
 //! `core.Editor` through the renderer-neutral view and Skia, all behavior
 //! routed key → keymap → command ABI (built-ins and config/plugin
 //! commands through the same door). The frame loop's only wait is the
@@ -16,7 +16,6 @@ const region = @import("weft_gfx").region;
 const window_layout = @import("weft_gfx").window_layout;
 const stats_mod = @import("weft_gfx").stats;
 const stemma = @import("stemma");
-const vk = @import("weft_vk").c;
 const font_provider = @import("weft_font_provider");
 
 const embedded_font = font_provider.defaultMono();
@@ -617,11 +616,17 @@ pub fn main(init: std.process.Init) !void {
     var sched = scheduler.Scheduler.init(gpa, stats_mod.nowNs);
     defer sched.deinit();
 
-    // fd sources: the wayland display socket (already non-blocking; the
-    // scheduler only needs to know it's a wake reason — the actual pump
-    // stays in the body, unconditional, below) and the task pool's
-    // completion signal (real push wakeup — §6 W2a-3 item 3).
-    _ = try sched.addFd(whead.window.fd(), .{ .read = true }, null, loop_sources.noopFdReady, "wayland");
+    // The platform owns the wait itself: Wayland's just polls (its display
+    // socket is one of the fds), Cocoa's waits in its own event loop with the
+    // fds attached (see `Scheduler.waiter`).
+    sched.waiter = .{ .ctx = whead.window, .wait = loop_sources.platformWait };
+    // fd sources: the platform's event fd, when it has one (the Wayland
+    // display socket — already non-blocking; the scheduler only needs to know
+    // it's a wake reason — the actual pump stays in the body, unconditional,
+    // below) and the task pool's completion signal (real push wakeup — §6
+    // W2a-3 item 3).
+    if (whead.window.fd() >= 0)
+        _ = try sched.addFd(whead.window.fd(), .{ .read = true }, null, loop_sources.noopFdReady, "platform");
     // Clipboard pipes (one epoll set for all of them): a wake reason only —
     // `pumpEvents` moves the bytes, so a paste from a slow client never
     // blocks a frame.
@@ -702,23 +707,24 @@ pub fn main(init: std.process.Init) !void {
         // A zero-size surface has no work to retry: do not queue-idle on
         // every scheduler wake while the stale marker is intentionally held.
         if (resized or (whead.ctx.swapchain_stale and req[0] != 0 and req[1] != 0)) {
-            whead.ctx.recreateSwapchain(req[0], req[1]) catch |e| switch (e) {
+            whead.ctx.recreateSwapchain(req[0], req[1]) catch |e| {
+                // Anything but a zero-size surface is fatal. (An OpenGL
+                // drawable cannot fail any other way, so this is an `if`
+                // rather than a switch with an `else` one target never has.)
+                if (e != error.ZeroExtent) return e;
                 // Zero-size surface: the swapchain is torn down and can't be
                 // recreated yet. Skip this frame until a usable extent arrives
                 // (don't render into a destroyed swapchain).
-                error.ZeroExtent => {
-                    whead.ctx.swapchain_stale = true;
-                    // Nothing is presentable at zero extent — drop any
-                    // latched present so `present_retry` (also gated on
-                    // `swapchain_stale` directly, belt-and-suspenders)
-                    // has nothing to spin on. The next real resize sets
-                    // application damage unconditionally, which re-latches this
-                    // through the ordinary dirty path once there's an
-                    // actual frame to show again.
-                    present_pending = false;
-                    continue;
-                },
-                else => return e,
+                whead.ctx.swapchain_stale = true;
+                // Nothing is presentable at zero extent — drop any
+                // latched present so `present_retry` (also gated on
+                // `swapchain_stale` directly, belt-and-suspenders)
+                // has nothing to spin on. The next real resize sets
+                // application damage unconditionally, which re-latches this
+                // through the ordinary dirty path once there's an
+                // actual frame to show again.
+                present_pending = false;
+                continue;
             };
             // Any frame latched before the configure was for the old extent;
             // only the frame built below may be presented on this swapchain.
