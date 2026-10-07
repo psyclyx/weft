@@ -12,10 +12,17 @@
 //! SIGINT for the foreground job — and a 0x04 at an empty line is end of
 //! file. No signal is ever sent from here on the user's behalf.
 //!
+//! PORTABLE POSIX, one path on every OS: `posix_openpt`/`grantpt`/
+//! `unlockpt`/`ptsname_r` for the pair (the slave opened in the parent, as
+//! `openpty` does — see `openPair`), libc `fork`/`setsid`/`execve`, the
+//! TIOCSCTTY/TIOCSWINSZ ioctls by each OS's own number (`tioc`), `termios`
+//! from `std.c`. Where an OS has a better call it is named in one branch
+//! (`closeInherited`: Linux's `close_range`, a close loop elsewhere).
+//!
 //! THREADS. The frame thread opens the pty (`spawn`), writes, resizes and
 //! reads; one RESIDENT reader (`task.Pool.spawnResident`, like
-//! `proc_stream`'s) forks the child, then waits in `poll` on the master, the
-//! child's pidfd and a kick eventfd, and never blocks anywhere else:
+//! `proc_stream`'s) forks the child, then waits in `poll` on the master and
+//! a kick wake fd, and never blocks anywhere else:
 //! - output is appended to `inbox` under `mutex`, up to `inbox_cap`; past it
 //!   the reader stops reading until the frame thread drains, so a flood
 //!   (`yes`) is held back by the kernel's pty buffer, not by memory;
@@ -25,11 +32,16 @@
 //! - arrival wakes the frame loop through the pool's notify fd — once per
 //!   batch the frame thread has not seen yet, never once per read.
 //!
-//! EXIT is the child's, seen through its pidfd — not the master's end of
-//! file, which a background job still holding the tty would postpone past
-//! the shell's own exit. Its status is published after the last of its
-//! output was read, so a consumer that drains first reports the end after
-//! everything the child printed.
+//! EXIT is the child's, not the master's end of file, which a background
+//! job still holding the tty would postpone past the shell's own exit. No
+//! fd for "this child ended" can be `poll`ed on every OS (a pidfd is Linux's
+//! alone; Darwin's `poll` does not take a kqueue), so a small WATCHER thread
+//! per child blocks in `waitid(WEXITED|WNOWAIT)` (`child_status.peek`) and
+//! kicks the reader when it returns. The peek does not reap: the pid stays
+//! the zombie's until the reader reaps it, so the reader's teardown signal
+//! can never reach a recycled pid. The child's status is published after
+//! the last of its output was read, so a consumer that drains first reports
+//! the end after everything the child printed.
 //!
 //! Local only: the child runs on this machine. A pty in a remote place (a
 //! shell on a peer) is a later door (doc/terminal.md §6).
@@ -37,9 +49,51 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const linux = std.os.linux;
+const c = std.c;
 const task = @import("task.zig");
 const scheduler = @import("scheduler.zig");
+const posix_fd = @import("posix_fd.zig");
+const child_status = @import("child_status.zig");
+
+// libc's pty and fd calls `std.c` does not declare. All are in glibc and in
+// Darwin's libSystem. `ioctl` is redeclared with the request as C's
+// `unsigned long`: Darwin's request numbers (TIOCSWINSZ = 0x80087467) do not
+// fit `std.c.ioctl`'s `c_int`, and a sign-extended request is a different
+// request to a 64-bit kernel.
+extern "c" fn posix_openpt(flags: c_int) c_int;
+extern "c" fn grantpt(fd: c_int) c_int;
+extern "c" fn unlockpt(fd: c_int) c_int;
+extern "c" fn ptsname_r(fd: c_int, buf: [*]u8, len: usize) c_int;
+extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
+extern "c" fn getdtablesize() c_int;
+
+/// The two tty ioctls by this OS's numbers. Linux's are `std.c.T`'s; Darwin's
+/// (BSD's `_IO`/`_IOW` encodings, `<sys/ttycom.h>`) are not in `std.c`, so
+/// they are built from the same macros the header uses.
+const tioc = switch (builtin.os.tag) {
+    .linux => struct {
+        const SWINSZ: c_ulong = c.T.IOCSWINSZ;
+        const SCTTY: c_ulong = c.T.IOCSCTTY;
+    },
+    .macos, .ios, .tvos, .visionos, .watchos, .maccatalyst, .driverkit => struct {
+        const IOC_VOID: c_ulong = 0x20000000;
+        const IOC_IN: c_ulong = 0x80000000;
+        const IOCPARM_MASK: c_ulong = 0x1fff;
+        fn io(group: u8, num: u8) c_ulong {
+            return IOC_VOID | (@as(c_ulong, group) << 8) | num;
+        }
+        fn iow(group: u8, num: u8, size: usize) c_ulong {
+            return IOC_IN | ((@as(c_ulong, size) & IOCPARM_MASK) << 16) | (@as(c_ulong, group) << 8) | num;
+        }
+        const SWINSZ = iow('t', 103, @sizeOf(std.posix.winsize));
+        const SCTTY = io('t', 97);
+        comptime {
+            std.debug.assert(SWINSZ == 0x80087467);
+            std.debug.assert(SCTTY == 0x20007461);
+        }
+    },
+    else => @compileError("pty: no tty ioctl numbers for this OS"),
+};
 
 /// A terminal's size: cells, and the pixels they cover (0 when unknown).
 pub const Size = struct {
@@ -60,14 +114,29 @@ pub const SpawnError = error{ PtyUnavailable, ProcessSpawnFailed } || Allocator.
 /// has caught up.
 pub const inbox_cap = 1 << 20;
 
+/// What the reader knows of the child's end, written by the watcher.
+const Watch = enum(u8) {
+    /// Running, or not yet seen to end.
+    running,
+    /// Ended (a zombie, not yet reaped): drain, reap, publish.
+    ended,
+    /// No watcher could be started, or its wait failed: the master's end of
+    /// file is all there is to go on.
+    blind,
+};
+
 pub const Pty = struct {
     gpa: Allocator,
     pool: *task.Pool,
-    master: linux.fd_t,
-    /// Wakes the reader out of `poll`: a stop, a write queued, room made.
-    kick: linux.fd_t,
+    master: c.fd_t,
+    /// Wakes the reader out of `poll`: a stop, a write queued, room made,
+    /// the child's end.
+    kick: c.fd_t,
+    /// The slave side, opened here (close-on-exec, not our controlling
+    /// tty) and handed to the child at the fork; the reader closes this
+    /// copy right after. -1 once closed.
+    slave: c.fd_t,
     /// What the reader needs to start the child, owned until it has.
-    slave_path: [32:0]u8 = @splat(0),
     cmd: [:0]u8,
     cwd: ?[:0]u8,
     environ: std.process.Environ,
@@ -80,7 +149,9 @@ pub const Pty = struct {
     outbox: std.ArrayList(u8) = .empty,
     /// The child, once forked (0 before, or when the fork failed); guarded
     /// by `mutex`.
-    pid: linux.pid_t = 0,
+    pid: c.pid_t = 0,
+    /// The watcher's word on the child (reader-side; see `Watch`).
+    watch: std.atomic.Value(Watch) = .init(.running),
     /// The frame loop has been woken for output it has not read yet: the
     /// reader rings once per such batch.
     rung: std.atomic.Value(bool) = .init(false),
@@ -98,27 +169,29 @@ pub const Pty = struct {
     /// Returns once the master is open; the fork+exec happens on the reader,
     /// off the frame thread, and input written before it lands is queued.
     pub fn spawn(gpa: Allocator, pool: *task.Pool, cmd: []const u8, cwd: ?[]const u8, environ: std.process.Environ, size: Size) SpawnError!*Pty {
-        if (builtin.os.tag != .linux) return error.PtyUnavailable;
         const s = try gpa.create(Pty);
         errdefer gpa.destroy(s);
         const cmd_z = try gpa.dupeZ(u8, cmd);
         errdefer gpa.free(cmd_z);
-        const cwd_z = if (cwd) |c| try gpa.dupeZ(u8, c) else null;
-        errdefer if (cwd_z) |c| gpa.free(c);
+        const cwd_z = if (cwd) |d| try gpa.dupeZ(u8, d) else null;
+        errdefer if (cwd_z) |d| gpa.free(d);
 
-        const master = try openMaster(&s.slave_path);
-        errdefer _ = linux.close(master);
+        const pair = try openPair();
+        errdefer {
+            _ = c.close(pair.master);
+            _ = c.close(pair.slave);
+        }
         var ws = size.winsize();
-        _ = linux.ioctl(master, linux.T.IOCSWINSZ, @intFromPtr(&ws));
+        _ = ioctl(pair.master, tioc.SWINSZ, &ws);
         const kick = scheduler.newWakeFd() catch return error.PtyUnavailable;
         errdefer scheduler.closeWakeFd(kick);
 
         s.* = .{
             .gpa = gpa,
             .pool = pool,
-            .master = master,
+            .master = pair.master,
             .kick = kick,
-            .slave_path = s.slave_path,
+            .slave = pair.slave,
             .cmd = cmd_z,
             .cwd = cwd_z,
             .environ = environ,
@@ -148,7 +221,7 @@ pub const Pty = struct {
     /// foreground job (SIGWINCH).
     pub fn resize(s: *Pty, size: Size) void {
         var ws = size.winsize();
-        _ = linux.ioctl(s.master, linux.T.IOCSWINSZ, @intFromPtr(&ws));
+        _ = ioctl(s.master, tioc.SWINSZ, &ws);
     }
 
     /// Frame thread: move up to `out.len` bytes of output into `out`.
@@ -200,18 +273,18 @@ pub const Pty = struct {
         requestStop(s);
         while (!s.reader.residentExited()) std.Thread.yield() catch {}; // join the reader
         _ = s.reader.poll();
-        _ = linux.close(s.master);
+        _ = c.close(s.master);
         scheduler.closeWakeFd(s.kick);
         s.inbox.deinit(gpa);
         s.outbox.deinit(gpa);
         if (s.environ_owned) s.environ.block.deinit(gpa);
         gpa.free(s.cmd);
-        if (s.cwd) |c| gpa.free(c);
+        if (s.cwd) |d| gpa.free(d);
         gpa.destroy(s);
     }
 
     /// Shutdown's reach into the reader (also `deinit`'s): a flag and a kick,
-    /// which is all its `poll` waits on besides the child.
+    /// which is all its `poll` waits on besides the master.
     fn requestStop(s: *Pty) void {
         s.stop.store(true, .release);
         scheduler.signalWakeFd(s.kick);
@@ -226,7 +299,12 @@ pub const Pty = struct {
     // ── The reader ──────────────────────────────────────────────────
 
     fn run(s: *Pty) void {
-        const pid = forkChild(s) catch {
+        const forked = forkChild(s);
+        // The child holds the slave now (or never will): this copy goes, so
+        // the master's end of file means the CHILD's side let go.
+        _ = c.close(s.slave);
+        s.slave = -1;
+        const pid = forked catch {
             s.status.store(127, .release);
             s.ring();
             return waitForStop(s);
@@ -234,10 +312,12 @@ pub const Pty = struct {
         s.mutex.lock();
         s.pid = pid;
         s.mutex.unlock();
-        const pidfd_rc = linux.pidfd_open(pid, 0);
-        const pidfd: ?linux.fd_t = if (linux.errno(pidfd_rc) == .SUCCESS) @intCast(pidfd_rc) else null;
-        defer if (pidfd) |fd| {
-            _ = linux.close(fd);
+        // The watcher only waits; it is joined on both ways out, each time
+        // after the child is gone (ended on its own, or killed below), so
+        // the join returns promptly.
+        const watcher: ?std.Thread = std.Thread.spawn(.{}, watchChild, .{ s, pid }) catch blk: {
+            s.watch.store(.blind, .release);
+            break :blk null;
         };
 
         var buf: [64 * 1024]u8 = undefined;
@@ -248,46 +328,35 @@ pub const Pty = struct {
             const to_write = s.outbox.items.len > 0;
             s.mutex.unlock();
 
-            var fds: [3]linux.pollfd = undefined;
-            var n: usize = 0;
-            fds[n] = .{ .fd = s.kick, .events = linux.POLL.IN, .revents = 0 };
-            n += 1;
-            const master_at = n;
             var master_events: i16 = 0;
-            if (master_open and room) master_events |= linux.POLL.IN;
-            if (master_open and to_write) master_events |= linux.POLL.OUT;
-            fds[n] = .{ .fd = if (master_events != 0) s.master else -1, .events = master_events, .revents = 0 };
-            n += 1;
-            const pid_at = n;
-            fds[n] = .{ .fd = pidfd orelse -1, .events = linux.POLL.IN, .revents = 0 };
-            n += 1;
+            if (master_open and room) master_events |= c.POLL.IN;
+            if (master_open and to_write) master_events |= c.POLL.OUT;
+            var fds = [2]c.pollfd{
+                .{ .fd = s.kick, .events = c.POLL.IN, .revents = 0 },
+                .{ .fd = if (master_events != 0) s.master else -1, .events = master_events, .revents = 0 },
+            };
 
-            const rc = linux.poll(&fds, n, -1);
-            if (linux.errno(rc) != .SUCCESS) continue; // EINTR
+            if (c.poll(&fds, fds.len, -1) < 0) continue; // EINTR
             if (fds[0].revents != 0) scheduler.drainWakeFd(s.kick);
             if (s.stop.load(.acquire)) break;
 
-            const mrev = fds[master_at].revents;
-            if (mrev & linux.POLL.OUT != 0) flushOutbox(s);
-            if (mrev & (linux.POLL.IN | linux.POLL.HUP | linux.POLL.ERR) != 0) {
+            const mrev = fds[1].revents;
+            if (mrev & c.POLL.OUT != 0) flushOutbox(s);
+            if (mrev & (c.POLL.IN | c.POLL.HUP | c.POLL.ERR) != 0) {
                 // EIO once no process holds the slave any more: nothing more
-                // will come, but the child's end is still its pidfd's to say.
+                // will come, but the child's end is still the watcher's to say.
                 if (!drain(s, &buf, true)) master_open = false;
             }
-            if (fds[pid_at].revents != 0) {
+            const watch = s.watch.load(.acquire);
+            if (watch == .ended or (watch == .blind and !master_open)) {
                 // The child is gone: what it printed is already in the tty
-                // buffer, so read it all, then say how it ended.
+                // buffer, so read it all, then say how it ended. (Blind: the
+                // master's end is all there was, and the child may still be
+                // running — a background job holding the tty would have kept
+                // it open — so this reap can wait for it.)
                 _ = drain(s, &buf, false);
-                s.status.store(reap(pid), .release);
-                s.mutex.lock();
-                s.pid = 0;
-                s.mutex.unlock();
-                s.ring();
-                return waitForStop(s);
-            }
-            if (pidfd == null and !master_open) {
-                // No pidfd (an old kernel): the master's end is all there is.
-                s.status.store(reap(pid), .release);
+                if (watcher) |w| w.join();
+                s.status.store(child_status.reap(pid), .release);
                 s.mutex.lock();
                 s.pid = 0;
                 s.mutex.unlock();
@@ -297,16 +366,25 @@ pub const Pty = struct {
         }
         // Asked to stop with the child still running: hang it up, as closing
         // a terminal does, and reap it — SIGKILL too, so a shell that traps
-        // SIGHUP cannot hold teardown.
+        // SIGHUP cannot hold teardown. The watcher, if any, returns once the
+        // child is a zombie; the pid is ours until the reap.
         s.mutex.lock();
         const live = s.pid;
         s.pid = 0;
         s.mutex.unlock();
-        if (live > 0) {
-            _ = linux.kill(-live, .HUP);
-            _ = linux.kill(live, .KILL);
-            _ = reap(live);
-        }
+        std.debug.assert(live > 0); // only the end above clears it, and that returns
+        _ = c.kill(-live, .HUP);
+        _ = c.kill(live, .KILL);
+        if (watcher) |w| w.join();
+        _ = child_status.reap(live);
+    }
+
+    /// The watcher thread: wait for the child to end, without reaping it,
+    /// and tell the reader.
+    fn watchChild(s: *Pty, pid: c.pid_t) void {
+        const ended = child_status.peek(pid, .wait) != null;
+        s.watch.store(if (ended) .ended else .blind, .release);
+        scheduler.signalWakeFd(s.kick);
     }
 
     /// Read what the master has, up to the inbox's room (all of it when
@@ -320,16 +398,16 @@ pub const Pty = struct {
                 s.mutex.unlock();
                 if (full) return true;
             }
-            const rc = linux.read(s.master, buf, buf.len);
-            switch (linux.errno(rc)) {
-                .SUCCESS => {},
+            const rc = c.read(s.master, buf, buf.len);
+            if (rc < 0) switch (c.errno(rc)) {
                 .AGAIN => return true,
                 .INTR => continue,
                 else => return false, // EIO: no process holds the slave
-            }
+            };
             if (rc == 0) return false;
+            const n: usize = @intCast(rc);
             s.mutex.lock();
-            s.inbox.appendSlice(s.gpa, buf[0..rc]) catch {};
+            s.inbox.appendSlice(s.gpa, buf[0..n]) catch {};
             s.mutex.unlock();
             s.ring();
         }
@@ -340,17 +418,16 @@ pub const Pty = struct {
         s.mutex.lock();
         defer s.mutex.unlock();
         while (s.outbox.items.len > 0) {
-            const rc = linux.write(s.master, s.outbox.items.ptr, s.outbox.items.len);
-            switch (linux.errno(rc)) {
-                .SUCCESS => {},
+            const rc = c.write(s.master, s.outbox.items.ptr, s.outbox.items.len);
+            if (rc < 0) switch (c.errno(rc)) {
                 .INTR => continue,
                 .AGAIN => return,
                 else => {
                     s.outbox.clearRetainingCapacity(); // no reader on the other side
                     return;
                 },
-            }
-            const n: usize = rc;
+            };
+            const n: usize = @intCast(rc);
             std.mem.copyForwards(u8, s.outbox.items[0 .. s.outbox.items.len - n], s.outbox.items[n..]);
             s.outbox.items.len -= n;
         }
@@ -359,103 +436,114 @@ pub const Pty = struct {
     /// After the child: nothing to do but wait to be torn down.
     fn waitForStop(s: *Pty) void {
         while (!s.stop.load(.acquire)) {
-            var fds = [_]linux.pollfd{.{ .fd = s.kick, .events = linux.POLL.IN, .revents = 0 }};
-            _ = linux.poll(&fds, 1, -1);
+            var fds = [_]c.pollfd{.{ .fd = s.kick, .events = c.POLL.IN, .revents = 0 }};
+            _ = c.poll(&fds, 1, -1);
             scheduler.drainWakeFd(s.kick);
         }
     }
 
     /// Fork the child onto the pty's slave and exec its command. Everything
     /// the child needs is built BEFORE the fork: between fork and exec it may
-    /// only make system calls (another thread may hold the allocator's lock).
-    fn forkChild(s: *Pty) !linux.pid_t {
+    /// only make async-signal-safe calls (another thread may hold the
+    /// allocator's lock, or libc's).
+    fn forkChild(s: *Pty) !c.pid_t {
         var argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", s.cmd.ptr, null };
         const envp: [*:null]const ?[*:0]const u8 = if (s.environ.block.slice.len == 0) &[_:null]?[*:0]const u8{} else s.environ.block.slice.ptr;
-        const rc = linux.fork();
-        switch (linux.errno(rc)) {
-            .SUCCESS => {},
-            else => return error.ProcessSpawnFailed,
-        }
-        if (rc != 0) return @intCast(rc);
-        childExec(s, &argv, envp);
+        const prep: ChildPrep = .{
+            .fd_limit = getdtablesize(),
+            .dfl = .{ .handler = .{ .handler = c.SIG.DFL }, .mask = std.posix.sigemptyset(), .flags = 0 },
+            .empty = std.posix.sigemptyset(),
+        };
+        const pid = c.fork();
+        if (pid < 0) return error.ProcessSpawnFailed;
+        if (pid != 0) return pid;
+        childExec(s, &prep, &argv, envp);
     }
 
-    fn childExec(s: *Pty, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) noreturn {
+    const ChildPrep = struct {
+        /// Upper bound of this process's fd numbers, for `closeInherited`.
+        fd_limit: c_int,
+        dfl: c.Sigaction,
+        empty: c.sigset_t,
+    };
+
+    fn childExec(s: *Pty, prep: *const ChildPrep, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) noreturn {
         // A new session, whose controlling terminal is the slave: job control
         // and C-c's SIGINT reach the child's jobs, never weft.
-        _ = linux.setsid();
-        const slave_rc = linux.open(&s.slave_path, .{ .ACCMODE = .RDWR }, 0);
-        if (linux.errno(slave_rc) != .SUCCESS) linux.exit_group(126);
-        const slave: linux.fd_t = @intCast(slave_rc);
-        _ = linux.ioctl(slave, linux.T.IOCSCTTY, 0);
-        _ = linux.dup2(slave, 0);
-        _ = linux.dup2(slave, 1);
-        _ = linux.dup2(slave, 2);
+        _ = c.setsid();
+        // The slave was opened O_NOCTTY in the parent, so it becomes the
+        // controlling terminal only by this ioctl — the one way on both
+        // Linux and Darwin.
+        // (Unchecked: a child without job control still runs.)
+        _ = ioctl(s.slave, tioc.SCTTY, @as(c_int, 0));
+        for (0..3) |i| {
+            const fd: c_int = @intCast(i);
+            _ = c.dup2(s.slave, fd);
+            // dup2 onto itself (a slave that landed on 0–2) keeps its
+            // close-on-exec flag; clear it on all three either way.
+            _ = c.fcntl(fd, c.F.SETFD, @as(c_int, 0));
+        }
         // Nothing of weft's leaks into the shell: not its window, its
-        // sockets, nor the master.
-        _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
+        // sockets, nor the master (nor the slave's original number).
+        closeInherited(prep.fd_limit);
         // Signal dispositions weft ignores and masks its threads block would
         // otherwise survive the exec, and a shell cannot undo an inherited
         // ignore: reset them.
-        const dfl: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.DFL }, .mask = linux.sigemptyset(), .flags = 0 };
-        for ([_]linux.SIG{ .HUP, .INT, .QUIT, .PIPE, .TERM, .CHLD, .TSTP, .TTIN, .TTOU, .WINCH, .ALRM, .USR1, .USR2 }) |sig|
-            _ = linux.sigaction(sig, &dfl, null);
-        const empty = linux.sigemptyset();
-        _ = linux.sigprocmask(linux.SIG.SETMASK, &empty, null);
+        for ([_]c.SIG{ .HUP, .INT, .QUIT, .PIPE, .TERM, .CHLD, .TSTP, .TTIN, .TTOU, .WINCH, .ALRM, .USR1, .USR2 }) |sig|
+            _ = c.sigaction(sig, &prep.dfl, null);
+        _ = c.sigprocmask(c.SIG.SETMASK, &prep.empty, null);
         if (s.cwd) |cwd| {
-            if (linux.errno(linux.chdir(cwd.ptr)) != .SUCCESS) {
+            if (c.chdir(cwd.ptr) != 0) {
                 const msg = "weft: cannot enter the terminal's directory\r\n";
-                _ = linux.write(2, msg, msg.len);
-                linux.exit_group(126);
+                _ = c.write(2, msg, msg.len);
+                c._exit(126);
             }
         }
-        _ = linux.execve("/bin/sh", argv, envp);
+        _ = c.execve("/bin/sh", argv, envp);
         const msg = "weft: cannot run /bin/sh\r\n";
-        _ = linux.write(2, msg, msg.len);
-        linux.exit_group(127);
+        _ = c.write(2, msg, msg.len);
+        c._exit(127);
     }
 };
 
-/// Open a pty master and unlock its slave, writing the slave's path into
-/// `path`.
-fn openMaster(path: *[32:0]u8) SpawnError!linux.fd_t {
-    const rc = linux.open("/dev/ptmx", .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true, .NONBLOCK = true }, 0);
-    if (linux.errno(rc) != .SUCCESS) return error.PtyUnavailable;
-    const master: linux.fd_t = @intCast(rc);
-    errdefer _ = linux.close(master);
-    var unlock: c_int = 0;
-    if (linux.errno(linux.ioctl(master, linux.T.IOCSPTLCK, @intFromPtr(&unlock))) != .SUCCESS) return error.PtyUnavailable;
-    var n: c_uint = 0;
-    if (linux.errno(linux.ioctl(master, linux.T.IOCGPTN, @intFromPtr(&n))) != .SUCCESS) return error.PtyUnavailable;
-    const written = std.fmt.bufPrintZ(path, "/dev/pts/{d}", .{n}) catch return error.PtyUnavailable;
-    // UTF-8 input: the line discipline's erase takes back a whole character.
-    var tio: linux.termios = undefined;
-    if (linux.errno(linux.tcgetattr(master, &tio)) == .SUCCESS) {
-        tio.iflag.IUTF8 = true;
-        _ = linux.tcsetattr(master, .NOW, &tio);
+/// In the forked child: close every fd above stderr. Linux has one call for
+/// it (glibc's `close_range`); elsewhere each number up to the process's fd
+/// limit is closed in turn (`close` is async-signal-safe; EBADF on the gaps
+/// is the expected answer).
+fn closeInherited(fd_limit: c_int) void {
+    if (builtin.os.tag == .linux) {
+        const close_range = struct {
+            extern "c" fn close_range(first: c_uint, last: c_uint, flags: c_int) c_int;
+        }.close_range;
+        if (close_range(3, std.math.maxInt(c_uint), 0) == 0) return;
     }
-    _ = written;
-    return master;
+    var fd: c_int = 3;
+    while (fd < fd_limit) : (fd += 1) _ = c.close(fd);
 }
 
-/// Reap `pid` — gone, or killed just now, so this returns promptly —
-/// returning its exit code or 128 + the signal that killed it.
-fn reap(pid: linux.pid_t) i32 {
-    var info = std.mem.zeroes(linux.siginfo_t);
-    while (true) {
-        const rc = linux.waitid(.PID, pid, &info, linux.W.EXITED, null);
-        switch (linux.errno(rc)) {
-            .SUCCESS => break,
-            .INTR => continue,
-            else => return 127,
-        }
+/// Open a pty pair: the master non-blocking and close-on-exec, the slave
+/// close-on-exec and NOT our controlling terminal. The slave is opened here,
+/// in the parent, as `openpty` does, so it is held from before the reader's
+/// first `poll` until the child lets go: a master that has never had a slave
+/// open reads as ended on some systems, and the reader must not take "not
+/// opened yet" for "gone".
+fn openPair() SpawnError!struct { master: c.fd_t, slave: c.fd_t } {
+    const master = posix_openpt(@bitCast(c.O{ .ACCMODE = .RDWR, .NOCTTY = true }));
+    if (master < 0) return error.PtyUnavailable;
+    errdefer _ = c.close(master);
+    if (!posix_fd.setCloexec(master) or !posix_fd.setNonblocking(master, true)) return error.PtyUnavailable;
+    if (grantpt(master) != 0 or unlockpt(master) != 0) return error.PtyUnavailable;
+    var path: [128:0]u8 = @splat(0);
+    if (ptsname_r(master, &path, path.len) != 0) return error.PtyUnavailable;
+    const slave = c.open(&path, .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true });
+    if (slave < 0) return error.PtyUnavailable;
+    // UTF-8 input: the line discipline's erase takes back a whole character.
+    var tio: c.termios = undefined;
+    if (c.tcgetattr(slave, &tio) == 0) {
+        tio.iflag.IUTF8 = true;
+        _ = c.tcsetattr(slave, .NOW, &tio);
     }
-    const status: u8 = @truncate(@as(u32, @bitCast(info.fields.common.second.sigchld.status)));
-    return switch (@as(linux.CLD, @enumFromInt(info.code))) {
-        .EXITED => status,
-        .KILLED, .DUMPED => 128 + @as(i32, status),
-        else => 127,
-    };
+    return .{ .master = master, .slave = slave };
 }
 
 // ── Tests ───────────────────────────────────────────────────────────

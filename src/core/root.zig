@@ -176,5 +176,8 @@ test {
     _ = @import("container.zig");
     _ = @import("repl_session.zig");
     _ = @import("pty.zig");
+    _ = @import("futex.zig");
+    _ = @import("child_status.zig");
+    _ = @import("posix_fd.zig");
     _ = @import("grid.zig");
 }
