@@ -33,7 +33,6 @@ _Static_assert(kVK_LeftArrow == 0x7B, "cocoa_keys.zig vk.LeftArrow");
 _Static_assert(kVK_RightArrow == 0x7C, "cocoa_keys.zig vk.RightArrow");
 _Static_assert(kVK_DownArrow == 0x7D, "cocoa_keys.zig vk.DownArrow");
 _Static_assert(kVK_UpArrow == 0x7E, "cocoa_keys.zig vk.UpArrow");
-_Static_assert(kVK_ContextualMenu == 0x6E, "cocoa_keys.zig vk.ContextualMenu");
 _Static_assert(kVK_F1 == 0x7A && kVK_F2 == 0x78 && kVK_F3 == 0x63 && kVK_F4 == 0x76, "cocoa_keys.zig vk.F1-F4");
 _Static_assert(kVK_F5 == 0x60 && kVK_F6 == 0x61 && kVK_F7 == 0x62 && kVK_F8 == 0x64, "cocoa_keys.zig vk.F5-F8");
 _Static_assert(kVK_F9 == 0x65 && kVK_F10 == 0x6D && kVK_F11 == 0x67 && kVK_F12 == 0x6F, "cocoa_keys.zig vk.F9-F12");

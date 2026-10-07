@@ -46,6 +46,8 @@ pub const vk = struct {
     pub const RightArrow = 0x7C;
     pub const DownArrow = 0x7D;
     pub const UpArrow = 0x7E;
+    /// The PC keyboard's Menu key. Not checked against the SDK in
+    /// cocoa/window.m: `kVK_ContextualMenu` only appears in newer SDKs.
     pub const ContextualMenu = 0x6E;
     pub const F1 = 0x7A;
     pub const F2 = 0x78;
