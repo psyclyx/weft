@@ -79,7 +79,7 @@ pub fn hueOf(public: [public_len]u8) f32 {
     return @as(f32, @floatFromInt(v)) / 65535.0; // [0,1)
 }
 
-const fillRandom = @import("entropy.zig").fill;
+const fillRandom = @import("secure.zig").osRandom;
 
 const crockford = "0123456789abcdefghjkmnpqrstvwxyz";
 

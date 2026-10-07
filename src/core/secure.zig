@@ -7,6 +7,7 @@
 //! over byte slices; the session layer owns transport.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const crypto = std.crypto;
 const X25519 = crypto.dh.X25519;
 const Hkdf = crypto.kdf.hkdf.HkdfSha256;
@@ -42,12 +43,31 @@ pub const Ephemeral = struct {
 
     pub fn generate() Ephemeral {
         var secret: [X25519.secret_length]u8 = undefined;
-        // The OS CSPRNG, no std.Io plumbing.
-        @import("entropy.zig").fill(&secret);
+        osRandom(&secret);
         const public = X25519.recoverPublicKey(secret) catch unreachable;
         return .{ .secret = secret, .public = public };
     }
 };
+
+/// Fill `buf` from the OS CSPRNG, with no std.Io plumbing: Linux's
+/// getrandom(2) (blocks only until the pool is first seeded at boot), and
+/// elsewhere libc's `arc4random_buf` — on Darwin the kernel-seeded CSPRNG,
+/// which cannot fail.
+pub fn osRandom(buf: []u8) void {
+    if (builtin.os.tag == .linux) {
+        var got: usize = 0;
+        while (got < buf.len) {
+            const rc = std.c.getrandom(buf[got..].ptr, buf.len - got, 0);
+            switch (std.c.errno(rc)) {
+                .SUCCESS => got += @intCast(rc),
+                .INTR => {},
+                else => @panic("getrandom failed"),
+            }
+        }
+    } else {
+        std.c.arc4random_buf(buf.ptr, buf.len);
+    }
+}
 
 /// Derive the channel keys from the ephemeral DH, the *static* identity
 /// DH, the shared token, and the transcript. Symmetric: both sides

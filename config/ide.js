@@ -239,6 +239,15 @@ bindWorkspace("C-S-p", "palette.open"); // the palette: commands AND live offers
 bindWorkspace("C-w", "buffer.close");
 bindWorkspace("C-Tab", "buffer.next");
 bindWorkspace("C-b", "ide.toggle-sidebar");
+// The same workspace keys under ⌘ on a Mac (super, `s-`), where ⌘ is what
+// these are; the grammar does the same for copy, cut, paste and undo.
+bindWorkspace("s-s", ["std.persistence.save", "file.save"]);
+bindWorkspace("S-s-s", "file.save-as");
+bindWorkspace("s-o", "ide.open-path");
+bindWorkspace("s-p", "files.find");
+bindWorkspace("S-s-p", "palette.open");
+bindWorkspace("s-w", "buffer.close");
+bindWorkspace("s-b", "ide.toggle-sidebar");
 
 // The pointer. mouse-3 presents what the context under it offers
 // (`weft://here/offers/at-pointer`) as a menu there — a row of the sidebar,
@@ -265,6 +274,11 @@ weft.bind("ide", "C-f", "find.open");
 weft.bind("ide", "C-h", "find.replace");
 weft.bind("ide", "F3", "find.next");
 weft.bind("ide", "S-F3", "find.prev");
+// ⌘F, ⌥⌘F (replace), ⌘G and ⇧⌘G on a Mac.
+weft.bind("ide", "s-f", "find.open");
+weft.bind("ide", "M-s-f", "find.replace");
+weft.bind("ide", "s-g", "find.next");
+weft.bind("ide", "S-s-g", "find.prev");
 weft.bind("ide", "C-g", "jump.line");
 
 // The language server, in source.

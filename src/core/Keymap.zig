@@ -2,7 +2,8 @@
 //! one-entry list; a fallback list of intentions is the general case,
 //! doc/configuration.md §5.2). The keymap never resolves a list — it hands
 //! it whole to dispatch. Pure string domain: a
-//! keyspec is `[C-][M-][S-]<xkb keysym name>`. Shift usually lives in
+//! keyspec is `[C-][M-][S-][s-]<xkb keysym name>` (`s-` is super: the logo
+//! key, ⌘ on a Mac — Emacs's spelling and order). Shift usually lives in
 //! the keysym (`a` vs `A`); the explicit `S-` is only for keys with no
 //! shifted keysym — `S-Return`, `S-Tab` (specials keep their names —
 //! `Escape`, `Tab`, `Return`).
@@ -1025,7 +1026,7 @@ fn addCompletionsInto(self: *const Keymap, gpa: Allocator, mode: []const u8, pre
 /// is the BINDING-relevant shift only — held but not consumed to produce
 /// the keysym (so `Return`+Shift → "S-Return", while `a`+Shift is the
 /// keysym "A" with no S- prefix). The platform layer resolves that.
-pub fn keyspec(buf: []u8, ctrl: bool, alt: bool, shift: bool, keysym_name: []const u8) []const u8 {
+pub fn keyspec(buf: []u8, ctrl: bool, alt: bool, shift: bool, super: bool, keysym_name: []const u8) []const u8 {
     var i: usize = 0;
     if (ctrl) {
         @memcpy(buf[i..][0..2], "C-");
@@ -1037,6 +1038,10 @@ pub fn keyspec(buf: []u8, ctrl: bool, alt: bool, shift: bool, keysym_name: []con
     }
     if (shift) {
         @memcpy(buf[i..][0..2], "S-");
+        i += 2;
+    }
+    if (super) {
+        @memcpy(buf[i..][0..2], "s-");
         i += 2;
     }
     const n = @min(keysym_name.len, buf.len - i);
@@ -1165,8 +1170,8 @@ pub fn displayKey(self: *const Keymap, buf: []u8, key: []const u8) []const u8 {
 }
 
 /// Canonicalize a human keyspec (or space-joined sequence) into `buf`. Per
-/// token: leading `C-`/`M-`/`S-` modifier prefixes are re-emitted in the
-/// `C-M-S-` order `keyspec` composes at event time (so `S-C-x` and `C-S-x`
+/// token: leading `C-`/`M-`/`S-`/`s-` modifier prefixes are re-emitted in
+/// the `C-M-S-s-` order `keyspec` composes at event time (so `S-C-x` and `C-S-x`
 /// bind the same key), then the base maps via `baseName`. Falls back to the
 /// raw input if it doesn't fit.
 ///
@@ -1186,12 +1191,13 @@ pub fn normalizeKey(buf: []u8, key: []const u8) []const u8 {
         }
         first = false;
         var base = tok;
-        var mods: [3]bool = .{ false, false, false };
-        while (base.len >= 2 and base[1] == '-' and (base[0] == 'C' or base[0] == 'M' or base[0] == 'S')) {
-            mods[std.mem.indexOfScalar(u8, "CMS", base[0]).?] = true;
+        var mods: [4]bool = .{ false, false, false, false };
+        while (base.len >= 2 and base[1] == '-') {
+            const which = std.mem.indexOfScalar(u8, "CMSs", base[0]) orelse break;
+            mods[which] = true;
             base = base[2..];
         }
-        for (mods, "CMS") |on, m| if (on) {
+        for (mods, "CMSs") |on, m| if (on) {
             if (w + 2 > buf.len) return key;
             buf[w] = m;
             buf[w + 1] = '-';
@@ -1230,10 +1236,12 @@ test "keymap: modal binding, rebinding, keyspec composition" {
     try t.expectEqualStrings("custom-escape", km.lookup("insert", "Escape").?);
 
     var buf: [32]u8 = undefined;
-    try t.expectEqualStrings("C-M-x", keyspec(&buf, true, true, false, "x"));
-    try t.expectEqualStrings("Escape", keyspec(&buf, false, false, false, "Escape"));
-    try t.expectEqualStrings("S-Return", keyspec(&buf, false, false, true, "Return"));
-    try t.expectEqualStrings("C-M-S-Tab", keyspec(&buf, true, true, true, "Tab"));
+    try t.expectEqualStrings("C-M-x", keyspec(&buf, true, true, false, false, "x"));
+    try t.expectEqualStrings("Escape", keyspec(&buf, false, false, false, false, "Escape"));
+    try t.expectEqualStrings("S-Return", keyspec(&buf, false, false, true, false, "Return"));
+    try t.expectEqualStrings("C-M-S-Tab", keyspec(&buf, true, true, true, false, "Tab"));
+    try t.expectEqualStrings("s-c", keyspec(&buf, false, false, false, true, "c"));
+    try t.expectEqualStrings("C-S-s-z", keyspec(&buf, true, false, true, true, "z"));
 }
 
 test "keymap: layering is order-independent — higher priority always wins" {
@@ -1439,11 +1447,15 @@ test "keymap: keyspec normalization — config writes SPC : / C-x C-f, stores ca
     try t.expectEqualStrings("Escape", km.displayKey(&buf, "Escape"));
 }
 
-test "keymap: modifiers canonicalize to C-M-S- order, pointer gestures pass through" {
+test "keymap: modifiers canonicalize to C-M-S-s- order, pointer gestures pass through" {
     var buf: [256]u8 = undefined;
     try t.expectEqualStrings("C-S-x", normalizeKey(&buf, "S-C-x"));
     try t.expectEqualStrings("C-M-S-Tab", normalizeKey(&buf, "S-M-C-TAB"));
     try t.expectEqualStrings("C-minus", normalizeKey(&buf, "C--"));
+    // Super (`s-`, the logo key) sorts last, after shift.
+    try t.expectEqualStrings("C-s-x", normalizeKey(&buf, "s-C-x"));
+    try t.expectEqualStrings("S-s-Return", normalizeKey(&buf, "s-S-RET"));
+    try t.expectEqualStrings("s-minus", normalizeKey(&buf, "s--"));
 
     // The pointer grammar (`pointer.zig`): gestures are plain bases.
     try t.expectEqualStrings("mouse-1", normalizeKey(&buf, "mouse-1"));
@@ -1456,7 +1468,7 @@ test "keymap: modifiers canonicalize to C-M-S- order, pointer gestures pass thro
     // And they compose exactly as the shell spells them at event time, so a
     // config's `S-C-mouse-1` answers a ctrl+shift click.
     var ev: [32]u8 = undefined;
-    const spec = keyspec(&ev, true, false, true, "mouse-1");
+    const spec = keyspec(&ev, true, false, true, false, "mouse-1");
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);

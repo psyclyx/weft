@@ -34,11 +34,23 @@ pub const harness = @import("harness.zig");
 
 pub const icons = @import("icons.zig");
 
-/// Offscreen Vulkan target: ordinary images, no WSI or compositor.
-pub const headless_vulkan = @import("headless_vulkan.zig");
+/// The GPU API this build renders through (`-Dgpu`): Vulkan or OpenGL. Each
+/// has the same two targets, so nothing above `gfx` names an API.
+pub const gpu = @import("gpu_options").gpu;
 
-/// The on-screen Vulkan context bound to a platform surface.
-pub const context = @import("context.zig");
+/// The on-screen target bound to a platform surface: a Vulkan swapchain or
+/// an OpenGL window context.
+pub const context = switch (gpu) {
+    .vulkan => @import("context.zig"),
+    .opengl => @import("gl_context.zig"),
+};
+
+/// The offscreen target: no window, surface or compositor — an ordinary
+/// Vulkan image or an OpenGL context with no drawable, read back.
+pub const headless = switch (gpu) {
+    .vulkan => @import("headless_vulkan.zig"),
+    .opengl => @import("headless_gl.zig"),
+};
 
 test {
     // A module owns its tests. These were listed in src/weft.zig's test block

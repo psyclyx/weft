@@ -145,9 +145,9 @@ var chase: [1 << 20]u32 = @splat(0);
 /// the measurement inflate together under load — which is exactly what makes
 /// their ratio meaningful.
 pub fn threadCpuNs() u64 {
-    var ts: std.os.linux.timespec = undefined;
-    const rc = std.os.linux.clock_gettime(.THREAD_CPUTIME_ID, &ts);
-    if (std.os.linux.errno(rc) != .SUCCESS) return 0;
+    var ts: std.c.timespec = undefined;
+    const rc = std.c.clock_gettime(.THREAD_CPUTIME_ID, &ts);
+    if (std.c.errno(rc) != .SUCCESS) return 0;
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
@@ -163,13 +163,13 @@ pub fn hostName(buf: *[std.posix.HOST_NAME_MAX]u8) []const u8 {
     return std.posix.gethostname(buf) catch "unknown";
 }
 
-/// Wall-clock seconds since the epoch (raw syscall, matching
+/// Wall-clock seconds since the epoch (libc clock_gettime, matching
 /// `core.task.nowNs`'s idiom — this std has no ambient `std.time.timestamp`
 /// left to reach for). Provenance only, for the baseline's `note`.
 pub fn epochSeconds() i64 {
-    var ts: std.os.linux.timespec = undefined;
-    const rc = std.os.linux.clock_gettime(.REALTIME, &ts);
-    if (std.os.linux.errno(rc) != .SUCCESS) return 0;
+    var ts: std.c.timespec = undefined;
+    const rc = std.c.clock_gettime(.REALTIME, &ts);
+    if (std.c.errno(rc) != .SUCCESS) return 0;
     return ts.sec;
 }
 

@@ -10,7 +10,7 @@
 //! share replay) is a caller-supplied `configure` callback, so headless
 //! and the GUI share one implementation and differ only there.
 //!
-//! Threads never touch the frame loop: `acceptMain` blocks on `accept4`
+//! Threads never touch the frame loop: `acceptMain` blocks on `accept`
 //! and pushes fds onto a lock-free stack; the caller drains them each
 //! frame in `acceptPending`. `stopAccepting` closes the listener (making
 //! the in-flight accept error out) and joins — the one thing the
@@ -83,8 +83,8 @@ pub const Hub = struct {
     /// Scheduler wake-fd (doc/contextual-workspace-architecture.md §7):
     /// signaled by the accept thread on a new incoming connection and by
     /// every peer's reader thread on new inbox data (`Session.wake_fd`, set
-    /// on each peer at `adopt`) — ONE fd shared across N peers (an eventfd
-    /// counter tolerates concurrent writers fine). The caller registers it
+    /// on each peer at `adopt`) — ONE fd shared across N peers (a wake fd
+    /// tolerates concurrent writers fine). The caller registers it
     /// as a scheduler fd source for the hub's lifetime.
     wake_fd: std.posix.fd_t,
 
@@ -106,11 +106,11 @@ pub const Hub = struct {
     }
 
     /// Bind the port and start accepting (non-blocking: bind/listen are
-    /// immediate; `accept4` runs on the spawned thread). `self` must not
+    /// immediate; `accept` runs on the spawned thread). `self` must not
     /// move afterward.
     pub fn listen(self: *Hub, port: u16) !void {
         const l = try session.tcpListener(port);
-        errdefer _ = std.os.linux.close(l);
+        errdefer _ = std.c.close(l);
         self.listener = l;
         self.accept_thread = try std.Thread.spawn(.{}, acceptMain, .{self});
     }
@@ -119,7 +119,7 @@ pub const Hub = struct {
     /// thread); existing peers stay connected and keep syncing.
     pub fn stopAccepting(self: *Hub) void {
         if (self.listener) |l| {
-            _ = std.os.linux.close(l);
+            _ = std.c.close(l);
             self.listener = null;
         }
         if (self.accept_thread) |th| {
@@ -136,7 +136,7 @@ pub const Hub = struct {
         var cur = self.incoming.swap(null, .acquire);
         while (cur) |n| {
             cur = n.next;
-            _ = std.os.linux.close(n.fd);
+            _ = std.c.close(n.fd);
             self.gpa.destroy(n);
         }
         self.gpa.free(self.token);
@@ -241,7 +241,7 @@ fn acceptMain(hub: *Hub) void {
     while (true) {
         const fd = session.tcpAccept(listener) catch return; // listener closed → stop
         const node = hub.gpa.create(FdNode) catch {
-            _ = std.os.linux.close(fd);
+            _ = std.c.close(fd);
             continue;
         };
         node.* = .{ .fd = fd };
@@ -306,19 +306,12 @@ pub fn unionPresence(self: *Hub, doc: *Document, layer: *layers.Layer, gpa: Allo
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
-const linux = std.os.linux;
 
-fn socketPair() ![2]i32 {
-    var fds: [2]i32 = undefined;
-    const rc = linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds);
-    if (linux.errno(rc) != .SUCCESS) return error.SocketPair;
-    return fds;
-}
+const socketPair = session.unixSocketPair;
 
 fn park(ms: u64) void {
     var w: std.atomic.Value(u32) = .init(0);
-    var ts: linux.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
-    _ = linux.futex_4arg(&w.raw, .{ .cmd = .WAIT, .private = true }, 0, &ts);
+    @import("futex.zig").wait(&w, 0, ms * std.time.ns_per_ms);
 }
 
 // A hub-that-is-also-a-participant: two peers on one primary document.

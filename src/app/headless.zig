@@ -1,13 +1,14 @@
-//! App-owned standard headless Vulkan render head.
+//! App-owned standard headless render head.
 //!
 //! This is the presentation-free sibling of `WindowHead`: it owns the same
-//! selected production `RenderState`, but binds it to an offscreen Vulkan
-//! target. Input is intentionally absent; callers inject platform-neutral
+//! selected production `RenderState`, but binds it to the build's offscreen
+//! target (`gfx.headless` — a Vulkan image or an OpenGL context with no
+//! drawable). Input is intentionally absent; callers inject platform-neutral
 //! editor actions through the ordinary dispatch layer.
 
 const std = @import("std");
 const core = @import("weft_core");
-const Target = @import("weft_gfx").headless_vulkan.Context;
+const Target = @import("weft_gfx").headless.Context;
 const render_mod = @import("render.zig");
 
 pub const Head = struct {

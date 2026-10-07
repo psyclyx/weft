@@ -5,8 +5,8 @@
 //! fixed-cadence sleep, no zero-timeout spin unless a source's due time
 //! genuinely IS now (a pending present retry, say).
 //!
-//! Dependency-free by design (`std.posix`/`std.os.linux` only, plus an
-//! injected clock) so it knows nothing about wayland, vulkan, or collab —
+//! Dependency-free by design (`std.posix`/libc only, plus an injected
+//! clock) so it knows nothing about wayland, vulkan, or collab —
 //! those register sources naming their own fd/callback; the scheduler's only
 //! job is "wait efficiently, then tell you what's ready."
 //!
@@ -37,12 +37,13 @@
 //! which is exactly the bug class the frame loop had before any of this
 //! existed, just moved one level down.
 //!
-//! `newWakeFd`/`signalWakeFd`/`drainWakeFd` are the canonical eventfd
-//! helpers for a source that just needs "wake me, no payload" semantics
-//! (`task.Pool`'s completion signal, `Hub`'s peer-activity signal,
-//! `Collab`'s outbound-session signal) — kept here so the raw `eventfd2`
-//! syscall plumbing lives in exactly one place. A source registered with
-//! `onReady = null` is assumed to be one of these: `step` drains it itself.
+//! `newWakeFd`/`signalWakeFd`/`drainWakeFd` are the canonical helpers for a
+//! source that just needs "wake me, no payload" semantics (`task.Pool`'s
+//! completion signal, `Hub`'s peer-activity signal, `Collab`'s
+//! outbound-session signal, a pty reader's kick) — kept here so the
+//! per-OS mechanism (an eventfd on Linux, a pipe elsewhere; see `Wake`)
+//! lives in exactly one place. A source registered with `onReady = null` is
+//! assumed to be one of these: `step` drains it itself.
 //!
 //! Callbacks (`onReady`/`onDue`) MAY freely call `addFd`/`removeFd`/
 //! `addTimer`/`removeTimer` on this same scheduler (main.zig's hub/conn
@@ -55,9 +56,11 @@
 //! dispatch entry, not the memory it points at).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
-const linux = std.os.linux;
+const posix_fd = @import("posix_fd.zig");
+const task = @import("task.zig");
 
 pub const Id = enum(u32) { _ };
 
@@ -83,6 +86,13 @@ const TimerSource = struct {
     name: []const u8,
 };
 
+/// A blocking wait that stands in for `poll(2)` (`Scheduler.waiter`): same
+/// fds, same timeout, same readiness report.
+pub const Waiter = struct {
+    ctx: *anyopaque,
+    wait: *const fn (ctx: *anyopaque, fds: []posix.pollfd, timeout_ms: i32) usize,
+};
+
 pub const Scheduler = struct {
     gpa: Allocator,
     now: *const fn () u64,
@@ -94,6 +104,13 @@ pub const Scheduler = struct {
     /// (doc/contextual-workspace-architecture.md §7's gate) reads this instead of counting
     /// frames, so it measures the scheduler's own wake rate directly.
     steps: u64 = 0,
+    /// The blocking wait itself — `poll(2)` unless something else owns the
+    /// thread's sleep. A desktop platform whose events do not arrive on an fd
+    /// (Cocoa's come through a Mach port) must wait in its own event loop or
+    /// its events would sit unseen until some fd or timer happened to fire;
+    /// it installs a `Waiter` that waits there, with these fds attached, and
+    /// reports readiness exactly as `poll` would.
+    waiter: ?Waiter = null,
 
     pub fn init(gpa: Allocator, now: *const fn () u64) Scheduler {
         return .{ .gpa = gpa, .now = now };
@@ -243,7 +260,10 @@ pub const Scheduler = struct {
         // load) — treat as "nothing ready this time" and let the next step
         // reconsider, rather than propagating a hard failure out of the
         // kernel loop for a syscall hiccup.
-        const ready = posix.poll(buf[0..n_fds], timeout_ms) catch 0;
+        const ready = if (self.waiter) |w|
+            w.wait(w.ctx, buf[0..n_fds], timeout_ms)
+        else
+            posix.poll(buf[0..n_fds], timeout_ms) catch 0;
         self.steps += 1;
         if (ready > 0) any = true;
 
@@ -308,31 +328,112 @@ pub const Scheduler = struct {
 
 // ── Wakeup-fd convenience ("something happened, no payload") ──────────
 
+/// The wake mechanism for this OS: an eventfd where there is one (a single
+/// fd that is both ends, a counter that cannot fill), a pipe elsewhere.
+const Wake = if (builtin.os.tag == .linux) EventFdWake else PipeWake;
+
+/// A new wake fd: pollable for read, non-blocking, close-on-exec. It is ONE
+/// fd on every OS — what a caller stores, registers with `addFd`, and hands
+/// to `signalWakeFd` from another thread.
 pub fn newWakeFd() !posix.fd_t {
-    const rc = linux.eventfd(0, linux.EFD.NONBLOCK | linux.EFD.CLOEXEC);
-    if (linux.errno(rc) != .SUCCESS) return error.EventFdFailed;
-    return @intCast(rc);
+    return Wake.new();
 }
 
 pub fn closeWakeFd(fd: posix.fd_t) void {
-    _ = linux.close(fd);
+    Wake.close(fd);
 }
 
 /// Safe to call from any thread (that's the point — a reader/accept thread
-/// signals main's scheduler this way): a nonblocking increment of the
-/// eventfd counter. Best-effort; a failed write here just means the next
-/// scheduled wake (a deadline fallback, or the next unrelated fd activity)
-/// discovers the work instead of this one — never a correctness issue,
-/// only ever a latency one.
+/// signals main's scheduler this way): a nonblocking "something happened".
+/// Signals coalesce — any number before a drain read as one. Best-effort; a
+/// failed write here just means the next scheduled wake (a deadline
+/// fallback, or the next unrelated fd activity) discovers the work instead
+/// of this one — never a correctness issue, only ever a latency one.
 pub fn signalWakeFd(fd: posix.fd_t) void {
-    var one: u64 = 1;
-    _ = linux.write(fd, @ptrCast(&one), @sizeOf(u64));
+    Wake.signal(fd);
 }
 
+/// Consume every signal so far: the fd is not readable again until the
+/// next `signalWakeFd`.
 pub fn drainWakeFd(fd: posix.fd_t) void {
-    var val: u64 = undefined;
-    _ = linux.read(fd, @ptrCast(&val), @sizeOf(u64));
+    Wake.drain(fd);
 }
+
+/// Linux: an eventfd. A write adds to its counter, one read takes the whole
+/// count and resets it — coalescing and drain-to-empty are the kernel's.
+/// (EFD_NONBLOCK/EFD_CLOEXEC are defined as O_NONBLOCK/O_CLOEXEC.)
+const EventFdWake = struct {
+    const flags: u32 = @bitCast(std.c.O{ .NONBLOCK = true, .CLOEXEC = true });
+
+    fn new() !posix.fd_t {
+        const fd = std.c.eventfd(0, flags);
+        if (fd < 0) return error.EventFdFailed;
+        return fd;
+    }
+
+    fn close(fd: posix.fd_t) void {
+        _ = std.c.close(fd);
+    }
+
+    fn signal(fd: posix.fd_t) void {
+        const one: u64 = 1;
+        _ = std.c.write(fd, std.mem.asBytes(&one), @sizeOf(u64));
+    }
+
+    fn drain(fd: posix.fd_t) void {
+        var val: u64 = undefined;
+        _ = std.c.read(fd, std.mem.asBytes(&val), @sizeOf(u64));
+    }
+};
+
+/// Elsewhere (Darwin has no eventfd, and its `poll` cannot wait on a kqueue):
+/// a non-blocking pipe. The read end IS the wake fd; the write end lives in
+/// a process-wide table keyed by it, so callers keep holding one fd. A signal
+/// writes one byte — a full pipe already reads as signalled, so EAGAIN is
+/// the coalescing — and a drain reads until EAGAIN. Signal and close take the
+/// table's lock around the write and the close, so a signal racing a close
+/// can never write into a recycled fd number.
+const PipeWake = struct {
+    var lock: task.Mutex = .{};
+    /// Read end → write end, for every live wake pipe.
+    var write_ends: std.AutoHashMapUnmanaged(posix.fd_t, posix.fd_t) = .empty;
+
+    fn new() !posix.fd_t {
+        const fds = try posix_fd.pipe();
+        lock.lock();
+        defer lock.unlock();
+        write_ends.put(std.heap.c_allocator, fds[0], fds[1]) catch {
+            _ = std.c.close(fds[0]);
+            _ = std.c.close(fds[1]);
+            return error.OutOfMemory;
+        };
+        return fds[0];
+    }
+
+    fn close(fd: posix.fd_t) void {
+        lock.lock();
+        defer lock.unlock();
+        if (write_ends.fetchRemove(fd)) |kv| _ = std.c.close(kv.value);
+        _ = std.c.close(fd);
+    }
+
+    fn signal(fd: posix.fd_t) void {
+        lock.lock();
+        defer lock.unlock();
+        const w = write_ends.get(fd) orelse return;
+        _ = std.c.write(w, "!", 1);
+    }
+
+    fn drain(fd: posix.fd_t) void {
+        var buf: [256]u8 = undefined;
+        while (true) {
+            const n = std.c.read(fd, &buf, buf.len);
+            if (n > 0) continue;
+            if (n < 0 and std.c.errno(n) == .INTR) continue;
+            return; // EAGAIN: empty
+        }
+    }
+};
 
 // ── Tests ───────────────────────────────────────────────────────────
 
@@ -381,7 +482,7 @@ test "scheduler: a one-shot timer fires once, then goes dormant" {
     // A source that goes fully dormant (due_ns == null) is only
     // re-queried on a step that has some OTHER reason to run `poll` (an fd,
     // or another still-armed timer) — real callers always have at least one
-    // fd registered (wayland's display socket, the pool's wake eventfd), so
+    // fd registered (wayland's display socket, the pool's wake fd), so
     // this is the honest shape; see `step`'s doc for the "nothing at all
     // registered" early-out this test does not exercise.
     const Ctx = struct { fired: bool = false, due_ns: ?u64 = 5 };
@@ -415,13 +516,11 @@ test "scheduler: an fd source wakes step() when its counterpart is written" {
     var sched = Scheduler.init(t.allocator, testNow);
     defer sched.deinit();
 
-    var fds: [2]posix.fd_t = undefined;
-    const rc = linux.pipe2(&fds, .{ .NONBLOCK = true });
-    try t.expectEqual(std.os.linux.E.SUCCESS, linux.errno(rc));
+    const fds = try posix_fd.pipe();
     const read_fd = fds[0];
     const write_fd = fds[1];
-    defer _ = linux.close(read_fd);
-    defer _ = linux.close(write_fd);
+    defer _ = std.c.close(read_fd);
+    defer _ = std.c.close(write_fd);
 
     const Recorder = struct {
         var hit: bool = false;
@@ -438,12 +537,12 @@ test "scheduler: an fd source wakes step() when its counterpart is written" {
     // armed and the pipe isn't ready, so step() would otherwise block
     // forever; skip the "not ready" assertion and go straight to proving
     // readiness wakes it (the interesting behavior here).
-    _ = linux.write(write_fd, "x", 1);
+    _ = std.c.write(write_fd, "x", 1);
     try t.expect(try sched.step());
     try t.expect(Recorder.hit);
 }
 
-test "scheduler: a wake eventfd is drained by default (onReady = null)" {
+test "scheduler: a wake fd is drained by default (onReady = null)" {
     var sched = Scheduler.init(t.allocator, testNow);
     defer sched.deinit();
     const fd = try newWakeFd();
@@ -452,13 +551,35 @@ test "scheduler: a wake eventfd is drained by default (onReady = null)" {
     _ = try sched.addFd(fd, .{ .read = true }, null, null, "wake");
     try t.expect(try sched.step());
 
-    // Drained by `step` itself (no onReady given): the eventfd counter is
-    // back to zero, so polling it directly (bypassing the scheduler, which
-    // would otherwise legitimately block waiting for the NEXT signal) shows
-    // nothing pending.
+    // Drained by `step` itself (no onReady given): nothing is pending, so
+    // polling it directly (bypassing the scheduler, which would otherwise
+    // legitimately block waiting for the NEXT signal) shows nothing.
+    try t.expect(!isReadable(fd));
+}
+
+fn isReadable(fd: posix.fd_t) bool {
     var pfd = [1]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
-    _ = try posix.poll(&pfd, 0);
-    try t.expectEqual(@as(i16, 0), pfd[0].revents & posix.POLL.IN);
+    _ = posix.poll(&pfd, 0) catch return false;
+    return pfd[0].revents & posix.POLL.IN != 0;
+}
+
+test "scheduler: every wake mechanism coalesces signals and drains to empty" {
+    // Both are exercised wherever they build, so the pipe Darwin runs on is
+    // tested on Linux too.
+    const mechanisms = if (builtin.os.tag == .linux) .{ EventFdWake, PipeWake } else .{PipeWake};
+    inline for (mechanisms) |M| {
+        const fd = try M.new();
+        defer M.close(fd);
+        try t.expect(!isReadable(fd));
+        for (0..100_000) |_| M.signal(fd); // well past a pipe's buffer
+        try t.expect(isReadable(fd));
+        M.drain(fd);
+        try t.expect(!isReadable(fd));
+        M.signal(fd);
+        try t.expect(isReadable(fd));
+        M.drain(fd);
+        try t.expect(!isReadable(fd));
+    }
 }
 
 test "scheduler: removeFd/removeTimer take a source out of consideration" {

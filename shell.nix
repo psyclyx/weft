@@ -30,80 +30,105 @@ let
       path = pkgs.tree-sitter-grammars."tree-sitter-${n}";
     }) grammarNames
   );
-in
-pkgs.mkShell {
-  packages = with pkgs; [
-    zig_0_16
-    zls # LSP: Zig (0.16, matches zig_0_16)
+  inherit (pkgs.stdenv.hostPlatform) isLinux isDarwin;
 
-    # Build-time tools.
-    pkg-config
-    perl # Hermetic JSON::PP peer for the spine's LSP protocol gate.
-    # Shells and a pager the terminal e2e tests run on a real pty: the shell
-    # integration is injected into each (doc/terminal.md §7), so each is a
-    # test dependency, not whatever the host happens to have.
-    zsh
-    fish
-    less
-    wayland-scanner
-    # No renderer shader compiler is needed; Skia is the sole production
-    # renderer.
-
-    # Libraries Weft links against.
-    wayland
-    wayland-protocols
-    libxkbcommon
-    vulkan-loader
-    vulkan-headers
-    vulkan-validation-layers
-    harfbuzz
-    fontconfig # runtime font-family resolution (sans/mono, weight, slant)
-    dejavu_fonts # deterministic embedded default mono face
-
-    # Skia: the C++ 2D library. Ships a skia.pc, so build.zig
-    # resolves it through pkg-config (include for the g++ shim, -L/-lskia for the
-    # link) — as a buildInput its pkgconfig is on PKG_CONFIG_PATH automatically.
-    skia
-
-    # Syntax (milestone 7): incremental parsing + highlighting.
-    tree-sitter
-
-    # Wasm plugin runtime (milestone 5): wasmtime's C embedding API. The CLI
-    # here compiles/inspects guest .wasm; build.zig links libwasmtime via the
-    # dev/lib outputs below (wasmtime ships no pkg-config, so we point at the
-    # paths directly — the same idiom as the grammar packages).
-    wasmtime
-
-    # Language servers for the sample config (phase 2: zls is already
-    # above for dev; fennel-ls is the second-server demonstration).
-    fennel-ls
-
-    # Formatting / dev ergonomics (treefmt.toml drives nixfmt + zig fmt).
-    treefmt
-    nixfmt
-    deadnix
-    statix
-    nixd
-  ];
-
-  LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
+  # The desktop stack is per platform: Wayland + Vulkan (or EGL, with
+  # `-Dgpu=opengl`) + fontconfig on Linux; on macOS AppKit, OpenGL and CoreText
+  # come from the SDK, so the only package is the SDK itself (build.zig reads
+  # its path from SDKROOT, which the SDK's setup hook exports).
+  desktop =
     with pkgs;
-    [
+    lib.optionals isLinux [
+      wayland-scanner
       wayland
+      wayland-protocols
       libxkbcommon
       vulkan-loader
-      harfbuzz
-      fontconfig
-      wasmtime.lib # libwasmtime.so at runtime (test + run)
-      skia # libskia.so at runtime (the renderer shim links it)
-      stdenv.cc.cc.lib # libstdc++.so.6 for the Skia C++ shim at runtime
+      vulkan-headers
+      vulkan-validation-layers
+      libGL # libglvnd: EGL for the OpenGL renderer (-Dgpu=opengl)
+      fontconfig # runtime font-family resolution (sans/mono, weight, slant)
     ]
+    ++ lib.optionals isDarwin [ apple-sdk_15 ];
+in
+pkgs.mkShell {
+  packages =
+    with pkgs;
+    [
+      zig_0_16
+      zls # LSP: Zig (0.16, matches zig_0_16)
+
+      # Build-time tools.
+      pkg-config
+      perl # Hermetic JSON::PP peer for the spine's LSP protocol gate.
+      # Shells and a pager the terminal e2e tests run on a real pty: the shell
+      # integration is injected into each (doc/terminal.md §7), so each is a
+      # test dependency, not whatever the host happens to have.
+      zsh
+      fish
+      less
+      # No renderer shader compiler is needed; Skia is the sole production
+      # renderer.
+
+      # Libraries Weft links against.
+      harfbuzz
+      dejavu_fonts # deterministic embedded default mono face
+
+      # Skia: the C++ 2D library. Ships a skia.pc, so build.zig
+      # resolves it through pkg-config (include for the shim, -L/-lskia for the
+      # link) — as a buildInput its pkgconfig is on PKG_CONFIG_PATH automatically.
+      skia
+
+      # Syntax (milestone 7): incremental parsing + highlighting.
+      tree-sitter
+
+      # Wasm plugin runtime (milestone 5): wasmtime's C embedding API. The CLI
+      # here compiles/inspects guest .wasm; build.zig links libwasmtime via the
+      # dev/lib outputs below (wasmtime ships no pkg-config, so we point at the
+      # paths directly — the same idiom as the grammar packages).
+      wasmtime
+
+      # Language servers for the sample config (phase 2: zls is already
+      # above for dev; fennel-ls is the second-server demonstration).
+      fennel-ls
+
+      # Formatting / dev ergonomics (treefmt.toml drives nixfmt + zig fmt).
+      treefmt
+      nixfmt
+      deadnix
+      statix
+      nixd
+    ]
+    ++ desktop;
+
+  # Linux resolves the shared libraries the binary links at run time through
+  # this path; Darwin's dylibs carry absolute install names instead.
+  LD_LIBRARY_PATH = pkgs.lib.optionalString isLinux (
+    pkgs.lib.makeLibraryPath (
+      with pkgs;
+      [
+        wayland
+        libxkbcommon
+        vulkan-loader
+        libGL
+        harfbuzz
+        fontconfig
+        wasmtime.lib # libwasmtime.so at runtime (test + run)
+        skia # libskia.so at runtime (the renderer shim links it)
+        stdenv.cc.cc.lib # libstdc++.so.6 for the Skia C++ shim at runtime
+      ]
+    )
   );
 
   # Wasmtime C embedding API: headers (dev) + libwasmtime.so (lib). No
   # pkg-config is shipped, so build.zig consumes these paths directly.
   WEFT_WASMTIME_DEV = "${pkgs.wasmtime.dev}";
   WEFT_WASMTIME_LIB = "${pkgs.wasmtime.lib}";
+
+  # macOS: the system libc++ (headers + the /usr/lib/libc++.1.dylib stub) that
+  # nixpkgs keeps beside the SDK — the one Darwin Skia links, and so the one the
+  # Skia shim must (build.zig `addSkia`).
+  WEFT_LIBCXX = pkgs.lib.optionalString isDarwin "${pkgs.stdenv.cc.libcxx}";
 
   # Renderer-independent default font bytes. Keeping this in the pinned Nix
   # environment makes layout/test geometry deterministic on Linux and Darwin;
@@ -129,6 +154,6 @@ pkgs.mkShell {
   # set that exists is whatever this directory holds and config asks for.
   WEFT_GRAMMAR_PATH = "${grammarDir}";
 
-  # Let the Vulkan loader find the host ICDs on NixOS.
-  XDG_DATA_DIRS = "/run/opengl-driver/share";
+  # Let the Vulkan loader (and glvnd) find the host drivers on NixOS.
+  XDG_DATA_DIRS = pkgs.lib.optionalString isLinux "/run/opengl-driver/share";
 }

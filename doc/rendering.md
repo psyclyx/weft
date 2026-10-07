@@ -105,16 +105,18 @@ Only Tier 3 must hand-author (or forgo) its fallback.
 
 Two core-internal interfaces, so the additive platforms/backends slot in:
 
-- **Platform** (window + input + present): `src/platform/wayland.zig` today. Owns
-  surface creation, the event loop, key/pointer events, vsync/present. Future: X,
-  terminal (tty + input), browser (canvas/DOM events), macOS (Cocoa). Platform
-  setup stays in CORE — a plugin never touches it.
+- **Platform** (window + input + present): `src/platform/wayland.zig` on Linux,
+  `src/platform/cocoa.zig` on macOS ([platforms.md](platforms.md)). Owns surface
+  creation, the event loop, key/pointer events, present. Future: X, terminal
+  (tty + input), browser (canvas/DOM events). Platform setup stays in CORE — a
+  plugin never touches it.
 - **Rasterizer/Backend** (scene → output): `skia`. Consumes a
   laid-out scene (boxes, text runs positioned in device space, rects, colors) and
   draws it. Future: **webgpu** (one more Rasterizer — nothing above it changes),
   terminal (a cell rasterizer: boxes → box-drawing chars, colors → SGR, glyphs →
-  cells; lossy by nature, degrade gracefully), browser (webgpu/canvas), macOS
-  (metal or webgpu).
+  cells; lossy by nature, degrade gracefully), browser (webgpu/canvas). Skia
+  itself runs on Vulkan or OpenGL (`-Dgpu`; OpenGL is macOS's), a choice made
+  entirely below the scene.
 
 The frame path becomes: consumers/plugins emit scenes → core **layout** resolves
 metrics + anchoring + columns → core **rasterizer** draws → core **platform**
@@ -158,10 +160,11 @@ platform"; neither touches the scene vocabulary or any plugin.
   open is a real regression, not just clutter.
 - **P3 — formalize the platform and render-target seams (DONE).** The view emits
   renderer-neutral scene items, Skia is the sole scene→pixels implementation,
-  and the same `RenderState` targets either desktop WSI Vulkan or an ordinary
-  offscreen Vulkan image. Platform input is separate from normalized dispatch.
-  Wayland remains the only desktop provider; macOS still needs a selected
-  window/WSI provider rather than another renderer switch.
+  and the same `RenderState` targets either the desktop window or an ordinary
+  offscreen target, on Vulkan or OpenGL. Platform input is separate from
+  normalized dispatch. Wayland and Cocoa are the desktop providers
+  ([platforms.md](platforms.md)); the native surface handles a GPU context
+  presents through are a tagged `platform.SurfaceSource`.
 - **P4 — UI-as-plugin.** The completion CONSUMER moves to a guest plugin emitting
   the caret-surface scene through the membrane (needs the caps-fire + live-narrow
   membrane from [[completion-ux-roadmap]]). The completion UI is a plugin, drawn
@@ -175,8 +178,9 @@ platform"; neither touches the scene vocabulary or any plugin.
 
 ## Non-goals (not yet)
 
-Actual webgpu / X / terminal / browser / macOS implementations. This doc only
-fixes the SEAM so they are additive. Wayland+Vulkan stays the sole platform+backend.
+Actual webgpu / X / terminal / browser implementations. This doc only fixes the
+SEAM so they are additive. (macOS was the first to use it: Cocoa + OpenGL, with
+no change above the seam.)
 
 ## Decided splits (were open; resolved so this is build-ready)
 

@@ -48,7 +48,7 @@
 const std = @import("std");
 const core = @import("weft_core");
 const view_mod = @import("weft_gfx").view;
-const wayland = @import("weft_platform").wayland;
+const platform = @import("weft_platform");
 
 /// Whether the TOP of `ctx.head`'s transient stack is the frame our own
 /// paired-transient menu machinery (below) pushed for menu mode `m` — the
@@ -446,7 +446,7 @@ fn isBareModifier(spec: []const u8) bool {
     return false;
 }
 
-pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
+pub fn dispatchKey(ctx: *core.command.Context, ev: platform.KeyEvent) !void {
     // Translate the platform key event to a canonical keyspec (+ the printable
     // text it would insert), then hand off to the backend-independent
     // `dispatchSpec`. Splitting here means a headless driver (the e2e harness)
@@ -458,18 +458,19 @@ pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
     // raw C API) directly, as this file used to. This file is
     // platform-NEUTRAL (shared by the real compositor path and every
     // headless/e2e keypress via `dispatchSpec`, below); it should only ever
-    // need `wayland.KeyEvent`'s public shape, never wayland's C internals.
+    // need `platform.KeyEvent`'s public shape, never wayland's C internals.
     var name_buf: [64]u8 = undefined;
-    const name = wayland.Window.keysymName(&name_buf, ev.keysym);
+    const name = platform.Window.keysymName(&name_buf, ev.keysym);
     if (name.len == 0) return;
     var spec_buf: [80]u8 = undefined;
-    const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, name);
+    const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, ev.mods.logo, name);
     // The PHYSICAL/COMMIT split (architecture §10.1): the keyspec above is the
     // physical key; this is the text — if any — the keystroke committed. A
-    // ctrl/alt chord is physical input only, and `TextCommit.from` keeps the
+    // ctrl/alt/super chord is physical input only (⌘C on a Mac is a
+    // command, never a "c"), and `TextCommit.from` keeps the
     // control-byte spellings xkb hands back for Tab/Escape/Return out of the
     // commit entirely.
-    const commit: core.TextCommit = if (ev.mods.ctrl or ev.mods.alt) .none else .from(ev.text());
+    const commit: core.TextCommit = if (ev.mods.ctrl or ev.mods.alt or ev.mods.logo) .none else .from(ev.text());
     return dispatchSpec(ctx, spec, commit);
 }
 

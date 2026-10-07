@@ -371,13 +371,13 @@ fn mintIncarnation() u64 {
     return incarnations.fetchAdd(1, .monotonic);
 }
 
-/// A fresh document identity from the OS CSPRNG (`entropy.zig`, the same
+/// A fresh document identity from the OS CSPRNG (`secure.osRandom`, the same
 /// source the channel keys use — no `std.Io` plumbing). 128 bits, so two
 /// replicas minting independently never collide in any history this editor
 /// will see.
 pub fn mintId() Id {
     var id: Id = .{ .bytes = undefined };
-    @import("entropy.zig").fill(&id.bytes);
+    @import("secure.zig").osRandom(&id.bytes);
     return id;
 }
 
