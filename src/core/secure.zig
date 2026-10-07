@@ -42,13 +42,8 @@ pub const Ephemeral = struct {
 
     pub fn generate() Ephemeral {
         var secret: [X25519.secret_length]u8 = undefined;
-        // getrandom(2): the kernel CSPRNG, no std.Io plumbing.
-        var got: usize = 0;
-        while (got < secret.len) {
-            const rc = std.os.linux.getrandom(secret[got..].ptr, secret.len - got, 0);
-            if (std.os.linux.errno(rc) != .SUCCESS) @panic("getrandom failed");
-            got += rc;
-        }
+        // The OS CSPRNG, no std.Io plumbing.
+        @import("entropy.zig").fill(&secret);
         const public = X25519.recoverPublicKey(secret) catch unreachable;
         return .{ .secret = secret, .public = public };
     }

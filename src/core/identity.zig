@@ -79,14 +79,7 @@ pub fn hueOf(public: [public_len]u8) f32 {
     return @as(f32, @floatFromInt(v)) / 65535.0; // [0,1)
 }
 
-fn fillRandom(buf: []u8) void {
-    var got: usize = 0;
-    while (got < buf.len) {
-        const rc = std.os.linux.getrandom(buf[got..].ptr, buf.len - got, 0);
-        if (std.os.linux.errno(rc) != .SUCCESS) @panic("getrandom failed");
-        got += rc;
-    }
-}
+const fillRandom = @import("entropy.zig").fill;
 
 const crockford = "0123456789abcdefghjkmnpqrstvwxyz";
 
@@ -212,7 +205,7 @@ pub fn loadOrGenerate(gpa: std.mem.Allocator, environ: anytype) LoadError!Identi
     const id = Identity.generate();
     if (std.fs.path.dirname(path)) |dir| cwd.createDirPath(io, dir) catch {};
     cwd.writeFile(io, .{ .sub_path = path, .data = &id.secret }) catch {};
-    _ = std.os.linux.fchmodat(std.os.linux.AT.FDCWD, path.ptr, 0o600);
+    _ = std.c.fchmodat(std.c.AT.FDCWD, path.ptr, 0o600, 0);
     return id;
 }
 

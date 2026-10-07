@@ -6,7 +6,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const linux = std.os.linux;
+/// libc, so the blob server runs on every POSIX host.
+const sys = std.c;
 
 const wire = @import("weft_wire");
 const Document = @import("../Document.zig");
@@ -34,24 +35,24 @@ pub const BlobServer = struct {
         if (path.len >= buf.len) return error.PathTooLong;
         @memcpy(buf[0..path.len], path);
         buf[path.len] = 0;
-        const rc = linux.open(buf[0..path.len :0], .{ .ACCMODE = .RDONLY }, 0);
-        if (linux.errno(rc) != .SUCCESS) return error.OpenFailed;
-        return .{ .fd = @intCast(rc) };
+        const rc = sys.open(buf[0..path.len :0], .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
+        if (sys.errno(rc) != .SUCCESS) return error.OpenFailed;
+        return .{ .fd = rc };
     }
 
     pub fn close(self: *BlobServer) void {
-        _ = linux.close(self.fd);
+        _ = sys.close(self.fd);
     }
 
     fn size(self: *BlobServer) u64 {
         // lseek(END) — no Stat struct churn.
-        const rc = linux.lseek(self.fd, 0, linux.SEEK.END);
-        return if (linux.errno(rc) == .SUCCESS) rc else 0;
+        const rc = sys.lseek(self.fd, 0, sys.SEEK.END);
+        return if (sys.errno(rc) == .SUCCESS) @intCast(rc) else 0;
     }
 
     fn read(self: *BlobServer, buf: []u8, offset: u64) usize {
-        const rc = linux.pread(self.fd, buf.ptr, buf.len, @intCast(offset));
-        return if (linux.errno(rc) == .SUCCESS) rc else 0;
+        const rc = sys.pread(self.fd, buf.ptr, buf.len, @intCast(offset));
+        return if (sys.errno(rc) == .SUCCESS) @intCast(rc) else 0;
     }
 
     /// Handle one call payload; returns the reply payload (caller owns).
