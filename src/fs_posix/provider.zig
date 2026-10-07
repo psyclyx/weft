@@ -1,22 +1,34 @@
-//! Linux implementation of the portable `weft_fs` provider contract.
+//! POSIX (Linux + macOS) implementation of the portable `weft_fs` provider
+//! contract, written against libc (`std.c`) so ONE implementation serves both
+//! hosts and the Linux test suite exercises the code macOS runs.
 //!
 //! Root acquisition is the only path-shaped API. It pins a directory fd;
 //! every later operation walks provider-minted parent handles one raw leaf at
-//! a time with `*at` syscalls. Entry handles therefore carry identity without
-//! granting string-path authority, and symlinks are never followed implicitly.
+//! a time with `*at` calls (`openat` with `O_NOFOLLOW`, `mkdirat`,
+//! `unlinkat`, `symlinkat`, `readlinkat`, `renameat`, `fchmodat`). Entry
+//! handles therefore carry identity without granting string-path authority,
+//! and symlinks are never followed implicitly.
+//!
+//! Per-OS forks are confined to the places the mechanism genuinely differs:
+//! - `stat.zig`: identity/metadata (`statx` on Linux, `fstatat` on Darwin).
+//! - `renameNoReplace`: Linux `renameat2(RENAME_NOREPLACE)`, Darwin
+//!   `renameatx_np(RENAME_EXCL)` — both atomic no-clobber renames.
+//! - `unsupportedErrno`: Darwin spells "not supported" two ways.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const fs = @import("weft_fs");
+const stat = @import("stat.zig");
 
 const contract = fs.contract;
-const linux = std.os.linux;
+const c = std.c;
 
 const revision_len = 88;
 const revision_magic: u32 = 0x31584657; // "WFX1", little endian.
 
 var generation_nonce: std.atomic.Value(u32) = .init(1);
 
-pub const LinuxFs = struct {
+pub const PosixFs = struct {
     pub const lease_capability: contract.LeaseCapability = .{
         .regular_file_max_bytes = 64 * 1024 * 1024,
         .symlink_target_max_bytes = 64 * 1024,
@@ -68,49 +80,8 @@ pub const LinuxFs = struct {
         revision: [revision_len]u8,
     };
 
-    const Identity = struct {
-        dev_major: u32,
-        dev_minor: u32,
-        mount_id: u64,
-        inode: u64,
-        has_birth_time: bool,
-        birth_sec: i64,
-        birth_nsec: u32,
-
-        /// A `(device, mount, inode)` tuple is useful for reasoning about
-        /// already-open descriptors, but it is not proof that two path
-        /// lookups named the same object: inode reuse can make a replacement
-        /// look identical when the filesystem does not provide birth time.
-        fn locationEql(a: Identity, b: Identity) bool {
-            return a.dev_major == b.dev_major and
-                a.dev_minor == b.dev_minor and
-                a.mount_id == b.mount_id and
-                a.inode == b.inode;
-        }
-
-        /// Exact object identity is intentionally unavailable when either
-        /// statx result lacks BTIME. We do not retain one fd per entry just to
-        /// manufacture that guarantee; callers must report stale/ambiguous
-        /// instead of accepting an unprovable replacement.
-        fn eql(a: Identity, b: Identity) bool {
-            return a.has_birth_time and b.has_birth_time and
-                a.locationEql(b) and
-                a.birth_sec == b.birth_sec and
-                a.birth_nsec == b.birth_nsec;
-        }
-    };
-
-    const Snapshot = struct {
-        identity: Identity,
-        kind: contract.Kind,
-        mode: u32,
-        size: u64,
-        nlink: u32,
-        modified_sec: i64,
-        modified_nsec: u32,
-        changed_sec: i64,
-        changed_nsec: u32,
-    };
+    const Identity = stat.Identity;
+    const Snapshot = stat.Snapshot;
 
     const ResolvedEntry = struct {
         parent_fd: i32,
@@ -146,13 +117,13 @@ pub const LinuxFs = struct {
     const CopyError = contract.Error || error{Partial};
     const RemoveError = contract.Error || error{Partial};
 
-    pub fn init(gpa: std.mem.Allocator) LinuxFs {
+    pub fn init(gpa: std.mem.Allocator) PosixFs {
         var seed = generation_nonce.fetchAdd(1, .monotonic) +% 1;
         if (seed == 0) seed = 1;
         return .{ .gpa = gpa, .generation_seed = seed };
     }
 
-    pub fn deinit(self: *LinuxFs) void {
+    pub fn deinit(self: *PosixFs) void {
         for (self.entries.items) |*slot| self.clearEntrySlot(slot);
         self.entries.deinit(self.gpa);
         for (self.roots.items) |*slot| {
@@ -165,22 +136,21 @@ pub const LinuxFs = struct {
         self.* = undefined;
     }
 
-    pub fn provider(self: *LinuxFs) fs.service.Provider {
+    pub fn provider(self: *PosixFs) fs.service.Provider {
         return .init(self);
     }
 
     /// Acquire and pin a directory. The supplied path is interpreted only at
     /// this authority boundary and is never retained or re-resolved.
-    pub fn acquireRoot(self: *LinuxFs, path: []const u8) contract.Error!contract.Root {
+    pub fn acquireRoot(self: *PosixFs, path: []const u8) contract.Error!contract.Root {
         if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidName;
         const path_z = try self.gpa.dupeZ(u8, path);
         defer self.gpa.free(path_z);
-        const rc = linux.openat(linux.AT.FDCWD, path_z.ptr, .{
+        const fd = try openAt(c.AT.FDCWD, path_z.ptr, .{
             .ACCMODE = .RDONLY,
             .DIRECTORY = true,
             .CLOEXEC = true,
         }, 0);
-        const fd = try fdResult(rc);
         errdefer closeFd(fd);
         const snapshot = try statFd(fd);
         if (snapshot.kind != .directory) return error.NotDirectory;
@@ -191,7 +161,7 @@ pub const LinuxFs = struct {
     /// Compare the stable directory identities behind two pinned roots. The
     /// opaque root handles themselves are allocation slots and therefore do
     /// not answer whether two path acquisitions reached the same directory.
-    pub fn sameRoot(self: *LinuxFs, left: contract.Root, right: contract.Root) contract.Error!bool {
+    pub fn sameRoot(self: *PosixFs, left: contract.Root, right: contract.Root) contract.Error!bool {
         const left_state = try self.rootState(left);
         const right_state = try self.rootState(right);
         return left_state.identity.locationEql(right_state.identity);
@@ -202,7 +172,7 @@ pub const LinuxFs = struct {
     /// then the raw leaf is opened with `O_NOFOLLOW`; both the observed
     /// revision and exact object identity are checked before publication.
     /// A symlink therefore remains a symlink and can never become a root.
-    pub fn deriveRoot(self: *LinuxFs, source: contract.EntrySource) contract.Error!contract.Root {
+    pub fn deriveRoot(self: *PosixFs, source: contract.EntrySource) contract.Error!contract.Root {
         const resolved = try self.resolveEntry(source.root, source.ref);
         defer resolved.close();
         if (!revisionMatches(resolved.snapshot, source.revision)) return error.Stale;
@@ -222,7 +192,7 @@ pub const LinuxFs = struct {
     /// parent (the filesystem root). This is deliberately platform mechanism:
     /// app target publication may expose a generic `container` relation while
     /// plugins remain unaware of fds or path syntax.
-    pub fn acquireParent(self: *LinuxFs, root: contract.Root) contract.Error!?contract.Root {
+    pub fn acquireParent(self: *PosixFs, root: contract.Root) contract.Error!?contract.Root {
         const state = try self.rootState(root);
         const fd = try openDirectoryAt(state.fd, "..");
         errdefer closeFd(fd);
@@ -235,7 +205,7 @@ pub const LinuxFs = struct {
         return try self.pinRootFd(fd, snapshot.identity);
     }
 
-    fn pinRootFd(self: *LinuxFs, fd: i32, identity: Identity) std.mem.Allocator.Error!contract.Root {
+    fn pinRootFd(self: *PosixFs, fd: i32, identity: Identity) std.mem.Allocator.Error!contract.Root {
         for (self.roots.items, 0..) |*slot, index| {
             if (slot.value != null) continue;
             slot.value = .{ .fd = fd, .identity = identity };
@@ -252,7 +222,7 @@ pub const LinuxFs = struct {
         };
     }
 
-    pub fn releaseRoot(self: *LinuxFs, root: contract.Root) void {
+    pub fn releaseRoot(self: *PosixFs, root: contract.Root) void {
         const slot = self.rootSlot(root) orelse return;
         const state = slot.value orelse return;
         for (self.entries.items) |*entry_slot| {
@@ -264,7 +234,7 @@ pub const LinuxFs = struct {
         bumpGeneration(&slot.generation);
     }
 
-    pub fn capabilities(self: *LinuxFs, root: contract.Root) contract.Error!contract.Capabilities {
+    pub fn capabilities(self: *PosixFs, root: contract.Root) contract.Error!contract.Capabilities {
         _ = try self.rootState(root);
         return .{
             .exclusive_create = true,
@@ -278,7 +248,7 @@ pub const LinuxFs = struct {
     }
 
     pub fn observe(
-        self: *LinuxFs,
+        self: *PosixFs,
         gpa: std.mem.Allocator,
         root: contract.Root,
         node: contract.NodeRef,
@@ -307,7 +277,7 @@ pub const LinuxFs = struct {
     }
 
     pub fn list(
-        self: *LinuxFs,
+        self: *PosixFs,
         gpa: std.mem.Allocator,
         root: contract.Root,
         directory: contract.NodeRef,
@@ -321,24 +291,10 @@ pub const LinuxFs = struct {
         const arena = owned.allocator();
         var pending: std.ArrayList(PendingEntry) = .empty;
 
-        var buffer: [16 * 1024]u8 align(@alignOf(linux.dirent64)) = undefined;
-        while (true) {
-            const rc = linux.getdents64(resolved.fd, &buffer, buffer.len);
-            const bytes_read = switch (linux.errno(rc)) {
-                .SUCCESS => rc,
-                .INTR => continue,
-                .ACCES, .PERM => return error.PermissionDenied,
-                else => return error.Io,
-            };
-            if (bytes_read == 0) break;
-            var offset: usize = 0;
-            while (offset < bytes_read) {
-                const dirent: *align(1) const linux.dirent64 = @ptrCast(&buffer[offset]);
-                if (dirent.reclen == 0 or offset + dirent.reclen > bytes_read) return error.Io;
-                const name_z: [*:0]const u8 = @ptrCast(&buffer[offset + @offsetOf(linux.dirent64, "name")]);
-                const raw_name = std.mem.span(name_z);
-                offset += dirent.reclen;
-                if (std.mem.eql(u8, raw_name, ".") or std.mem.eql(u8, raw_name, "..")) continue;
+        {
+            var stream = try DirStream.open(resolved.fd);
+            defer stream.close();
+            while (try stream.next()) |raw_name| {
                 const name = contract.Name.init(raw_name) catch return error.InvalidName;
                 // Always stat: d_type is only a hint and DT_UNKNOWN is valid.
                 const snapshot = statAt(self.gpa, resolved.fd, name.bytes) catch |err| switch (err) {
@@ -392,7 +348,7 @@ pub const LinuxFs = struct {
     }
 
     pub fn read(
-        self: *LinuxFs,
+        self: *PosixFs,
         gpa: std.mem.Allocator,
         request: contract.ReadRequest,
     ) contract.Error!contract.OwnedReadResult {
@@ -406,12 +362,11 @@ pub const LinuxFs = struct {
         if (resolved.snapshot.kind != .regular) return error.Unsupported;
         const name_z = try checkedNameZ(self.gpa, resolved.state.name);
         defer self.gpa.free(name_z);
-        const rc = linux.openat(resolved.parent_fd, name_z.ptr, .{
+        const fd = try openAt(resolved.parent_fd, name_z.ptr, .{
             .ACCMODE = .RDONLY,
             .CLOEXEC = true,
             .NOFOLLOW = true,
         }, 0);
-        const fd = try fdResult(rc);
         defer closeFd(fd);
         const opened = try statFd(fd);
         if (!opened.identity.eql(resolved.snapshot.identity) or !revisionMatches(opened, source.revision))
@@ -427,9 +382,9 @@ pub const LinuxFs = struct {
         var buffer: [64 * 1024]u8 = undefined;
         while (remaining != 0) {
             const wanted: usize = @intCast(@min(remaining, buffer.len));
-            const read_rc = linux.pread(fd, &buffer, wanted, @bitCast(offset));
-            const count = switch (linux.errno(read_rc)) {
-                .SUCCESS => read_rc,
+            const read_rc = c.pread(fd, &buffer, wanted, @intCast(offset));
+            const count: usize = switch (c.errno(read_rc)) {
+                .SUCCESS => @intCast(read_rc),
                 .INTR => continue,
                 .ACCES, .PERM => return error.PermissionDenied,
                 else => return error.Io,
@@ -454,7 +409,7 @@ pub const LinuxFs = struct {
     /// checked again before publication, so deletion or replacement after
     /// capture cannot change what a later paste observes. Directory leasing
     /// is intentionally unsupported in this slice.
-    pub fn capture(self: *LinuxFs, source: contract.EntrySource) contract.Error!contract.LeaseRef {
+    pub fn capture(self: *PosixFs, source: contract.EntrySource) contract.Error!contract.LeaseRef {
         const resolved = try self.resolveEntry(source.root, source.ref);
         defer resolved.close();
         if (!revisionMatches(resolved.snapshot, source.revision)) return error.Stale;
@@ -503,7 +458,7 @@ pub const LinuxFs = struct {
         return .{ .authority = source.root.authority, .slot = @intCast(self.leases.items.len - 1), .generation = self.leases.items[self.leases.items.len - 1].generation };
     }
 
-    pub fn releaseLease(self: *LinuxFs, source: contract.LeaseSource) void {
+    pub fn releaseLease(self: *PosixFs, source: contract.LeaseSource) void {
         if (source.ref.authority != .here or source.ref.slot >= self.leases.items.len) return;
         const slot = &self.leases.items[source.ref.slot];
         if (slot.generation != source.ref.generation) return;
@@ -512,7 +467,7 @@ pub const LinuxFs = struct {
     }
 
     pub fn apply(
-        self: *LinuxFs,
+        self: *PosixFs,
         gpa: std.mem.Allocator,
         effect_plan: contract.Plan,
     ) contract.Error!contract.OwnedApplyReport {
@@ -560,7 +515,7 @@ pub const LinuxFs = struct {
     }
 
     pub fn watch(
-        self: *LinuxFs,
+        self: *PosixFs,
         root: contract.Root,
         directory: contract.NodeRef,
         recursive: bool,
@@ -572,19 +527,19 @@ pub const LinuxFs = struct {
         return error.Unsupported;
     }
 
-    pub fn pollInvalidation(self: *LinuxFs, watch_ref: contract.WatchRef) contract.Error!?contract.Invalidation {
+    pub fn pollInvalidation(self: *PosixFs, watch_ref: contract.WatchRef) contract.Error!?contract.Invalidation {
         _ = self;
         _ = watch_ref;
         return error.Unsupported;
     }
 
-    pub fn closeWatch(self: *LinuxFs, watch_ref: contract.WatchRef) void {
+    pub fn closeWatch(self: *PosixFs, watch_ref: contract.WatchRef) void {
         _ = self;
         _ = watch_ref;
     }
 
     fn execute(
-        self: *LinuxFs,
+        self: *PosixFs,
         destination_root: contract.Root,
         operation: contract.Operation,
         outputs: []?contract.EntryRef,
@@ -600,25 +555,24 @@ pub const LinuxFs = struct {
         };
     }
 
-    fn createFile(self: *LinuxFs, root: contract.Root, create: anytype, outputs: []?contract.EntryRef) contract.Error!Execution {
+    fn createFile(self: *PosixFs, root: contract.Root, create: anytype, outputs: []?contract.EntryRef) contract.Error!Execution {
         try requireExclusive(create.expected);
         if (create.mode) |mode| try validateMode(mode);
         const name_z = try checkedNameZ(self.gpa, create.destination.name.bytes);
         defer self.gpa.free(name_z);
         var parent = try self.resolveParent(root, create.destination.parent, outputs);
         defer parent.close();
-        const rc = linux.openat(parent.fd, name_z.ptr, .{
+        const fd = try openAt(parent.fd, name_z.ptr, .{
             .ACCMODE = .WRONLY,
             .CREAT = true,
             .EXCL = true,
             .NOFOLLOW = true,
             .CLOEXEC = true,
-        }, @intCast(create.mode orelse 0o644));
-        const fd = try fdResult(rc);
+        }, create.mode orelse 0o644);
         defer closeFd(fd);
         writeAll(fd, create.contents) catch return .{ .outcome = .{ .ambiguous = "exclusive file was created but its contents may be partial" } };
         if (create.mode) |mode|
-            if (linux.errno(linux.fchmod(fd, @intCast(mode))) != .SUCCESS)
+            if (!fchmodFd(fd, mode))
                 return .{ .outcome = .{ .ambiguous = "file was created but its requested mode was not applied" } };
         const snapshot = try statFd(fd);
         const entry = self.mintEntry(root, parent.node, create.destination.name.bytes, snapshot) catch
@@ -626,7 +580,7 @@ pub const LinuxFs = struct {
         return .{ .outcome = .{ .applied = null }, .output = entry };
     }
 
-    fn createDirectory(self: *LinuxFs, root: contract.Root, create: anytype, outputs: []?contract.EntryRef) contract.Error!Execution {
+    fn createDirectory(self: *PosixFs, root: contract.Root, create: anytype, outputs: []?contract.EntryRef) contract.Error!Execution {
         try requireExclusive(create.expected);
         if (create.mode) |mode| try validateMode(mode);
         const name_z = try checkedNameZ(self.gpa, create.destination.name.bytes);
@@ -635,12 +589,12 @@ pub const LinuxFs = struct {
         defer parent.close();
         const requested_mode = create.mode orelse 0o755;
         const initial_mode = if (create.mode != null) requested_mode | 0o700 else requested_mode;
-        try voidResult(linux.mkdirat(parent.fd, name_z.ptr, @intCast(initial_mode)));
+        try voidResult(c.mkdirat(parent.fd, name_z.ptr, @intCast(initial_mode)));
         if (create.mode) |mode| {
             const created_fd = openDirectoryAt(parent.fd, create.destination.name.bytes) catch
                 return .{ .outcome = .{ .ambiguous = "directory was created but its requested mode could not be applied" } };
             defer closeFd(created_fd);
-            if (linux.errno(linux.fchmod(created_fd, @intCast(mode))) != .SUCCESS)
+            if (!fchmodFd(created_fd, mode))
                 return .{ .outcome = .{ .ambiguous = "directory was created but its requested mode was not applied" } };
         }
         const snapshot = statAt(self.gpa, parent.fd, create.destination.name.bytes) catch
@@ -650,7 +604,7 @@ pub const LinuxFs = struct {
         return .{ .outcome = .{ .applied = null }, .output = entry };
     }
 
-    fn createSymlink(self: *LinuxFs, root: contract.Root, create: anytype, outputs: []?contract.EntryRef) contract.Error!Execution {
+    fn createSymlink(self: *PosixFs, root: contract.Root, create: anytype, outputs: []?contract.EntryRef) contract.Error!Execution {
         try requireExclusive(create.expected);
         if (std.mem.indexOfScalar(u8, create.target, 0) != null) return error.InvalidName;
         const name_z = try checkedNameZ(self.gpa, create.destination.name.bytes);
@@ -659,7 +613,7 @@ pub const LinuxFs = struct {
         defer self.gpa.free(target_z);
         var parent = try self.resolveParent(root, create.destination.parent, outputs);
         defer parent.close();
-        try voidResult(linux.symlinkat(target_z.ptr, parent.fd, name_z.ptr));
+        try voidResult(c.symlinkat(target_z.ptr, parent.fd, name_z.ptr));
         const snapshot = statAt(self.gpa, parent.fd, create.destination.name.bytes) catch
             return .{ .outcome = .{ .ambiguous = "symlink was created but could not be observed" } };
         const entry = self.mintEntry(root, parent.node, create.destination.name.bytes, snapshot) catch
@@ -667,7 +621,7 @@ pub const LinuxFs = struct {
         return .{ .outcome = .{ .applied = null }, .output = entry };
     }
 
-    fn copy(self: *LinuxFs, destination_root: contract.Root, copy_op: anytype, outputs: []?contract.EntryRef) contract.Error!Execution {
+    fn copy(self: *PosixFs, destination_root: contract.Root, copy_op: anytype, outputs: []?contract.EntryRef) contract.Error!Execution {
         try requireExclusive(copy_op.expected);
         const source = switch (copy_op.source) {
             .entry => |entry| entry,
@@ -709,7 +663,7 @@ pub const LinuxFs = struct {
     }
 
     fn copyLease(
-        self: *LinuxFs,
+        self: *PosixFs,
         destination_root: contract.Root,
         copy_op: anytype,
         outputs: []?contract.EntryRef,
@@ -728,22 +682,22 @@ pub const LinuxFs = struct {
         defer self.gpa.free(destination_z);
         switch (lease.kind) {
             .regular => {
-                const fd = try fdResult(linux.openat(destination.fd, destination_z.ptr, .{
+                const fd = try openAt(destination.fd, destination_z.ptr, .{
                     .ACCMODE = .WRONLY,
                     .CREAT = true,
                     .EXCL = true,
                     .NOFOLLOW = true,
                     .CLOEXEC = true,
-                }, @intCast(lease.mode)));
+                }, lease.mode);
                 defer closeFd(fd);
                 writeAll(fd, lease.contents) catch return .{ .outcome = .{ .ambiguous = "lease paste created a partial file" } };
-                if (linux.errno(linux.fchmod(fd, @intCast(lease.mode))) != .SUCCESS)
+                if (!fchmodFd(fd, lease.mode))
                     return .{ .outcome = .{ .ambiguous = "lease paste created a file whose mode could not be applied" } };
             },
             .symlink => {
                 const target_z = try self.gpa.dupeZ(u8, lease.link_target);
                 defer self.gpa.free(target_z);
-                try voidResult(linux.symlinkat(target_z.ptr, destination.fd, destination_z.ptr));
+                try voidResult(c.symlinkat(target_z.ptr, destination.fd, destination_z.ptr));
             },
             else => return error.Unsupported,
         }
@@ -754,7 +708,7 @@ pub const LinuxFs = struct {
         return .{ .outcome = .{ .applied = null }, .output = entry };
     }
 
-    fn rename(self: *LinuxFs, destination_root: contract.Root, rename_op: anytype, outputs: []?contract.EntryRef) contract.Error!Execution {
+    fn rename(self: *PosixFs, destination_root: contract.Root, rename_op: anytype, outputs: []?contract.EntryRef) contract.Error!Execution {
         // `expected = .entry` is a guarded REPLACE: the destination is taken
         // over only while it is still exactly the file the caller observed
         // (identity and revision) — the move-iff-unchanged half of a guarded
@@ -788,7 +742,7 @@ pub const LinuxFs = struct {
         }
 
         // Recheck after destination/cycle work, immediately before the effect.
-        // Linux has no general compare-and-rename primitive, so this provider
+        // Neither Linux nor Darwin has a general compare-and-rename primitive, so this provider
         // truthfully advertises only preflight guard strength.
         const guarded = statAt(self.gpa, source.parent_fd, source.state.name) catch |err| switch (err) {
             error.NotFound => return error.Stale,
@@ -821,7 +775,7 @@ pub const LinuxFs = struct {
         return .{ .outcome = .{ .applied = null }, .output = entry };
     }
 
-    fn remove(self: *LinuxFs, remove_op: anytype) contract.Error!Execution {
+    fn remove(self: *PosixFs, remove_op: anytype) contract.Error!Execution {
         if (remove_op.policy == .quarantine) return error.Unsupported;
         const source = try self.resolveEntry(remove_op.source.root, remove_op.source.ref);
         defer source.close();
@@ -835,7 +789,7 @@ pub const LinuxFs = struct {
         return .{ .outcome = .{ .applied = null } };
     }
 
-    fn setPermissions(self: *LinuxFs, set: anytype) contract.Error!Execution {
+    fn setPermissions(self: *PosixFs, set: anytype) contract.Error!Execution {
         // Following a symlink is an explicit contract request but not a
         // capability this provider advertises in its first slice.
         if (set.follow_symlink) return error.Unsupported;
@@ -853,29 +807,33 @@ pub const LinuxFs = struct {
         };
         if (!guarded.identity.eql(source.snapshot.identity) or
             !revisionMatches(guarded, set.source.revision)) return error.Stale;
-        const chmod_rc = linux.fchmodat2(source.parent_fd, name_z.ptr, @intCast(set.mode), linux.AT.SYMLINK_NOFOLLOW);
-        switch (linux.errno(chmod_rc)) {
+        // `fchmodat(AT_SYMLINK_NOFOLLOW)` is native on Darwin and on Linux
+        // with `fchmodat2` (glibc emulates it via `O_PATH` otherwise). Where
+        // the libc/kernel pair refuses the flag, fall back to chmod through a
+        // no-follow descriptor whose identity is checked first.
+        const chmod_rc = c.fchmodat(source.parent_fd, name_z.ptr, @intCast(set.mode), c.AT.SYMLINK_NOFOLLOW);
+        switch (c.errno(chmod_rc)) {
             .SUCCESS => {},
-            .NOSYS, .INVAL, .OPNOTSUPP => {
-                const flags: linux.O = if (source.snapshot.kind == .directory)
+            .NOENT => return error.Stale,
+            .ACCES, .PERM => return error.PermissionDenied,
+            .LOOP => return error.Confined,
+            else => |err| {
+                if (!unsupportedErrno(err)) return error.Io;
+                const flags: c.O = if (source.snapshot.kind == .directory)
                     .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }
                 else
                     .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true };
-                const fd = try fdResult(linux.openat(source.parent_fd, name_z.ptr, flags, 0));
+                const fd = try openAt(source.parent_fd, name_z.ptr, flags, 0);
                 defer closeFd(fd);
                 const opened = try statFd(fd);
                 if (!opened.identity.eql(source.snapshot.identity) or
                     !revisionMatches(opened, set.source.revision)) return error.Stale;
-                switch (linux.errno(linux.fchmod(fd, @intCast(set.mode)))) {
+                switch (c.errno(c.fchmod(fd, @intCast(set.mode)))) {
                     .SUCCESS => {},
                     .ACCES, .PERM => return error.PermissionDenied,
                     else => return error.Unsupported,
                 }
             },
-            .NOENT => return error.Stale,
-            .ACCES, .PERM => return error.PermissionDenied,
-            .LOOP => return error.Confined,
-            else => return error.Io,
         }
         const finish = statAt(self.gpa, source.parent_fd, source.state.name) catch
             return .{ .outcome = .{ .ambiguous = "permissions changed but the entry immediately disappeared" } };
@@ -885,7 +843,7 @@ pub const LinuxFs = struct {
     }
 
     fn copyAt(
-        self: *LinuxFs,
+        self: *PosixFs,
         source_parent_fd: i32,
         source_name: []const u8,
         expected: Snapshot,
@@ -899,83 +857,61 @@ pub const LinuxFs = struct {
 
         switch (expected.kind) {
             .regular => {
-                const source_rc = linux.openat(source_parent_fd, source_z.ptr, .{
+                const source_fd = try openAt(source_parent_fd, source_z.ptr, .{
                     .ACCMODE = .RDONLY,
                     .CLOEXEC = true,
                     .NOFOLLOW = true,
                 }, 0);
-                const source_fd = try fdResult(source_rc);
                 defer closeFd(source_fd);
                 const opened = try statFd(source_fd);
                 if (!opened.identity.eql(expected.identity) or !sameRevision(opened, expected)) return error.Stale;
-                const destination_rc = linux.openat(destination_parent_fd, destination_z.ptr, .{
+                const destination_fd = try openAt(destination_parent_fd, destination_z.ptr, .{
                     .ACCMODE = .WRONLY,
                     .CREAT = true,
                     .EXCL = true,
                     .NOFOLLOW = true,
                     .CLOEXEC = true,
-                }, @intCast(expected.mode));
-                const destination_fd = try fdResult(destination_rc);
+                }, expected.mode);
                 defer closeFd(destination_fd);
                 var buffer: [64 * 1024]u8 = undefined;
                 while (true) {
-                    const read_rc = linux.read(source_fd, &buffer, buffer.len);
-                    const count = switch (linux.errno(read_rc)) {
-                        .SUCCESS => read_rc,
-                        .INTR => continue,
-                        else => return error.Partial,
-                    };
+                    const count = readSome(source_fd, &buffer) catch return error.Partial;
                     if (count == 0) break;
                     writeAll(destination_fd, buffer[0..count]) catch return error.Partial;
                 }
-                if (linux.errno(linux.fchmod(destination_fd, @intCast(expected.mode))) != .SUCCESS) return error.Partial;
+                if (!fchmodFd(destination_fd, expected.mode)) return error.Partial;
                 const finish = try statFd(source_fd);
                 if (!finish.identity.eql(expected.identity) or !sameRevision(finish, expected)) return error.Partial;
             },
             .directory => {
-                const source_rc = linux.openat(source_parent_fd, source_z.ptr, .{
+                const source_fd = try openAt(source_parent_fd, source_z.ptr, .{
                     .ACCMODE = .RDONLY,
                     .DIRECTORY = true,
                     .CLOEXEC = true,
                     .NOFOLLOW = true,
                 }, 0);
-                const source_fd = try fdResult(source_rc);
                 defer closeFd(source_fd);
                 const opened = try statFd(source_fd);
                 if (!opened.identity.eql(expected.identity) or !sameRevision(opened, expected)) return error.Stale;
                 // Keep the provider able to populate a directory whose final
                 // mode intentionally removes owner traversal/read access.
-                try voidResult(linux.mkdirat(destination_parent_fd, destination_z.ptr, @intCast(expected.mode | 0o700)));
-                const destination_rc = linux.openat(destination_parent_fd, destination_z.ptr, .{
+                try voidResult(c.mkdirat(destination_parent_fd, destination_z.ptr, @intCast(expected.mode | 0o700)));
+                const destination_fd = openAt(destination_parent_fd, destination_z.ptr, .{
                     .ACCMODE = .RDONLY,
                     .DIRECTORY = true,
                     .CLOEXEC = true,
                     .NOFOLLOW = true,
-                }, 0);
-                const destination_fd = fdResult(destination_rc) catch return error.Partial;
+                }, 0) catch return error.Partial;
                 defer closeFd(destination_fd);
-                var buffer: [16 * 1024]u8 align(@alignOf(linux.dirent64)) = undefined;
-                while (true) {
-                    const dents_rc = linux.getdents64(source_fd, &buffer, buffer.len);
-                    const bytes_read = switch (linux.errno(dents_rc)) {
-                        .SUCCESS => dents_rc,
-                        .INTR => continue,
-                        else => return error.Partial,
-                    };
-                    if (bytes_read == 0) break;
-                    var offset: usize = 0;
-                    while (offset < bytes_read) {
-                        const dirent: *align(1) const linux.dirent64 = @ptrCast(&buffer[offset]);
-                        if (dirent.reclen == 0 or offset + dirent.reclen > bytes_read) return error.Partial;
-                        const child_z: [*:0]const u8 = @ptrCast(&buffer[offset + @offsetOf(linux.dirent64, "name")]);
-                        const child = std.mem.span(child_z);
-                        offset += dirent.reclen;
-                        if (std.mem.eql(u8, child, ".") or std.mem.eql(u8, child, "..")) continue;
+                {
+                    var stream = DirStream.open(source_fd) catch return error.Partial;
+                    defer stream.close();
+                    while (stream.next() catch return error.Partial) |child| {
                         const child_snapshot = statAt(self.gpa, source_fd, child) catch return error.Partial;
                         self.copyAt(source_fd, child, child_snapshot, destination_fd, child) catch return error.Partial;
                     }
                 }
-                if (linux.errno(linux.fchmod(destination_fd, @intCast(expected.mode))) != .SUCCESS) return error.Partial;
+                if (!fchmodFd(destination_fd, expected.mode)) return error.Partial;
                 const finish = try statFd(source_fd);
                 if (!finish.identity.eql(expected.identity) or !sameRevision(finish, expected)) return error.Partial;
             },
@@ -987,74 +923,54 @@ pub const LinuxFs = struct {
                 if (std.mem.indexOfScalar(u8, target, 0) != null) return error.InvalidName;
                 const target_z = try self.gpa.dupeZ(u8, target);
                 defer self.gpa.free(target_z);
-                try voidResult(linux.symlinkat(target_z.ptr, destination_parent_fd, destination_z.ptr));
+                try voidResult(c.symlinkat(target_z.ptr, destination_parent_fd, destination_z.ptr));
             },
             .other => return error.Unsupported,
         }
     }
 
-    fn removeAt(self: *LinuxFs, parent_fd: i32, name: []const u8, expected: Snapshot) RemoveError!void {
+    fn removeAt(self: *PosixFs, parent_fd: i32, name: []const u8, expected: Snapshot) RemoveError!void {
         const name_z = try checkedNameZ(self.gpa, name);
         defer self.gpa.free(name_z);
         if (expected.kind != .directory) {
             const current = try statAt(self.gpa, parent_fd, name);
             if (!current.identity.eql(expected.identity) or !sameRevision(current, expected)) return error.Stale;
-            try voidResult(linux.unlinkat(parent_fd, name_z.ptr, 0));
+            try voidResult(c.unlinkat(parent_fd, name_z.ptr, 0));
             return;
         }
 
-        const open_rc = linux.openat(parent_fd, name_z.ptr, .{
+        const directory_fd = try openAt(parent_fd, name_z.ptr, .{
             .ACCMODE = .RDONLY,
             .DIRECTORY = true,
             .CLOEXEC = true,
             .NOFOLLOW = true,
         }, 0);
-        const directory_fd = try fdResult(open_rc);
         defer closeFd(directory_fd);
         const opened = try statFd(directory_fd);
         if (!opened.identity.eql(expected.identity) or !sameRevision(opened, expected)) return error.Stale;
 
         var changed = false;
-        var buffer: [16 * 1024]u8 align(@alignOf(linux.dirent64)) = undefined;
-        while (true) {
-            const dents_rc = linux.getdents64(directory_fd, &buffer, buffer.len);
-            const bytes_read = switch (linux.errno(dents_rc)) {
-                .SUCCESS => dents_rc,
-                .INTR => continue,
-                else => return if (changed) error.Partial else error.Io,
-            };
-            if (bytes_read == 0) break;
-            var offset: usize = 0;
-            var restart = false;
-            while (offset < bytes_read) {
-                const dirent: *align(1) const linux.dirent64 = @ptrCast(&buffer[offset]);
-                if (dirent.reclen == 0 or offset + dirent.reclen > bytes_read) return error.Partial;
-                const child_z: [*:0]const u8 = @ptrCast(&buffer[offset + @offsetOf(linux.dirent64, "name")]);
-                const child = std.mem.span(child_z);
-                offset += dirent.reclen;
-                if (std.mem.eql(u8, child, ".") or std.mem.eql(u8, child, "..")) continue;
+        {
+            var stream = try DirStream.open(directory_fd);
+            defer stream.close();
+            while (stream.next() catch return if (changed) error.Partial else error.Io) |child| {
                 const child_snapshot = statAt(self.gpa, directory_fd, child) catch return if (changed) error.Partial else error.Io;
                 self.removeAt(directory_fd, child, child_snapshot) catch return error.Partial;
                 changed = true;
                 // Directory cookies may be invalidated by deletion. Restart
                 // after each child so no entry is skipped by a shifted cookie.
-                restart = true;
-                break;
-            }
-            if (restart) {
-                if (linux.errno(linux.lseek(directory_fd, 0, linux.SEEK.SET)) != .SUCCESS) return error.Partial;
-                continue;
+                stream.rewind();
             }
         }
         // Children changed the directory revision, so the final guard is its
         // opaque identity rather than the original revision we changed.
         const current = statAt(self.gpa, parent_fd, name) catch return error.Partial;
         if (!current.identity.eql(expected.identity)) return error.Partial;
-        voidResult(linux.unlinkat(parent_fd, name_z.ptr, linux.AT.REMOVEDIR)) catch return error.Partial;
+        voidResult(c.unlinkat(parent_fd, name_z.ptr, c.AT.REMOVEDIR)) catch return error.Partial;
     }
 
     fn resolveParent(
-        self: *LinuxFs,
+        self: *PosixFs,
         root: contract.Root,
         parent: contract.ParentRef,
         outputs: []?contract.EntryRef,
@@ -1067,7 +983,7 @@ pub const LinuxFs = struct {
         return self.resolveDirectory(root, node);
     }
 
-    fn resolveDirectory(self: *LinuxFs, root: contract.Root, node: contract.NodeRef) contract.Error!ResolvedDirectory {
+    fn resolveDirectory(self: *PosixFs, root: contract.Root, node: contract.NodeRef) contract.Error!ResolvedDirectory {
         return switch (node) {
             .root => blk: {
                 const state = try self.rootState(root);
@@ -1090,7 +1006,7 @@ pub const LinuxFs = struct {
         };
     }
 
-    fn resolveEntry(self: *LinuxFs, root: contract.Root, entry: contract.EntryRef) contract.Error!ResolvedEntry {
+    fn resolveEntry(self: *PosixFs, root: contract.Root, entry: contract.EntryRef) contract.Error!ResolvedEntry {
         _ = try self.rootState(root);
         const state = try self.entryState(entry);
         if (!state.root.eql(root)) return error.Stale;
@@ -1104,7 +1020,7 @@ pub const LinuxFs = struct {
         return .{ .parent_fd = parent.fd, .state = state, .snapshot = snapshot };
     }
 
-    fn wouldCycle(self: *LinuxFs, root: contract.Root, source: Identity, destination_fd: i32) contract.Error!bool {
+    fn wouldCycle(self: *PosixFs, root: contract.Root, source: Identity, destination_fd: i32) contract.Error!bool {
         const root_identity = (try self.rootState(root)).identity;
         var current_fd = try openDirectoryAt(destination_fd, ".");
         defer closeFd(current_fd);
@@ -1124,7 +1040,7 @@ pub const LinuxFs = struct {
     }
 
     fn observation(
-        self: *LinuxFs,
+        self: *PosixFs,
         arena: std.mem.Allocator,
         node: contract.NodeRef,
         snapshot: Snapshot,
@@ -1139,7 +1055,7 @@ pub const LinuxFs = struct {
     }
 
     fn captureLinkTarget(
-        self: *LinuxFs,
+        self: *PosixFs,
         arena: std.mem.Allocator,
         parent_fd: i32,
         name: []const u8,
@@ -1157,7 +1073,7 @@ pub const LinuxFs = struct {
     }
 
     fn observationValue(
-        self: *LinuxFs,
+        self: *PosixFs,
         arena: std.mem.Allocator,
         node: contract.NodeRef,
         snapshot: Snapshot,
@@ -1169,7 +1085,7 @@ pub const LinuxFs = struct {
     }
 
     fn observationWithRevision(
-        self: *LinuxFs,
+        self: *PosixFs,
         node: contract.NodeRef,
         snapshot: Snapshot,
         link_target: ?[]const u8,
@@ -1193,7 +1109,7 @@ pub const LinuxFs = struct {
     /// Every allocation happens before invalidation, so allocation failure or
     /// a stale listing leaves the registry untouched.
     fn reconcileDirectory(
-        self: *LinuxFs,
+        self: *PosixFs,
         scratch: std.mem.Allocator,
         root: contract.Root,
         parent: contract.NodeRef,
@@ -1270,7 +1186,7 @@ pub const LinuxFs = struct {
     }
 
     fn insertPreparedEntry(
-        self: *LinuxFs,
+        self: *PosixFs,
         root: contract.Root,
         parent: contract.NodeRef,
         owned_name: []u8,
@@ -1305,7 +1221,7 @@ pub const LinuxFs = struct {
     }
 
     fn mintEntry(
-        self: *LinuxFs,
+        self: *PosixFs,
         root: contract.Root,
         parent: contract.NodeRef,
         name: []const u8,
@@ -1355,7 +1271,7 @@ pub const LinuxFs = struct {
         };
     }
 
-    fn invalidateEntry(self: *LinuxFs, entry: contract.EntryRef) void {
+    fn invalidateEntry(self: *PosixFs, entry: contract.EntryRef) void {
         if (entry.authority != .here or entry.slot >= self.entries.items.len) return;
         const slot = &self.entries.items[entry.slot];
         if (slot.generation != entry.generation or slot.value == null) return;
@@ -1376,7 +1292,7 @@ pub const LinuxFs = struct {
         self.clearEntrySlot(slot);
     }
 
-    fn clearEntrySlot(self: *LinuxFs, slot: *EntrySlot) void {
+    fn clearEntrySlot(self: *PosixFs, slot: *EntrySlot) void {
         if (slot.value) |entry| {
             self.gpa.free(entry.name);
         }
@@ -1384,7 +1300,7 @@ pub const LinuxFs = struct {
         bumpGeneration(&slot.generation);
     }
 
-    fn clearLeaseSlot(self: *LinuxFs, slot: *LeaseSlot) void {
+    fn clearLeaseSlot(self: *PosixFs, slot: *LeaseSlot) void {
         if (slot.value) |lease| {
             self.gpa.free(lease.contents);
             self.gpa.free(lease.link_target);
@@ -1393,19 +1309,19 @@ pub const LinuxFs = struct {
         bumpGeneration(&slot.generation);
     }
 
-    fn rootSlot(self: *LinuxFs, root: contract.Root) ?*RootSlot {
+    fn rootSlot(self: *PosixFs, root: contract.Root) ?*RootSlot {
         if (root.authority != .here or root.slot >= self.roots.items.len) return null;
         const slot = &self.roots.items[root.slot];
         if (slot.generation != root.generation) return null;
         return slot;
     }
 
-    fn rootState(self: *LinuxFs, root: contract.Root) contract.Error!*RootState {
+    fn rootState(self: *PosixFs, root: contract.Root) contract.Error!*RootState {
         const slot = self.rootSlot(root) orelse return error.Stale;
         return if (slot.value) |*value| value else error.Stale;
     }
 
-    fn entryState(self: *LinuxFs, entry: contract.EntryRef) contract.Error!*EntryState {
+    fn entryState(self: *PosixFs, entry: contract.EntryRef) contract.Error!*EntryState {
         if (entry.authority != .here or entry.slot >= self.entries.items.len) return error.Stale;
         const slot = &self.entries.items[entry.slot];
         if (slot.generation != entry.generation) return error.Stale;
@@ -1465,16 +1381,16 @@ fn readWholeFile(
     gpa: std.mem.Allocator,
     parent_fd: i32,
     name: []const u8,
-    expected: LinuxFs.Snapshot,
+    expected: PosixFs.Snapshot,
     max_bytes: u64,
 ) contract.Error![]u8 {
     const name_z = try checkedNameZ(gpa, name);
     defer gpa.free(name_z);
-    const fd = try fdResult(linux.openat(parent_fd, name_z.ptr, .{
+    const fd = try openAt(parent_fd, name_z.ptr, .{
         .ACCMODE = .RDONLY,
         .CLOEXEC = true,
         .NOFOLLOW = true,
-    }, 0));
+    }, 0);
     defer closeFd(fd);
     const opened = try statFd(fd);
     if (opened.kind != .regular or !opened.identity.eql(expected.identity) or !sameRevision(opened, expected)) return error.Stale;
@@ -1485,22 +1401,10 @@ fn readWholeFile(
     while (true) {
         const remaining = max_bytes -| bytes.items.len;
         if (remaining == 0) {
-            const probe = linux.read(fd, &buffer, 1);
-            switch (linux.errno(probe)) {
-                .SUCCESS => if (probe != 0) return error.LimitExceeded,
-                .INTR => continue,
-                .ACCES, .PERM => return error.PermissionDenied,
-                else => return error.Io,
-            }
+            if (try readSome(fd, buffer[0..1]) != 0) return error.LimitExceeded;
             break;
         }
-        const rc = linux.read(fd, &buffer, @intCast(@min(remaining, buffer.len)));
-        const count = switch (linux.errno(rc)) {
-            .SUCCESS => rc,
-            .INTR => continue,
-            .ACCES, .PERM => return error.PermissionDenied,
-            else => return error.Io,
-        };
+        const count = try readSome(fd, buffer[0..@intCast(@min(remaining, buffer.len))]);
         if (count == 0) break;
         try bytes.appendSlice(gpa, buffer[0..count]);
     }
@@ -1522,9 +1426,9 @@ fn readlinkAtBounded(
     errdefer gpa.free(buffer);
     var length: usize = undefined;
     while (true) {
-        const rc = linux.readlinkat(parent_fd, name_z.ptr, buffer.ptr, buffer.len);
-        length = switch (linux.errno(rc)) {
-            .SUCCESS => rc,
+        const rc = c.readlinkat(parent_fd, name_z.ptr, buffer.ptr, buffer.len);
+        length = switch (c.errno(rc)) {
+            .SUCCESS => @intCast(rc),
             .INTR => continue,
             .NOENT => return error.NotFound,
             .ACCES, .PERM => return error.PermissionDenied,
@@ -1542,70 +1446,25 @@ fn openDirectoryAt(parent_fd: i32, name: []const u8) contract.Error!i32 {
     if (name.len >= buffer.len) return error.InvalidName;
     @memcpy(buffer[0..name.len], name);
     buffer[name.len] = 0;
-    return fdResult(linux.openat(parent_fd, &buffer, .{
+    return openAt(parent_fd, &buffer, .{
         .ACCMODE = .RDONLY,
         .DIRECTORY = true,
         .CLOEXEC = true,
         .NOFOLLOW = true,
-    }, 0));
+    }, 0);
 }
 
-fn statAt(gpa: std.mem.Allocator, parent_fd: i32, name: []const u8) contract.Error!LinuxFs.Snapshot {
+fn statAt(gpa: std.mem.Allocator, parent_fd: i32, name: []const u8) contract.Error!PosixFs.Snapshot {
     const name_z = try checkedNameZ(gpa, name);
     defer gpa.free(name_z);
-    return statxAt(parent_fd, name_z.ptr, linux.AT.SYMLINK_NOFOLLOW | linux.AT.NO_AUTOMOUNT);
+    return stat.at(parent_fd, name_z.ptr);
 }
 
-fn statFd(fd: i32) contract.Error!LinuxFs.Snapshot {
-    return statxAt(fd, "", linux.AT.EMPTY_PATH | linux.AT.SYMLINK_NOFOLLOW | linux.AT.NO_AUTOMOUNT);
+fn statFd(fd: i32) contract.Error!PosixFs.Snapshot {
+    return stat.ofFd(fd);
 }
 
-fn statxAt(fd: i32, name: [*:0]const u8, flags: u32) contract.Error!LinuxFs.Snapshot {
-    var stat: linux.Statx = undefined;
-    var mask = linux.STATX.BASIC_STATS;
-    mask.MNT_ID = true;
-    mask.BTIME = true;
-    const rc = linux.statx(fd, name, flags, mask, &stat);
-    switch (linux.errno(rc)) {
-        .SUCCESS => {},
-        .NOENT => return error.NotFound,
-        .NOTDIR => return error.NotDirectory,
-        .ACCES, .PERM => return error.PermissionDenied,
-        .LOOP, .XDEV => return error.Confined,
-        .AGAIN, .BUSY => return error.Busy,
-        else => return error.Io,
-    }
-    const file_type = stat.mode & linux.S.IFMT;
-    const kind: contract.Kind = if (file_type == linux.S.IFREG)
-        .regular
-    else if (file_type == linux.S.IFDIR)
-        .directory
-    else if (file_type == linux.S.IFLNK)
-        .symlink
-    else
-        .other;
-    return .{
-        .identity = .{
-            .dev_major = stat.dev_major,
-            .dev_minor = stat.dev_minor,
-            .mount_id = if (stat.mask.MNT_ID) stat.mnt_id else 0,
-            .inode = stat.ino,
-            .has_birth_time = stat.mask.BTIME,
-            .birth_sec = if (stat.mask.BTIME) stat.btime.sec else 0,
-            .birth_nsec = if (stat.mask.BTIME) stat.btime.nsec else 0,
-        },
-        .kind = kind,
-        .mode = stat.mode & 0o7777,
-        .size = stat.size,
-        .nlink = stat.nlink,
-        .modified_sec = stat.mtime.sec,
-        .modified_nsec = stat.mtime.nsec,
-        .changed_sec = stat.ctime.sec,
-        .changed_nsec = stat.ctime.nsec,
-    };
-}
-
-fn revisionBytes(snapshot: *const LinuxFs.Snapshot) [revision_len]u8 {
+fn revisionBytes(snapshot: *const PosixFs.Snapshot) [revision_len]u8 {
     var bytes = [_]u8{0} ** revision_len;
     std.mem.writeInt(u32, bytes[0..4], revision_magic, .little);
     std.mem.writeInt(u32, bytes[4..8], snapshot.identity.dev_major, .little);
@@ -1626,12 +1485,12 @@ fn revisionBytes(snapshot: *const LinuxFs.Snapshot) [revision_len]u8 {
     return bytes;
 }
 
-fn revisionMatches(snapshot: LinuxFs.Snapshot, revision: contract.Revision) bool {
+fn revisionMatches(snapshot: PosixFs.Snapshot, revision: contract.Revision) bool {
     const actual = revisionBytes(&snapshot);
     return std.mem.eql(u8, &actual, revision.token);
 }
 
-fn sameRevision(a: LinuxFs.Snapshot, b: LinuxFs.Snapshot) bool {
+fn sameRevision(a: PosixFs.Snapshot, b: PosixFs.Snapshot) bool {
     const a_bytes = revisionBytes(&a);
     const b_bytes = revisionBytes(&b);
     return std.mem.eql(u8, &a_bytes, &b_bytes);
@@ -1643,11 +1502,12 @@ fn readlinkAt(gpa: std.mem.Allocator, parent_fd: i32, name: []const u8) contract
     var capacity: usize = 256;
     while (capacity <= 1024 * 1024) : (capacity *= 2) {
         const buffer = try gpa.alloc(u8, capacity);
-        const rc = linux.readlinkat(parent_fd, name_z.ptr, buffer.ptr, buffer.len);
-        switch (linux.errno(rc)) {
+        const rc = c.readlinkat(parent_fd, name_z.ptr, buffer.ptr, buffer.len);
+        switch (c.errno(rc)) {
             .SUCCESS => {
-                if (rc < buffer.len) {
-                    const resized = gpa.realloc(buffer, rc) catch |err| {
+                const length: usize = @intCast(rc);
+                if (length < buffer.len) {
+                    const resized = gpa.realloc(buffer, length) catch |err| {
                         // realloc is allowed to leave the original allocation
                         // live when it cannot resize or move it. This buffer
                         // is owned by this helper, so release it before
@@ -1680,12 +1540,25 @@ fn readlinkAt(gpa: std.mem.Allocator, parent_fd: i32, name: []const u8) contract
     return error.Io;
 }
 
+/// One `read(2)`, retried across EINTR. Zero is end of file.
+fn readSome(fd: i32, buffer: []u8) contract.Error!usize {
+    while (true) {
+        const rc = c.read(fd, buffer.ptr, buffer.len);
+        switch (c.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            .ACCES, .PERM => return error.PermissionDenied,
+            else => return error.Io,
+        }
+    }
+}
+
 fn writeAll(fd: i32, bytes: []const u8) contract.Error!void {
     var offset: usize = 0;
     while (offset < bytes.len) {
-        const rc = linux.write(fd, bytes[offset..].ptr, bytes.len - offset);
-        const count = switch (linux.errno(rc)) {
-            .SUCCESS => rc,
+        const rc = c.write(fd, bytes[offset..].ptr, bytes.len - offset);
+        const count: usize = switch (c.errno(rc)) {
+            .SUCCESS => @intCast(rc),
             .INTR => continue,
             .ACCES, .PERM => return error.PermissionDenied,
             else => return error.Io,
@@ -1695,18 +1568,51 @@ fn writeAll(fd: i32, bytes: []const u8) contract.Error!void {
     }
 }
 
-fn renameNoReplace(old_fd: i32, old_name: [*:0]const u8, new_fd: i32, new_name: [*:0]const u8) contract.Error!void {
-    return renameErr(linux.renameat2(old_fd, old_name, new_fd, new_name, .{ .NOREPLACE = true }));
+/// `fchmod` on a descriptor the provider already holds; false on failure.
+fn fchmodFd(fd: i32, mode: u32) bool {
+    return c.errno(c.fchmod(fd, @intCast(mode))) == .SUCCESS;
 }
+
+/// `openat(2)` beneath `dir_fd`, retried across EINTR. `mode` only matters
+/// with `CREAT`; it rides the variadic slot as the C ABI's promoted `int`.
+fn openAt(dir_fd: i32, name: [*:0]const u8, flags: c.O, mode: u32) contract.Error!i32 {
+    while (true) {
+        const rc = c.openat(dir_fd, name, flags, @as(c_uint, mode));
+        if (c.errno(rc) == .INTR) continue;
+        return fdResult(rc);
+    }
+}
+
+/// An atomic rename that refuses to replace an existing destination. This is
+/// the one effect POSIX has no portable spelling for, so it forks per OS: both
+/// spellings fail with `EEXIST` instead of clobbering.
+fn renameNoReplace(old_fd: i32, old_name: [*:0]const u8, new_fd: i32, new_name: [*:0]const u8) contract.Error!void {
+    const rc = switch (builtin.os.tag) {
+        .linux => no_replace.renameat2(old_fd, old_name, new_fd, new_name, no_replace.RENAME_NOREPLACE),
+        else => no_replace.renameatx_np(old_fd, old_name, new_fd, new_name, no_replace.RENAME_EXCL),
+    };
+    return renameErr(rc);
+}
+
+/// The libc entry points `std.c` does not bind. Each is declared on both OSes
+/// but referenced only on its own — an unreferenced extern is never linked.
+const no_replace = struct {
+    /// glibc >= 2.28 / musl >= 1.2.2 (`<stdio.h>`), `RENAME_NOREPLACE`.
+    extern "c" fn renameat2(old_fd: c.fd_t, old: [*:0]const u8, new_fd: c.fd_t, new: [*:0]const u8, flags: c_uint) c_int;
+    const RENAME_NOREPLACE: c_uint = 1;
+    /// Darwin >= 10.12 (`<stdio.h>`), `RENAME_EXCL`.
+    extern "c" fn renameatx_np(old_fd: c.fd_t, old: [*:0]const u8, new_fd: c.fd_t, new: [*:0]const u8, flags: c_uint) c_int;
+    const RENAME_EXCL: c_uint = 0x4;
+};
 
 /// A rename that takes over an existing destination — only ever after the
 /// guarded-replace checks in `rename`.
 fn renameReplace(old_fd: i32, old_name: [*:0]const u8, new_fd: i32, new_name: [*:0]const u8) contract.Error!void {
-    return renameErr(linux.renameat2(old_fd, old_name, new_fd, new_name, .{}));
+    return renameErr(c.renameat(old_fd, old_name, new_fd, new_name));
 }
 
-fn renameErr(rc: usize) contract.Error!void {
-    switch (linux.errno(rc)) {
+fn renameErr(rc: c_int) contract.Error!void {
+    switch (c.errno(rc)) {
         .SUCCESS => {},
         .EXIST, .NOTEMPTY => return error.AlreadyExists,
         .NOENT => return error.Stale,
@@ -1715,14 +1621,23 @@ fn renameErr(rc: usize) contract.Error!void {
         .XDEV => return error.CrossDevice,
         .LOOP => return error.Confined,
         .BUSY => return error.Busy,
-        .NOSYS, .INVAL => return error.Unsupported,
-        else => return error.Io,
+        else => |err| return if (unsupportedErrno(err)) error.Unsupported else error.Io,
     }
 }
 
-fn fdResult(rc: usize) contract.Error!i32 {
-    return switch (linux.errno(rc)) {
-        .SUCCESS => @intCast(rc),
+/// "This filesystem/kernel cannot do that": `ENOSYS`, `EINVAL` for an
+/// unknown flag, and `EOPNOTSUPP` — which Darwin also spells `ENOTSUP`
+/// (a distinct value there; a single value on Linux).
+fn unsupportedErrno(err: c.E) bool {
+    return switch (err) {
+        .NOSYS, .INVAL, .OPNOTSUPP => true,
+        else => @hasField(c.E, "NOTSUP") and err == @field(c.E, "NOTSUP"),
+    };
+}
+
+fn fdResult(rc: c_int) contract.Error!i32 {
+    return switch (c.errno(rc)) {
+        .SUCCESS => rc,
         .NOENT => error.NotFound,
         .EXIST => error.AlreadyExists,
         .NOTDIR, .ISDIR => error.NotDirectory,
@@ -1733,8 +1648,8 @@ fn fdResult(rc: usize) contract.Error!i32 {
     };
 }
 
-fn voidResult(rc: usize) contract.Error!void {
-    switch (linux.errno(rc)) {
+fn voidResult(rc: c_int) contract.Error!void {
+    switch (c.errno(rc)) {
         .SUCCESS => {},
         .NOENT => return error.NotFound,
         .EXIST, .NOTEMPTY => return error.AlreadyExists,
@@ -1744,22 +1659,79 @@ fn voidResult(rc: usize) contract.Error!void {
         .LOOP => return error.Confined,
         .BUSY, .AGAIN => return error.Busy,
         .NOSYS, .OPNOTSUPP => return error.Unsupported,
-        else => return error.Io,
+        else => |err| return if (unsupportedErrno(err) and err != .INVAL) error.Unsupported else error.Io,
     }
 }
 
 fn closeFd(fd: i32) void {
-    // On Linux the descriptor is released even when close reports EINTR;
-    // retrying could close an unrelated descriptor reused by another thread.
-    _ = linux.close(fd);
+    // The descriptor is released even when close reports EINTR (Linux), and
+    // Darwin's `close$NOCANCEL` (what `std.c.close` binds there) does not
+    // report it. Retrying could close an unrelated descriptor reused by
+    // another thread.
+    _ = c.close(fd);
 }
+
+/// Entry names of one directory the provider already holds open.
+///
+/// `fdopendir` takes ownership of the descriptor it is given, so the stream
+/// runs on a private `F_DUPFD_CLOEXEC` duplicate: the caller's fd keeps its
+/// own lifetime (and keeps serving `*at` calls) while the stream lives. The
+/// duplicate shares the file offset, so `open` rewinds before the first read.
+/// A returned name borrows the stream's buffer and is valid until the next
+/// `next`/`rewind`/`close`. `.` and `..` are never returned.
+const DirStream = struct {
+    dir: *c.DIR,
+
+    fn open(fd: i32) contract.Error!DirStream {
+        const dup_fd = c.fcntl(fd, c.F.DUPFD_CLOEXEC, @as(c_int, 0));
+        if (c.errno(dup_fd) != .SUCCESS) return error.Io;
+        const dir = c.fdopendir(dup_fd) orelse {
+            const err = c.errno(@as(c_int, -1));
+            closeFd(dup_fd);
+            return switch (err) {
+                .ACCES, .PERM => error.PermissionDenied,
+                .NOTDIR => error.NotDirectory,
+                else => error.Io,
+            };
+        };
+        c.rewinddir(dir);
+        return .{ .dir = dir };
+    }
+
+    fn next(self: *DirStream) contract.Error!?[]const u8 {
+        while (true) {
+            // readdir reports end-of-stream and failure both as null; only a
+            // changed errno tells them apart.
+            c._errno().* = 0;
+            const entry = c.readdir(self.dir) orelse {
+                return switch (c.errno(@as(c_int, -1))) {
+                    .SUCCESS => null,
+                    .ACCES, .PERM => error.PermissionDenied,
+                    else => error.Io,
+                };
+            };
+            const name = std.mem.sliceTo(&entry.name, 0);
+            if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+            return name;
+        }
+    }
+
+    fn rewind(self: *DirStream) void {
+        c.rewinddir(self.dir);
+    }
+
+    fn close(self: *DirStream) void {
+        _ = c.closedir(self.dir);
+        self.* = undefined;
+    }
+};
 
 const t = std.testing;
 
 const Fixture = struct {
     tmp: t.TmpDir,
     path: []u8,
-    local: LinuxFs,
+    local: PosixFs,
     root: contract.Root,
 
     fn init(gpa: std.mem.Allocator) !Fixture {
@@ -1767,7 +1739,7 @@ const Fixture = struct {
         errdefer tmp.cleanup();
         const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
         errdefer gpa.free(path);
-        var local = LinuxFs.init(gpa);
+        var local = PosixFs.init(gpa);
         errdefer local.deinit();
         const root = try local.acquireRoot(path);
         return .{ .tmp = tmp, .path = path, .local = local, .root = root };
@@ -1782,7 +1754,7 @@ const Fixture = struct {
     }
 };
 
-test "linux provider pins a directory parent by fd after external rename" {
+test "posix provider pins a directory parent by fd after external rename" {
     const gpa = t.allocator;
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
@@ -1792,7 +1764,7 @@ test "linux provider pins a directory parent by fd after external rename" {
     const child_path = try std.fs.path.join(gpa, &.{ base, "parent", "child" });
     defer gpa.free(child_path);
 
-    var local = LinuxFs.init(gpa);
+    var local = PosixFs.init(gpa);
     defer local.deinit();
     const child = try local.acquireRoot(child_path);
     try tmp.dir.rename("parent", tmp.dir, "moved", t.io);
@@ -1804,7 +1776,7 @@ test "linux provider pins a directory parent by fd after external rename" {
     try t.expectEqualStrings("child", listing.value.entries[0].name.bytes);
 }
 
-test "linux derives child roots with raw names, revisions, and no-follow authority" {
+test "posix derives child roots with raw names, revisions, and no-follow authority" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -1886,21 +1858,21 @@ fn expectOutcome(tag: std.meta.Tag(contract.Outcome), outcome: contract.Outcome)
     try t.expectEqual(tag, std.meta.activeTag(outcome));
 }
 
-fn externalWrite(local: *LinuxFs, root: contract.Root, name: []const u8, bytes: []const u8) !void {
+fn externalWrite(local: *PosixFs, root: contract.Root, name: []const u8, bytes: []const u8) !void {
     const state = try local.rootState(root);
     const name_z = try checkedNameZ(local.gpa, name);
     defer local.gpa.free(name_z);
-    const fd = try fdResult(linux.openat(state.fd, name_z.ptr, .{
+    const fd = try openAt(state.fd, name_z.ptr, .{
         .ACCMODE = .WRONLY,
         .TRUNC = true,
         .NOFOLLOW = true,
         .CLOEXEC = true,
-    }, 0));
+    }, 0);
     defer closeFd(fd);
     try writeAll(fd, bytes);
 }
 
-fn externalRename(local: *LinuxFs, root: contract.Root, old: []const u8, new: []const u8) !void {
+fn externalRename(local: *PosixFs, root: contract.Root, old: []const u8, new: []const u8) !void {
     const state = try local.rootState(root);
     const old_z = try checkedNameZ(local.gpa, old);
     defer local.gpa.free(old_z);
@@ -1909,63 +1881,50 @@ fn externalRename(local: *LinuxFs, root: contract.Root, old: []const u8, new: []
     try renameNoReplace(state.fd, old_z.ptr, state.fd, new_z.ptr);
 }
 
-fn externalUnlink(local: *LinuxFs, root: contract.Root, name: []const u8) !void {
+fn externalUnlink(local: *PosixFs, root: contract.Root, name: []const u8) !void {
     const state = try local.rootState(root);
     const name_z = try checkedNameZ(local.gpa, name);
     defer local.gpa.free(name_z);
-    try voidResult(linux.unlinkat(state.fd, name_z.ptr, 0));
+    try voidResult(c.unlinkat(state.fd, name_z.ptr, 0));
 }
 
-fn externalCreateEmpty(local: *LinuxFs, root: contract.Root, name: []const u8) !void {
+fn externalCreateEmpty(local: *PosixFs, root: contract.Root, name: []const u8) !void {
     const state = try local.rootState(root);
     const name_z = try checkedNameZ(local.gpa, name);
     defer local.gpa.free(name_z);
-    const fd = try fdResult(linux.openat(state.fd, name_z.ptr, .{
+    const fd = try openAt(state.fd, name_z.ptr, .{
         .ACCMODE = .WRONLY,
         .CREAT = true,
         .EXCL = true,
         .NOFOLLOW = true,
         .CLOEXEC = true,
-    }, 0o600));
+    }, 0o600);
     closeFd(fd);
 }
 
+/// Open descriptors of this process, via `/dev/fd` (Linux: a link to
+/// `/proc/self/fd`; Darwin: fdescfs). The probe's own descriptors count the
+/// same on every call, so before/after comparisons stay exact.
 fn countOpenFds() !usize {
-    const fd = try fdResult(linux.openat(linux.AT.FDCWD, "/proc/self/fd", .{
+    const fd = try openAt(c.AT.FDCWD, "/dev/fd", .{
         .ACCMODE = .RDONLY,
         .DIRECTORY = true,
         .CLOEXEC = true,
-    }, 0));
+    }, 0);
     defer closeFd(fd);
+    var stream = try DirStream.open(fd);
+    defer stream.close();
     var count: usize = 0;
-    var buffer: [4096]u8 align(@alignOf(linux.dirent64)) = undefined;
-    while (true) {
-        const rc = linux.getdents64(fd, &buffer, buffer.len);
-        const bytes_read = switch (linux.errno(rc)) {
-            .SUCCESS => rc,
-            .INTR => continue,
-            else => return error.Io,
-        };
-        if (bytes_read == 0) return count;
-        var offset: usize = 0;
-        while (offset < bytes_read) {
-            const dirent: *align(1) const linux.dirent64 = @ptrCast(&buffer[offset]);
-            if (dirent.reclen == 0 or offset + dirent.reclen > bytes_read) return error.Io;
-            const name_z: [*:0]const u8 = @ptrCast(&buffer[offset + @offsetOf(linux.dirent64, "name")]);
-            const name = std.mem.span(name_z);
-            offset += dirent.reclen;
-            if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-            count += 1;
-        }
-    }
+    while (try stream.next()) |_| count += 1;
+    return count;
 }
 
-test "linux provider rejects a directory leaf that fills the sentinel buffer" {
+test "posix provider rejects a directory leaf that fills the sentinel buffer" {
     const full = [_]u8{'a'} ** 4096;
-    try t.expectError(error.InvalidName, openDirectoryAt(linux.AT.FDCWD, &full));
+    try t.expectError(error.InvalidName, openDirectoryAt(c.AT.FDCWD, &full));
 }
 
-test "linux provider applies planned parents and preserves unusual raw names" {
+test "posix provider applies planned parents and preserves unusual raw names" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2010,7 +1969,7 @@ test "linux provider applies planned parents and preserves unusual raw names" {
     try t.expectEqualStrings("raw payload", read.value.bytes);
 }
 
-test "linux provider recursively copies directories and symlinks without following them" {
+test "posix provider recursively copies directories and symlinks without following them" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2077,7 +2036,7 @@ test "linux provider recursively copies directories and symlinks without followi
     try t.expectEqualStrings("../../outside", link.observation.metadata.link_target.?);
 }
 
-test "linux provider never follows symlinks for chmod or permanent removal" {
+test "posix provider never follows symlinks for chmod or permanent removal" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2130,7 +2089,7 @@ test "linux provider never follows symlinks for chmod or permanent removal" {
     try t.expect(findEntry(after.value, "target") != null);
 }
 
-test "linux provider reports stale after external rename deletion and content change" {
+test "posix provider reports stale after external rename deletion and content change" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2174,7 +2133,7 @@ test "linux provider reports stale after external rename deletion and content ch
     try t.expect(findEntry(after.value, "changed-away") == null);
 }
 
-test "linux provider replaces a file by rename only while it is still the file observed (guarded save)" {
+test "posix provider replaces a file by rename only while it is still the file observed (guarded save)" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2222,7 +2181,7 @@ test "linux provider replaces a file by rename only while it is still the file o
     try t.expectEqualStrings("new bytes", bytes.value.bytes);
 }
 
-test "linux provider refuses destination collisions and hierarchy cycles" {
+test "posix provider refuses destination collisions and hierarchy cycles" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2270,7 +2229,7 @@ test "linux provider refuses destination collisions and hierarchy cycles" {
     try t.expectEqualStrings("original", taken_read.value.bytes);
 }
 
-test "linux provider rejects raw traversal and survives a directory-to-symlink swap" {
+test "posix provider rejects raw traversal and survives a directory-to-symlink swap" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     var outside = try Fixture.init(t.allocator);
@@ -2310,7 +2269,7 @@ test "linux provider rejects raw traversal and survives a directory-to-symlink s
     const root_fd = (try fixture.local.rootState(fixture.root)).fd;
     const target_z = try fixture.local.gpa.dupeZ(u8, outside.path);
     defer fixture.local.gpa.free(target_z);
-    try voidResult(linux.symlinkat(target_z.ptr, root_fd, "safe"));
+    try voidResult(c.symlinkat(target_z.ptr, root_fd, "safe"));
     const through_swapped = [_]contract.Planned{.{
         .id = opId(52),
         .operation = .{ .create_file = .{
@@ -2327,7 +2286,7 @@ test "linux provider rejects raw traversal and survives a directory-to-symlink s
     try t.expect(findEntry(outside_listing.value, "escaped") == null);
 }
 
-test "linux provider keeps quarantine and watch capabilities honest" {
+test "posix provider keeps quarantine and watch capabilities honest" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2363,7 +2322,7 @@ test "linux provider keeps quarantine and watch capabilities honest" {
     try t.expect(findEntry(after.value, "kept") != null);
 }
 
-test "linux provider applies chmod rename and recursive permanent removal" {
+test "posix provider applies chmod rename and recursive permanent removal" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2439,7 +2398,7 @@ test "linux provider applies chmod rename and recursive permanent removal" {
     try t.expect(findEntry(final.value, "tree") == null);
 }
 
-test "linux provider keeps roots explicit and copies regular files across acquired roots" {
+test "posix provider keeps roots explicit and copies regular files across acquired roots" {
     var first_tmp = t.tmpDir(.{});
     defer first_tmp.cleanup();
     var second_tmp = t.tmpDir(.{});
@@ -2448,7 +2407,7 @@ test "linux provider keeps roots explicit and copies regular files across acquir
     defer t.allocator.free(first_path);
     const second_path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}", .{second_tmp.sub_path});
     defer t.allocator.free(second_path);
-    var local = LinuxFs.init(t.allocator);
+    var local = PosixFs.init(t.allocator);
     defer local.deinit();
     const first_root = try local.acquireRoot(first_path);
     const second_root = try local.acquireRoot(second_path);
@@ -2499,7 +2458,7 @@ test "linux provider keeps roots explicit and copies regular files across acquir
     try t.expectEqualStrings("cross-root", read.value.bytes);
 }
 
-test "linux provider lists thousands of entries without retaining per-entry fds" {
+test "posix provider lists thousands of entries without retaining per-entry fds" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const entry_count = 4096;
@@ -2519,7 +2478,7 @@ test "linux provider lists thousands of entries without retaining per-entry fds"
     try t.expectEqual(fds_before, fds_after);
 }
 
-test "linux provider transactionally reconciles churn into bounded reusable slots" {
+test "posix provider transactionally reconciles churn into bounded reusable slots" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2560,7 +2519,7 @@ test "linux provider transactionally reconciles churn into bounded reusable slot
     }
 }
 
-test "linux provider generation-invalidates a same-name replacement on relist" {
+test "posix provider generation-invalidates a same-name replacement on relist" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2572,13 +2531,13 @@ test "linux provider generation-invalidates a same-name replacement on relist" {
 
     try externalUnlink(&fixture.local, fixture.root, "same");
     const state = try fixture.local.rootState(fixture.root);
-    const fd = try fdResult(linux.openat(state.fd, "same", .{
+    const fd = try openAt(state.fd, "same", .{
         .ACCMODE = .WRONLY,
         .CREAT = true,
         .EXCL = true,
         .NOFOLLOW = true,
         .CLOEXEC = true,
-    }, 0o600));
+    }, 0o600);
     try writeAll(fd, "replacement");
     closeFd(fd);
 
@@ -2591,8 +2550,8 @@ test "linux provider generation-invalidates a same-name replacement on relist" {
     try t.expectError(error.Stale, provider.observe(t.allocator, fixture.root, .{ .entry = old_ref }));
 }
 
-test "linux identity requires birth time for exact entry reuse" {
-    const weak: LinuxFs.Identity = .{
+test "posix identity requires birth time for exact entry reuse" {
+    const weak: PosixFs.Identity = .{
         .dev_major = 8,
         .dev_minor = 1,
         .mount_id = 7,
@@ -2604,7 +2563,7 @@ test "linux identity requires birth time for exact entry reuse" {
     try t.expect(weak.locationEql(weak));
     try t.expect(!weak.eql(weak));
 
-    var strong: LinuxFs.Identity = weak;
+    var strong: PosixFs.Identity = weak;
     strong.has_birth_time = true;
     strong.birth_sec = 123;
     strong.birth_nsec = 456;
@@ -2612,10 +2571,10 @@ test "linux identity requires birth time for exact entry reuse" {
     try t.expect(!strong.eql(weak));
 }
 
-test "linux reconciliation leaves registry untouched when publication growth fails" {
+test "posix reconciliation leaves registry untouched when publication growth fails" {
     var failing_state = t.FailingAllocator.init(t.allocator, .{ .resize_fail_index = 0 });
     const gpa = failing_state.allocator();
-    var provider = LinuxFs.init(gpa);
+    var provider = PosixFs.init(gpa);
     defer provider.deinit();
 
     const root: contract.Root = .{ .authority = .here, .slot = 0, .generation = 1 };
@@ -2624,7 +2583,7 @@ test "linux reconciliation leaves registry untouched when publication growth fai
         .slot = 99,
         .generation = 1,
     } };
-    const identity: LinuxFs.Identity = .{
+    const identity: PosixFs.Identity = .{
         .dev_major = 8,
         .dev_minor = 1,
         .mount_id = 7,
@@ -2633,7 +2592,7 @@ test "linux reconciliation leaves registry untouched when publication growth fai
         .birth_sec = 123,
         .birth_nsec = 456,
     };
-    const snapshot: LinuxFs.Snapshot = .{
+    const snapshot: PosixFs.Snapshot = .{
         .identity = identity,
         .kind = .regular,
         .mode = 0o600,
@@ -2664,7 +2623,7 @@ test "linux reconciliation leaves registry untouched when publication growth fai
     // allocation fails. This is the fallible publication boundary.
     failing_state.fail_index = allocations_before + 1;
 
-    const pending = [_]LinuxFs.PendingEntry{.{
+    const pending = [_]PosixFs.PendingEntry{.{
         .name = "new",
         .snapshot = snapshot,
         .link_target = null,
@@ -2678,7 +2637,7 @@ test "linux reconciliation leaves registry untouched when publication growth fai
     try t.expectEqualStrings("unrelated", provider.entries.items[0].value.?.name);
 }
 
-test "linux listing allocation failures never publish partial reconciliation" {
+test "posix listing allocation failures never publish partial reconciliation" {
     const entry_count = 96;
     var name_buffer: [32]u8 = undefined;
     var counted_fixture = try Fixture.init(t.allocator);
@@ -2732,7 +2691,7 @@ test "linux listing allocation failures never publish partial reconciliation" {
     }
 }
 
-test "linux readlink releases its buffer when shrinking realloc fails" {
+test "posix readlink releases its buffer when shrinking realloc fails" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2763,7 +2722,7 @@ test "linux readlink releases its buffer when shrinking realloc fails" {
     try t.expectEqual(failing_state.allocations, failing_state.deallocations);
 }
 
-test "linux file leases survive namespace deletion and replacement" {
+test "posix file leases survive namespace deletion and replacement" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2802,7 +2761,7 @@ test "linux file leases survive namespace deletion and replacement" {
     try expectOutcome(.stale, stale.value.entries[0].outcome);
 }
 
-test "linux symlink leases preserve link text without following" {
+test "posix symlink leases preserve link text without following" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2832,7 +2791,7 @@ test "linux symlink leases preserve link text without following" {
     try t.expectEqualStrings("outside/target", copy.observation.metadata.link_target.?);
 }
 
-test "linux bounded lease read rejects bytes beyond its limit" {
+test "posix bounded lease read rejects bytes beyond its limit" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2856,7 +2815,7 @@ test "linux bounded lease read rejects bytes beyond its limit" {
     ));
 }
 
-test "linux directory leases are explicit unsupported" {
+test "posix directory leases are explicit unsupported" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
@@ -2872,7 +2831,7 @@ test "linux directory leases are explicit unsupported" {
     try t.expectError(error.Unsupported, provider.capture(.{ .root = fixture.root, .ref = tree.observation.node.entry, .revision = tree.observation.revision }));
 }
 
-test "linux provider closes root fds and generation-checks reused root slots" {
+test "posix provider closes root fds and generation-checks reused root slots" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.tmp.cleanup();
     defer t.allocator.free(fixture.path);
@@ -2892,7 +2851,7 @@ test "linux provider closes root fds and generation-checks reused root slots" {
     defer listing.deinit();
     _ = findEntry(listing.value, "pinned") orelse return error.TestExpectedEqual;
     fixture.local.releaseRoot(first);
-    try t.expectEqual(linux.E.BADF, linux.errno(linux.fcntl(first_fd, linux.F.GETFD, 0)));
+    try t.expectEqual(c.E.BADF, c.errno(c.fcntl(first_fd, c.F.GETFD)));
     try t.expectError(error.Stale, fixture.local.observe(t.allocator, first, .root));
 
     const second = try fixture.local.acquireRoot(fixture.path);
@@ -2900,7 +2859,7 @@ test "linux provider closes root fds and generation-checks reused root slots" {
     try t.expect(first.generation != second.generation);
     const second_fd = (try fixture.local.rootState(second)).fd;
     fixture.local.deinit();
-    try t.expectEqual(linux.E.BADF, linux.errno(linux.fcntl(second_fd, linux.F.GETFD, 0)));
+    try t.expectEqual(c.E.BADF, c.errno(c.fcntl(second_fd, c.F.GETFD)));
 }
 
 test {

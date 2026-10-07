@@ -1,8 +1,9 @@
 //! Platform provider placeholder used until a host implementation is selected.
 //!
-//! This preserves the app-facing `Provider` shape on Darwin while returning
+//! This preserves the app-facing `Provider` shape on hosts without a POSIX
+//! provider (anything but Linux and Darwin) while returning
 //! explicit Unsupported results. Replacing this build-selected module with a
-//! Darwin implementation requires no core, plugin, or app call-site changes.
+//! host implementation requires no core, plugin, or app call-site changes.
 
 const std = @import("std");
 const fs = @import("weft_fs");

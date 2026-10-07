@@ -620,14 +620,17 @@ pub fn build(b: *std.Build) void {
         architecture.fs,
     );
     // The app imports one stable platform-provider facade. Provider mechanism
-    // is selected here; portable modules and plugins never import it.
+    // is selected here; portable modules and plugins never import it. The
+    // POSIX provider is libc-based (one implementation for Linux and macOS).
+    const fs_posix_host = target.result.os.tag == .linux or target.result.os.tag.isDarwin();
     const fs_platform = b.createModule(.{
-        .root_source_file = b.path(if (target.result.os.tag == .linux)
-            "src/fs_linux/root.zig"
+        .root_source_file = b.path(if (fs_posix_host)
+            "src/fs_posix/root.zig"
         else
             "src/fs_unavailable/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = fs_posix_host,
     });
     fs_platform.addImport("weft_fs", architecture.fs);
 
@@ -1155,13 +1158,13 @@ pub fn build(b: *std.Build) void {
     contract_step.dependOn(&run_fs_remote_tests.step);
     test_step.dependOn(&run_fs_remote_tests.step);
 
-    const fs_linux_step = b.step("test-fs-linux", "Run the Linux filesystem provider tests");
-    if (target.result.os.tag == .linux) {
-        const fs_linux_tests = b.addTest(.{ .root_module = fs_platform });
-        const run_fs_linux_tests = b.addRunArtifact(fs_linux_tests);
-        fs_linux_step.dependOn(&run_fs_linux_tests.step);
-        contract_step.dependOn(&run_fs_linux_tests.step);
-        test_step.dependOn(&run_fs_linux_tests.step);
+    const fs_posix_step = b.step("test-fs-posix", "Run the POSIX (Linux/macOS) filesystem provider tests");
+    if (fs_posix_host) {
+        const fs_posix_tests = b.addTest(.{ .root_module = fs_platform });
+        const run_fs_posix_tests = b.addRunArtifact(fs_posix_tests);
+        fs_posix_step.dependOn(&run_fs_posix_tests.step);
+        contract_step.dependOn(&run_fs_posix_tests.step);
+        test_step.dependOn(&run_fs_posix_tests.step);
     }
 
     // The `weft` module owns the core/gfx/app files, so its own unit tests run in
