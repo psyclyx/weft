@@ -630,7 +630,7 @@ pub fn build(b: *std.Build) void {
     // The compiled C++ shim rides with the module that DECLARES these externs,
     // so it enters a link exactly once no matter how many modules import it.
     // Attaching it per-consumer instead gives duplicate symbol definitions.
-    addSkia(b, skia_mod, gpu, macos_sdk);
+    addSkia(b, skia_mod, gpu, os);
     const text_mod = b.createModule(.{
         .root_source_file = b.path("src/text/root.zig"),
         .target = target,
@@ -1888,7 +1888,7 @@ fn addHostTestDirs(b: *std.Build, mod: *std.Build.Module) void {
 /// - macOS: Zig's clang against the SDK's libc++ headers, linked to the
 ///   system libc++ — the one nixpkgs' Darwin Skia links. Zig's own bundled
 ///   libc++ would be a second copy with its own allocator and globals.
-fn addSkia(b: *std.Build, mod: *std.Build.Module, gpu: Gpu, macos_sdk: ?[]const u8) void {
+fn addSkia(b: *std.Build, mod: *std.Build.Module, gpu: Gpu, os: std.Target.Os.Tag) void {
     const sources = [_][]const u8{
         "src/skia/shim.cpp",
         switch (gpu) {
@@ -1902,7 +1902,7 @@ fn addSkia(b: *std.Build, mod: *std.Build.Module, gpu: Gpu, macos_sdk: ?[]const 
     // shim from pulling the unwinder (_Unwind_Resume) into the Zig link.
     const common = [_][]const u8{ "-std=c++17", "-O2", "-fno-rtti", "-fno-exceptions" };
 
-    if (macos_sdk != null) {
+    if (os == .macos) {
         // nixpkgs keeps the system libc++ (its headers, and the stub for
         // /usr/lib/libc++.1.dylib) beside the SDK rather than in it.
         const libcxx = b.graph.environ_map.get("WEFT_LIBCXX") orelse

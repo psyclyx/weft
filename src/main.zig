@@ -1,10 +1,10 @@
-//! weft — the assembled editor: a desktop window (Wayland or Cocoa) presenting a
-//! `core.Editor` through the renderer-neutral view and Skia, all behavior
+//! weft — the assembled editor: a desktop window (Wayland or Cocoa) presenting
+//! a `core.Editor` through the renderer-neutral view and Skia, all behavior
 //! routed key → keymap → command ABI (built-ins and config/plugin
 //! commands through the same door). The frame loop's only wait is the
-//! swapchain (FIFO vsync); the input→commit→render path is bracketed by
-//! the hot-section fence; frame + input latency percentiles log
-//! continuously.
+//! scheduler's, owned by the platform; the input→commit→render path is
+//! bracketed by the hot-section fence; frame + input latency percentiles
+//! log continuously.
 //!
 //!   weft [file] [--font path.ttf] [--em N] [--plugin p.wasm]... [--config config.js]
 
