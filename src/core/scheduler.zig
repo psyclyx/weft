@@ -683,3 +683,44 @@ test "scheduler: LOST-WAKEUP REGRESSION — headless shape: a commit + peer-reap
 test {
     std.testing.refAllDecls(@This());
 }
+
+test "scheduler: a waiter owns the sleep — it sees exactly poll's fds and timeout, and what it reports ready is dispatched" {
+    // A platform whose events are not an fd (Cocoa) sleeps in its own loop:
+    // this stand-in records what the scheduler hands it, then reports the
+    // wake fd ready the way `poll` would, without sleeping at all.
+    const Fake = struct {
+        calls: usize = 0,
+        seen_fd: posix.fd_t = -1,
+        seen_events: i16 = 0,
+        seen_timeout: i32 = -2,
+
+        fn wait(ctx: *anyopaque, fds: []posix.pollfd, timeout_ms: i32) usize {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            self.seen_timeout = timeout_ms;
+            if (fds.len != 1) return 0;
+            self.seen_fd = fds[0].fd;
+            self.seen_events = fds[0].events;
+            fds[0].revents = posix.POLL.IN;
+            return 1;
+        }
+    };
+    var fake: Fake = .{};
+    var sched = Scheduler.init(t.allocator, testNow);
+    defer sched.deinit();
+    sched.waiter = .{ .ctx = &fake, .wait = Fake.wait };
+
+    const fd = try newWakeFd();
+    defer closeWakeFd(fd);
+    signalWakeFd(fd);
+    _ = try sched.addFd(fd, .{ .read = true }, null, null, "wake");
+    try t.expect(try sched.step());
+
+    try t.expectEqual(@as(usize, 1), fake.calls);
+    try t.expectEqual(fd, fake.seen_fd);
+    try t.expectEqual(@as(i16, posix.POLL.IN), fake.seen_events);
+    // No timer: the wait may sleep until something is ready.
+    try t.expectEqual(@as(i32, -1), fake.seen_timeout);
+    // The readiness it reported was acted on: the wake fd was drained.
+    try t.expect(!isReadable(fd));
+}

@@ -664,16 +664,12 @@ pub fn build(b: *std.Build) void {
     );
     // The app imports one stable platform-provider facade. Provider mechanism
     // is selected here; portable modules and plugins never import it. The
-    // POSIX provider is libc-based (one implementation for Linux and macOS).
-    const fs_posix_host = os == .linux or os == .macos;
+    // POSIX provider is libc-based: one implementation for Linux and macOS.
     const fs_platform = b.createModule(.{
-        .root_source_file = b.path(if (fs_posix_host)
-            "src/fs_posix/root.zig"
-        else
-            "src/fs_unavailable/root.zig"),
+        .root_source_file = b.path("src/fs_posix/root.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = fs_posix_host,
+        .link_libc = true,
     });
     fs_platform.addImport("weft_fs", architecture.fs);
 
@@ -1255,13 +1251,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_fs_remote_tests.step);
 
     const fs_posix_step = b.step("test-fs-posix", "Run the POSIX (Linux/macOS) filesystem provider tests");
-    if (fs_posix_host) {
-        const fs_posix_tests = b.addTest(.{ .root_module = fs_platform });
-        const run_fs_posix_tests = b.addRunArtifact(fs_posix_tests);
-        fs_posix_step.dependOn(&run_fs_posix_tests.step);
-        contract_step.dependOn(&run_fs_posix_tests.step);
-        test_step.dependOn(&run_fs_posix_tests.step);
-    }
+    const run_fs_posix_tests = b.addRunArtifact(b.addTest(.{ .root_module = fs_platform }));
+    fs_posix_step.dependOn(&run_fs_posix_tests.step);
+    contract_step.dependOn(&run_fs_posix_tests.step);
+    test_step.dependOn(&run_fs_posix_tests.step);
 
     // The `weft` module owns the core/gfx/app files, so its own unit tests run in
     // a second test binary; the `test` step runs both. Every sibling of

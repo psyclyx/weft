@@ -14,6 +14,7 @@
 #import <IOKit/hidsystem/IOLLEvent.h>  // NX_DEVICELALTKEYMASK
 
 #include <string.h>
+#include <sys/stat.h>
 
 #include "window.h"
 
@@ -58,8 +59,13 @@ static uint32_t translateFlags(NSEventModifierFlags flags) {
     if (flags & NSEventModifierFlagCommand) mods |= WEFT_COCOA_MOD_SUPER;
     // Only the LEFT Option key is Meta; the right one keeps typing the
     // characters a layout puts on Option. The device-dependent low bits of
-    // the flags say which side is down.
-    if ((flags & NSEventModifierFlagOption) && (flags & NX_DEVICELALTKEYMASK)) mods |= WEFT_COCOA_MOD_META;
+    // the flags say which side is down — when they are there: an event that
+    // carries neither (synthesized by a remapper or a remote-control tool)
+    // counts as the left.
+    if (flags & NSEventModifierFlagOption) {
+        const BOOL right_only = (flags & NX_DEVICERALTKEYMASK) && !(flags & NX_DEVICELALTKEYMASK);
+        if (!right_only) mods |= WEFT_COCOA_MOD_META;
+    }
     return mods;
 }
 
@@ -92,18 +98,30 @@ static void fdReady(CFFileDescriptorRef fd, CFOptionFlags types, void* info) {
 @interface WeftFdWatch : NSObject
 @property(nonatomic, readonly) int fd;
 - (instancetype)initWithFd:(int)fd;
+// Is `fd` still the file this watch was made for? A closed fd's number is
+// reused, and a CFFileDescriptor made for the old file must not stand in for
+// the new one.
+- (BOOL)watches:(int)fd;
 - (void)arm:(short)events;
 - (void)disarm;
+// Detach from the run loop now, not whenever ARC gets to `dealloc`.
+- (void)invalidate;
 @end
 
 @implementation WeftFdWatch {
     CFFileDescriptorRef _ref;
     CFRunLoopSourceRef _source;
+    dev_t _dev;
+    ino_t _ino;
 }
 
 - (instancetype)initWithFd:(int)fd {
     if (!(self = [super init])) return nil;
     _fd = fd;
+    struct stat st;
+    if (fstat(fd, &st) != 0) return nil;
+    _dev = st.st_dev;
+    _ino = st.st_ino;
     // closeOnInvalidate=false: the fd belongs to whoever registered it.
     _ref = CFFileDescriptorCreate(kCFAllocatorDefault, fd, false, fdReady, NULL);
     if (!_ref) return nil;
@@ -113,7 +131,13 @@ static void fdReady(CFFileDescriptorRef fd, CFOptionFlags types, void* info) {
     return self;
 }
 
+- (BOOL)watches:(int)fd {
+    struct stat st;
+    return fd == _fd && fstat(fd, &st) == 0 && st.st_dev == _dev && st.st_ino == _ino;
+}
+
 - (void)arm:(short)events {
+    if (!_ref) return;
     CFOptionFlags types = 0;
     if (events & POLLIN) types |= kCFFileDescriptorReadCallBack;
     if (events & POLLOUT) types |= kCFFileDescriptorWriteCallBack;
@@ -121,18 +145,25 @@ static void fdReady(CFFileDescriptorRef fd, CFOptionFlags types, void* info) {
 }
 
 - (void)disarm {
+    if (!_ref) return;
     CFFileDescriptorDisableCallBacks(_ref, kCFFileDescriptorReadCallBack | kCFFileDescriptorWriteCallBack);
 }
 
-- (void)dealloc {
+- (void)invalidate {
     if (_source) {
         CFRunLoopRemoveSource(CFRunLoopGetMain(), _source, kCFRunLoopDefaultMode);
         CFRelease(_source);
+        _source = NULL;
     }
     if (_ref) {
         CFFileDescriptorInvalidate(_ref);
         CFRelease(_ref);
+        _ref = NULL;
     }
+}
+
+- (void)dealloc {
+    [self invalidate];
 }
 @end
 
@@ -147,6 +178,7 @@ static void fdReady(CFFileDescriptorRef fd, CFOptionFlags types, void* info) {
 @property(nonatomic, strong) NSMutableArray<WeftFdWatch*>* watches;
 - (instancetype)initWithSink:(const WeftCocoaSink*)sink;
 - (void)reportSize;
+- (void)requestClose;
 @end
 
 // The handle whose window a Quit (⌘Q, the Dock, logout) asks to close.
@@ -244,15 +276,33 @@ static __weak WeftWindowHandle* g_current;
     [self sendKey:event pressed:NO text:@""];
 }
 
+// AppKit offers a Control chord to the view hierarchy as a key equivalent
+// first, and spends some (⌃Tab, ⌃⇧Tab) on keyboard navigation before keyDown:
+// ever sees them. Here they are bindings: take them all while this view has
+// the keyboard. ⌘ chords stay the menu's.
+- (BOOL)performKeyEquivalent:(NSEvent*)event {
+    const NSEventModifierFlags flags = event.modifierFlags;
+    if (event.type == NSEventTypeKeyDown && (flags & NSEventModifierFlagControl) &&
+        !(flags & NSEventModifierFlagCommand) && self.window.firstResponder == self) {
+        [self keyDown:event];
+        return YES;
+    }
+    return [super performKeyEquivalent:event];
+}
+
 // ── NSTextInputClient ──
 
 - (void)insertText:(id)string replacementRange:(NSRange)replacementRange {
     NSString* text = [string isKindOfClass:[NSAttributedString class]] ? [string string] : string;
     [[_marked mutableString] setString:@""];
     if (text.length == 0) return;
-    // `_pending` is nil when an input method commits outside a key press
-    // (a candidate picked with the mouse): text with no key.
-    [self sendKey:_pending pressed:YES text:text];
+    // The key being interpreted typed this text only if it is the key's own
+    // character (a dead key's second press already reads "é"). Otherwise an
+    // input method is committing a composition — on Return, Tab, an arrow,
+    // or a candidate picked with the mouse (`_pending` nil) — and the text is
+    // text with no key: naming it after Return would type a newline instead.
+    NSEvent* key = (_pending && [text isEqualToString:_pending.characters]) ? _pending : nil;
+    [self sendKey:key pressed:YES text:text];
 }
 
 - (void)doCommandBySelector:(SEL)selector {
@@ -314,7 +364,9 @@ static __weak WeftWindowHandle* g_current;
         .mods = translateFlags(event.modifierFlags),
         .x = at.x,
         .y = at.y,
-        .time_ms = (uint32_t)(event.timestamp * 1000.0),
+        // Through 64 bits, so the millisecond clock WRAPS past 2^32 (the
+        // reducer handles that) instead of saturating, which a direct cast does.
+        .time_ms = (uint32_t)(uint64_t)(event.timestamp * 1000.0),
     };
     if (kind == WEFT_COCOA_POINTER_SCROLL) {
         pointer.dx = event.scrollingDeltaX;
@@ -389,17 +441,27 @@ static uint8_t otherButton(NSInteger number) {
     return self;
 }
 
+// AppKit calls the delegate from inside its own run loop — a tiling or display
+// change resizes the window, a Dock Quit arrives as an Apple Event — possibly
+// while `weft_cocoa_wait` sleeps, and queues no event for it. Whatever such a
+// callback tells the sink must also end that sleep.
 - (void)reportSize {
     if (!_sink.resized || !_view) return;
     uint32_t width = 0, height = 0, scale = 1;
     weft_cocoa_size((__bridge WeftCocoa*)self, &width, &height, &scale);
     _sink.resized(_sink.ctx, width, height, scale);
+    postWakeEvent();
+}
+
+- (void)requestClose {
+    if (_sink.close_requested) _sink.close_requested(_sink.ctx);
+    postWakeEvent();
 }
 
 // The window's close button asks; weft decides (it may refuse while work is
 // unsaved), so the window never closes itself.
 - (BOOL)windowShouldClose:(NSWindow*)sender {
-    if (_sink.close_requested) _sink.close_requested(_sink.ctx);
+    [self requestClose];
     return NO;
 }
 
@@ -414,6 +476,8 @@ static uint8_t otherButton(NSInteger number) {
 
 // ── The application ──────────────────────────────────────────────────
 
+static void createMenuBar(void);
+
 @interface WeftAppDelegate : NSObject <NSApplicationDelegate>
 @end
 
@@ -422,9 +486,14 @@ static uint8_t otherButton(NSInteger number) {
 // and exits its own loop if it agrees. AppKit never terminates the process
 // under it.
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)sender {
-    WeftWindowHandle* handle = g_current;
-    if (handle && handle.sink.close_requested) handle.sink.close_requested(handle.sink.ctx);
+    [g_current requestClose];
     return NSTerminateCancel;
+}
+
+// The menu bar is built between `sharedApplication` and launching, as
+// NSApplicationMain would build it from a nib.
+- (void)applicationWillFinishLaunching:(NSNotification*)notification {
+    createMenuBar();
 }
 
 // The launch `initApplication` runs [NSApp run] for ends here: AppKit has
@@ -432,6 +501,12 @@ static uint8_t otherButton(NSInteger number) {
 - (void)applicationDidFinishLaunching:(NSNotification*)notification {
     [NSApp stop:nil];
     postWakeEvent();  // `stop:` takes effect after the next event
+}
+
+// weft restores nothing through AppKit; saying so (securely) keeps macOS 14+
+// from warning at every launch.
+- (BOOL)applicationSupportsSecureRestorableState:(NSApplication*)app {
+    return YES;
 }
 @end
 
@@ -481,13 +556,16 @@ static void initApplication(void) {
     [NSApplication sharedApplication];
     delegate = [[WeftAppDelegate alloc] init];
     NSApp.delegate = delegate;
-    // A plain executable (no bundle) is a background process unless it asks:
-    // a Dock icon, a menu bar, keyboard focus.
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-    createMenuBar();
+    // Holding a letter opens the accent picker instead of repeating it — wrong
+    // for an editor whose keys are commands (hold `l`, hold `x`). Accents stay
+    // a dead key or an input method away.
+    [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"ApplePressAndHoldEnabled" : @NO}];
     // Let AppKit finish launching once, inside its own loop; the delegate
     // stops it as soon as it has.
     if (![[NSRunningApplication currentApplication] isFinishedLaunching]) [NSApp run];
+    // A plain executable (no bundle) is a background process unless it asks:
+    // a Dock icon, a menu bar, keyboard focus.
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 }
 
 // ── C ABI ────────────────────────────────────────────────────────────
@@ -511,6 +589,9 @@ WeftCocoa* weft_cocoa_create(uint32_t width, uint32_t height, const char* title,
         window.restorable = NO;
         window.tabbingMode = NSWindowTabbingModeDisallowed;
         window.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
+        // weft draws sRGB bytes; tag the window so a wide-gamut (P3) display
+        // shows them as sRGB rather than stretching them across its gamut.
+        window.colorSpace = [NSColorSpace sRGBColorSpace];
 
         WeftView* view = [[WeftView alloc] initWithFrame:frame handle:handle];
         window.contentView = view;
@@ -519,11 +600,14 @@ WeftCocoa* weft_cocoa_create(uint32_t width, uint32_t height, const char* title,
         handle.view = view;
 
         [window center];
+        // Take focus from whatever launched us. `activate` (macOS 14) is only a
+        // request the active application — the terminal weft was started from —
+        // need not grant; an editor that opens without the keyboard is broken.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [NSApp activateIgnoringOtherApps:YES];
+#pragma clang diagnostic pop
         [window makeKeyAndOrderFront:nil];
-        if (@available(macOS 14.0, *))
-            [NSApp activate];
-        else
-            [NSApp activateIgnoringOtherApps:YES];
         g_current = handle;
         return (__bridge_retained WeftCocoa*)handle;
     }
@@ -532,7 +616,8 @@ WeftCocoa* weft_cocoa_create(uint32_t width, uint32_t height, const char* title,
 void weft_cocoa_destroy(WeftCocoa* cocoa) {
     @autoreleasepool {
         WeftWindowHandle* handle = (__bridge_transfer WeftWindowHandle*)cocoa;
-        [handle.watches removeAllObjects];
+        for (WeftFdWatch* watch in handle.watches) [watch invalidate];
+        handle.watches = nil;
         handle.window.delegate = nil;
         [handle.window orderOut:nil];
         [handle.window close];
@@ -554,15 +639,28 @@ void weft_cocoa_pump(WeftCocoa* cocoa) {
     }
 }
 
-// Attach exactly `fds` to the run loop: reuse a watch for an fd still in the
-// set, create one for a new fd, drop the rest. The scheduler's set is small
-// (a handful of wake fds) and changes rarely.
+// Attach exactly `fds` to the run loop: keep the watch of an fd still in the
+// set and still the same file, create one for anything else, drop the rest.
+// Dropping comes first: CoreFoundation keys every CFFileDescriptor by fd
+// number in one kqueue, so a stale watch released AFTER a fresh one for the
+// same number was armed would take the fresh one's registration with it. The
+// scheduler's set is small (a handful of wake fds) and changes rarely.
 static void syncWatches(WeftWindowHandle* handle, struct pollfd* fds, size_t nfds) {
+    NSMutableArray<WeftFdWatch*>* kept = [NSMutableArray arrayWithCapacity:nfds];
+    for (WeftFdWatch* watch in handle.watches) {
+        BOOL wanted = NO;
+        for (size_t i = 0; i < nfds && !wanted; i++) wanted = [watch watches:fds[i].fd];
+        if (wanted)
+            [kept addObject:watch];
+        else
+            [watch invalidate];
+    }
+
     NSMutableArray<WeftFdWatch*>* next = [NSMutableArray arrayWithCapacity:nfds];
     for (size_t i = 0; i < nfds; i++) {
         if (fds[i].fd < 0) continue;
         WeftFdWatch* found = nil;
-        for (WeftFdWatch* watch in handle.watches) {
+        for (WeftFdWatch* watch in kept) {
             if (watch.fd == fds[i].fd) {
                 found = watch;
                 break;
@@ -603,23 +701,29 @@ size_t weft_cocoa_wait(WeftCocoa* cocoa, struct pollfd* fds, size_t nfds, int ti
 }
 
 void* weft_cocoa_view(WeftCocoa* cocoa) {
-    WeftWindowHandle* handle = (__bridge WeftWindowHandle*)cocoa;
-    return (__bridge void*)handle.view;
+    @autoreleasepool {
+        WeftWindowHandle* handle = (__bridge WeftWindowHandle*)cocoa;
+        return (__bridge void*)handle.view;
+    }
 }
 
 void weft_cocoa_size(WeftCocoa* cocoa, uint32_t* width, uint32_t* height, uint32_t* scale) {
-    WeftWindowHandle* handle = (__bridge WeftWindowHandle*)cocoa;
-    const NSRect bounds = handle.view.bounds;
-    const NSRect backing = [handle.view convertRectToBacking:bounds];
-    *width = (uint32_t)NSWidth(bounds);
-    *height = (uint32_t)NSHeight(bounds);
-    // Pixels per point. macOS's backing scales are whole (1 or 2).
-    const CGFloat factor = NSWidth(bounds) > 0 ? NSWidth(backing) / NSWidth(bounds) : handle.window.backingScaleFactor;
-    *scale = factor >= 1 ? (uint32_t)(factor + 0.5) : 1;
+    @autoreleasepool {
+        WeftWindowHandle* handle = (__bridge WeftWindowHandle*)cocoa;
+        const NSRect bounds = handle.view.bounds;
+        const NSRect backing = [handle.view convertRectToBacking:bounds];
+        *width = (uint32_t)NSWidth(bounds);
+        *height = (uint32_t)NSHeight(bounds);
+        // Pixels per point. macOS's backing scales are whole (1 or 2).
+        const CGFloat factor = NSWidth(bounds) > 0 ? NSWidth(backing) / NSWidth(bounds) : handle.window.backingScaleFactor;
+        *scale = factor >= 1 ? (uint32_t)(factor + 0.5) : 1;
+    }
 }
 
 long weft_cocoa_pasteboard_change_count(void) {
-    return [NSPasteboard generalPasteboard].changeCount;
+    @autoreleasepool {
+        return [NSPasteboard generalPasteboard].changeCount;
+    }
 }
 
 void weft_cocoa_pasteboard_read(void* ctx, void (*deliver)(void* ctx, const char* text, size_t len)) {

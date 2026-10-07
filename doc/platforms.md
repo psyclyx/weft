@@ -64,13 +64,22 @@ Zig, where the Linux suite runs it:
   type them. Only the system's own shortcuts are claimed by the menu bar
   (⌘Q, ⌘H, ⌥⌘H, ⌘M, ⌃⌘F); every other ⌘ chord reaches the keymap as `s-<key>`.
 - **Quit and close** (⌘Q, the Dock, the window's close button) are requests:
-  weft decides, and may refuse while work is unsaved.
+  weft decides, and may refuse while work is unsaved. A quit asked for by
+  logout is answered the same way — so it cancels the logout, and weft quits
+  on its own terms.
+- **Held keys repeat**: weft turns off macOS's press-and-hold accent picker
+  for itself (`ApplePressAndHoldEnabled`), which would otherwise swallow a
+  held letter; accents remain a dead key or an input method away.
 - **The event loop**: AppKit's events arrive on a Mach port, not an fd, so
   the platform owns the scheduler's sleep (`Scheduler.waiter`): it waits in
   AppKit's event queue with the scheduler's fds attached to the run loop as
   CFFileDescriptors. Either kind of wake ends the same sleep; nothing polls.
 - **Pointer**: trackpad scrolling is pixel-precise, wheels step by line, and
-  both feed the same gesture reducer as Wayland (`pointer.zig`).
+  both feed the same gesture reducer as Wayland (`pointer.zig`). AppKit's
+  Shift+wheel → horizontal conversion is undone, so `S-wheel-down` is one
+  binding on both platforms.
+- **Clipboard**: the pasteboard is read only when something pastes, and only
+  if it changed — never on every copy another application makes.
 - **Fonts**: CoreText resolves a family to a file; for the collections macOS
   keeps many families in (`.ttc`), the face index comes from the file itself
   (`font_provider/ttc.zig`).
@@ -86,6 +95,9 @@ Known limits:
   be found. Run the executable from a shell (`weft`, or
   `weft.app/Contents/MacOS/weft` — `open` goes through launchd too), or let a
   provider publish the shell's environment for the place (`core/env.zig`).
+- Characters beyond Latin-1 are named `U<hex>` (`U20AC` for €), where xkb
+  has older names for some (`EuroSign`); a binding written with xkb's legacy
+  name for such a key does not match on a Mac.
 - Apple Silicon only: the pinned nixpkgs has dropped x86_64-darwin.
 
 `zig build` on macOS also installs `Applications/weft.app`, the install

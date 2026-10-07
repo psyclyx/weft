@@ -12,9 +12,11 @@
 //!   scheduler's fds attached to the run loop.
 //! - AppKit repeats held keys itself (`isARepeat` key-downs), so there is no
 //!   repeat timer: `repeatDueNs` is always null.
-//! - The pasteboard is read synchronously but only when it changed
-//!   (`changeCount`), once per wake in `pumpEvents`; `clipboardText` is the
-//!   last read, so a paste never waits on another process.
+//! - The pasteboard is read only when something pastes (`clipboardText`), and
+//!   then only if it changed since the last read (`changeCount`). Reading it
+//!   on every change would raise macOS's paste-privacy prompt whenever the
+//!   user copied in another application, and pull every copy — a password
+//!   manager's too — into weft unasked.
 //! - Live resize runs inside AppKit's own tracking loop: the window keeps its
 //!   last frame (stretched) until the drag ends, then redraws at the new size.
 
@@ -67,7 +69,6 @@ pub const Window = struct {
         };
         self.cocoa = c.weft_cocoa_create(width, height, title, &sink) orelse return error.CocoaWindowFailed;
         c.weft_cocoa_size(self.cocoa, &self.width, &self.height, &self.scale);
-        self.refreshClipboard();
         return self;
     }
 
@@ -96,10 +97,9 @@ pub const Window = struct {
     }
 
     /// Dispatch every queued AppKit event (into this window's queues, through
-    /// the sink) and pick up a pasteboard another application changed.
+    /// the sink).
     pub fn pumpEvents(self: *Window) void {
         c.weft_cocoa_pump(self.cocoa);
-        self.refreshClipboard();
     }
 
     pub fn shouldClose(self: *const Window) bool {
@@ -146,7 +146,9 @@ pub const Window = struct {
         return keysym.name(buf, sym);
     }
 
-    pub fn clipboardText(self: *const Window) []const u8 {
+    /// The pasteboard's text, read now if another application changed it.
+    pub fn clipboardText(self: *Window) []const u8 {
+        self.refreshClipboard();
         return self.clip.text();
     }
 
@@ -158,7 +160,7 @@ pub const Window = struct {
         self.clip_seen = c.weft_cocoa_pasteboard_change_count();
     }
 
-    /// No fd: the pasteboard is read in `pumpEvents`.
+    /// No fd: the pasteboard is read when something pastes.
     pub fn clipboardFd(_: *const Window) i32 {
         return -1;
     }
@@ -239,8 +241,14 @@ fn onPointer(ctx: ?*anyopaque, ptr: [*c]const c.WeftCocoaPointer) callconv(.c) v
             // A trackpad reports points, which are wl_pointer units already; a
             // wheel reports lines, one per detent.
             const per = if (p.precise != 0) 1 else platform.pointer.wheel_units_per_step;
-            if (p.dy != 0) g.axis(.vertical, -p.dy * per);
-            if (p.dx != 0) g.axis(.horizontal, -p.dx * per);
+            // AppKit turns Shift+wheel into a horizontal scroll; Wayland does not,
+            // and a binding (`S-wheel-down`) must mean the same on both. Undo it
+            // for a wheel; a trackpad's horizontal swipe is horizontal.
+            const shifted_wheel = p.precise == 0 and mods.shift and p.dy == 0;
+            const dy = if (shifted_wheel) p.dx else p.dy;
+            const dx = if (shifted_wheel) 0 else p.dx;
+            if (dy != 0) g.axis(.vertical, -dy * per);
+            if (dx != 0) g.axis(.horizontal, -dx * per);
             g.frame(mods);
             if (p.ended != 0) {
                 g.axisStop(.vertical);

@@ -23,7 +23,8 @@ extern "C" {
 typedef struct WeftCocoa WeftCocoa;
 
 // Modifier bits. META is the LEFT Option key only: the right one stays the
-// macOS typing modifier (see platform/cocoa_keys.zig).
+// macOS typing modifier (see platform/cocoa_keys.zig). An event with no
+// left/right device bits at all (synthesized) counts as the left.
 enum {
     WEFT_COCOA_MOD_SHIFT = 1u << 0,
     WEFT_COCOA_MOD_CTRL = 1u << 1,

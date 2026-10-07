@@ -24,7 +24,12 @@
 
 @implementation WeftGlViewHandle
 - (void)viewFrameChanged:(NSNotification*)notification {
-    // NSOpenGLView's own rule: a moved or resized view needs `update`.
+    // NSOpenGLView's own rule: a moved or resized view needs `update`. Not
+    // during a live resize, though: weft cannot draw until AppKit's tracking
+    // loop ends, and a surface re-fitted with nothing drawn into it shows
+    // garbage, where the old one shows its last frame stretched. The frame
+    // loop updates (`weft_gl_view_update`) once the size settles.
+    if (self.view.inLiveResize) return;
     [self.context update];
 }
 
@@ -94,24 +99,34 @@ WeftGlView* weft_gl_view_create(void* view_ptr, uint32_t* stencil_bits) {
 void weft_gl_view_destroy(WeftGlView* gl) {
     @autoreleasepool {
         WeftGlViewHandle* handle = (__bridge_transfer WeftGlViewHandle*)gl;
-        if ([NSOpenGLContext currentContext] == handle.context) [NSOpenGLContext clearCurrentContext];
+        if (CGLGetCurrentContext() == handle.context.CGLContextObj) [NSOpenGLContext clearCurrentContext];
         [handle.context clearDrawable];
     }
 }
 
+// The per-frame calls run outside any AppKit loop, so each drains its own
+// autorelease pool.
 void weft_gl_view_make_current(WeftGlView* gl) {
-    WeftGlViewHandle* handle = (__bridge WeftGlViewHandle*)gl;
-    if ([NSOpenGLContext currentContext] != handle.context) [handle.context makeCurrentContext];
+    @autoreleasepool {
+        WeftGlViewHandle* handle = (__bridge WeftGlViewHandle*)gl;
+        // Compared at the CGL level: the offscreen context switches through
+        // CGL, which NSOpenGLContext's own notion of "current" does not see.
+        if (CGLGetCurrentContext() != handle.context.CGLContextObj) [handle.context makeCurrentContext];
+    }
 }
 
 void weft_gl_view_update(WeftGlView* gl) {
-    WeftGlViewHandle* handle = (__bridge WeftGlViewHandle*)gl;
-    [handle.context update];
+    @autoreleasepool {
+        WeftGlViewHandle* handle = (__bridge WeftGlViewHandle*)gl;
+        [handle.context update];
+    }
 }
 
 void weft_gl_view_swap(WeftGlView* gl) {
-    WeftGlViewHandle* handle = (__bridge WeftGlViewHandle*)gl;
-    [handle.context flushBuffer];
+    @autoreleasepool {
+        WeftGlViewHandle* handle = (__bridge WeftGlViewHandle*)gl;
+        [handle.context flushBuffer];
+    }
 }
 
 struct WeftGlOffscreen {

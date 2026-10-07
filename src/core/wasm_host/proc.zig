@@ -302,10 +302,11 @@ const placeDirectory = shared.placeDirectory;
 ///     `test -e` anything it likes there. A door that answers one `statx`
 ///     cannot be the line where that becomes reachable.
 ///  3. **It cannot escape the place.** `placeKind` resolves through
-///     `RootedFs` — `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` — so an
-///     absolute `rel`, a `..` component, and a symlink planted inside the
-///     place all fail IN THE KERNEL, atomically. There is no lexical check to
-///     get wrong and no TOCTOU window to race.
+///     `RootedFs` — one `O_NOFOLLOW` `openat` per component from a held root
+///     fd — so an absolute `rel`, a `..` that would leave the root, and a
+///     symlink planted inside the place all fail, each step relative to an fd
+///     already held. There is no lexical check to get wrong and no TOCTOU
+///     window to race.
 ///
 /// So this is a question about the place a dispatch is already in, not
 /// filesystem access, and it is the primitive that let `git` and `project`

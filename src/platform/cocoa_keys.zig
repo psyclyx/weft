@@ -98,7 +98,8 @@ pub fn specialKeysym(keycode: u16) ?u32 {
         vk.Tab => keysym.Tab,
         vk.Delete => keysym.BackSpace,
         vk.Escape => keysym.Escape,
-        vk.Help => keysym.Help,
+        // A PC keyboard's Insert key reports as Help on a Mac; xkb calls it Insert.
+        vk.Help => keysym.Insert,
         vk.Home => keysym.Home,
         vk.PageUp => keysym.Prior,
         vk.ForwardDelete => keysym.Delete,
@@ -293,6 +294,10 @@ test "cocoa keys: non-character keys are named by key code, Shift explicit" {
 
     const page_up = translate(.{ .keycode = vk.PageUp, .pressed = true, .mods = .{}, .text = "", .base = "" }).?;
     try t.expectEqualStrings("Prior", name(page_up));
+
+    // A PC keyboard's Insert reports as Help; it is Insert, as xkb names it.
+    const insert = translate(.{ .keycode = vk.Help, .pressed = true, .mods = .{}, .text = "", .base = "\u{F746}" }).?;
+    try t.expectEqualStrings("Insert", name(insert));
 
     const kp_7 = translate(.{ .keycode = vk.Keypad7, .pressed = true, .mods = .{}, .text = "7", .base = "7" }).?;
     try t.expectEqualStrings("KP_7", name(kp_7));
