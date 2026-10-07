@@ -441,9 +441,9 @@ pub const Editor = struct {
     /// measured, it does not soften it. Off-thread work is deliberately
     /// excluded, exactly as it already was.
     fn threadCpuNs() u64 {
-        var ts: std.os.linux.timespec = undefined;
-        const rc = std.os.linux.clock_gettime(.THREAD_CPUTIME_ID, &ts);
-        if (std.os.linux.errno(rc) != .SUCCESS) return core.task.nowNs();
+        var ts: std.c.timespec = undefined;
+        const rc = std.c.clock_gettime(.THREAD_CPUTIME_ID, &ts);
+        if (std.c.errno(rc) != .SUCCESS) return core.task.nowNs();
         return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
     }
 
@@ -1239,27 +1239,25 @@ pub const TestHead = struct {
 // Identities are generated in memory for this participant only; no user key
 // store is loaded or modified.
 
-const linux = std.os.linux;
+const libc = std.c;
 
-pub fn socketPair() ![2]i32 {
-    var fds: [2]i32 = undefined;
-    const rc = linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds);
-    if (linux.errno(rc) != .SUCCESS) return error.SocketPair;
-    return fds;
-}
+pub const socketPair = session.unixSocketPair;
 
 /// Sleep for roughly `us` microseconds of wall-clock — enough to let each
-/// session's reader/writer threads make progress. A raw nanosleep, like
+/// session's reader/writer threads make progress. libc's nanosleep, like
 /// watch.zig's `napMs`: `std.Thread.sleep` left std in 0.16, and a yield-spin
 /// would hold a core the readers need (every caller waits hundreds of
 /// microseconds or more, so nanosleep's granularity is ample).
 pub fn napUs(us: u64) void {
     const ns = us * std.time.ns_per_us;
-    var req: linux.timespec = .{
+    var req: libc.timespec = .{
         .sec = @intCast(ns / std.time.ns_per_s),
         .nsec = @intCast(ns % std.time.ns_per_s),
     };
-    while (linux.errno(linux.nanosleep(&req, &req)) == .INTR) {}
+    while (true) {
+        const rc = libc.nanosleep(&req, &req);
+        if (rc == 0 or libc.errno(rc) != .INTR) return;
+    }
 }
 
 /// A two-peer, in-process collab pair binding two editors' active documents.
@@ -1311,17 +1309,17 @@ pub const Loopback = struct {
         // connection, and Session owns the blocking connected fds thereafter.
         self.listener = try session.tcpListener(0);
         errdefer {
-            _ = linux.close(self.listener);
+            _ = libc.close(self.listener);
             self.listener = -1;
         }
         const port = try session.tcpListenerPort(self.listener);
         const hostport = try std.fmt.allocPrint(gpa, "127.0.0.1:{d}", .{port});
         defer gpa.free(hostport);
         const peer_fd = try session.tcpConnect(hostport);
-        errdefer _ = linux.close(peer_fd);
+        errdefer _ = libc.close(peer_fd);
         const host_fd = try session.tcpAccept(self.listener);
-        errdefer _ = linux.close(host_fd);
-        _ = linux.close(self.listener);
+        errdefer _ = libc.close(host_fd);
+        _ = libc.close(self.listener);
         self.listener = -1;
         self.host_fd = .{ .fd = host_fd };
         self.peer_fd = .{ .fd = peer_fd };
@@ -1392,7 +1390,7 @@ pub const Loopback = struct {
 
     pub fn deinit(self: *Loopback) void {
         if (self.listener >= 0) {
-            _ = linux.close(self.listener);
+            _ = libc.close(self.listener);
             self.listener = -1;
         }
         self.host_ed.frame_collab_session = null;
@@ -1735,13 +1733,12 @@ fn putUvarint(out: *std.ArrayList(u8), gpa: Allocator, value: usize) !void {
 }
 
 // This Zig's std dropped ambient process-cwd mutation (part of the `std.Io`
-// migration — see the gap note below), so the project harness reaches the raw
-// Linux syscalls directly, exactly as session.zig reaches `linux.socket*`.
+// migration — see the gap note below), so the project harness reaches libc's
+// getcwd/chdir directly, exactly as session.zig reaches libc's sockets.
 pub fn getCwdAlloc(gpa: Allocator) ![]u8 {
     var buf: [4096]u8 = undefined;
-    const rc = linux.getcwd(&buf, buf.len);
-    if (@as(isize, @bitCast(rc)) < 0) return error.GetCwd;
-    return gpa.dupe(u8, std.mem.sliceTo(buf[0..rc], 0));
+    const cwd = libc.getcwd(&buf, buf.len) orelse return error.GetCwd;
+    return gpa.dupe(u8, std.mem.sliceTo(cwd, 0));
 }
 
 pub fn chdirTo(path: []const u8) !void {
@@ -1749,8 +1746,7 @@ pub fn chdirTo(path: []const u8) !void {
     if (path.len >= buf.len) return error.NameTooLong;
     @memcpy(buf[0..path.len], path);
     buf[path.len] = 0;
-    const rc = linux.chdir(@as([*:0]const u8, @ptrCast(&buf)));
-    if (@as(isize, @bitCast(rc)) < 0) return error.Chdir;
+    if (libc.chdir(buf[0..path.len :0].ptr) != 0) return error.Chdir;
 }
 
 // libc mkdtemp: create a unique 0700 directory from a `…XXXXXX` template (mutated
