@@ -7,11 +7,11 @@
 //! the reader hits EOF, then JOINS it before freeing — never a use-after-free.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const command = @import("command.zig");
 const Buffers = @import("Buffers.zig");
 const task = @import("task.zig");
+const child_status = @import("child_status.zig");
 
 /// The terminal-control filter's state between chunks: where it is, and how
 /// long the escape sequence in progress has run.
@@ -336,7 +336,6 @@ pub const Session = struct {
     /// at (`WNOWAIT`): `deinit` still reaps it, without blocking.
     pub fn exitCode(s: *Session) ?u8 {
         if (s.exit_code) |c| return c;
-        if (builtin.os.tag != .linux) return null;
         if (!s.reader.residentExited()) return null;
         {
             s.out_mutex.lock();
@@ -344,16 +343,7 @@ pub const Session = struct {
             if (s.pending.bytes.items.len > 0) return null;
         }
         const pid = s.child.id orelse return null;
-        const linux = std.os.linux;
-        var info = std.mem.zeroes(linux.siginfo_t);
-        const rc = linux.waitid(.PID, pid, &info, linux.W.EXITED | linux.W.NOHANG | linux.W.NOWAIT, null);
-        if (linux.errno(rc) != .SUCCESS or info.fields.common.first.piduid.pid == 0) return null;
-        const status: u8 = @truncate(@as(u32, @bitCast(info.fields.common.second.sigchld.status)));
-        s.exit_code = switch (@as(linux.CLD, @enumFromInt(info.code))) {
-            .EXITED => status,
-            .KILLED, .DUMPED => 128 +| status,
-            else => return null,
-        };
+        s.exit_code = child_status.peek(pid, .poll) orelse return null;
         return s.exit_code;
     }
 
