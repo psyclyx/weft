@@ -292,8 +292,7 @@ pub const PosixFs = struct {
         var pending: std.ArrayList(PendingEntry) = .empty;
 
         {
-            var stream = try DirStream.open(resolved.fd);
-            defer stream.close();
+            var stream = DirStream.open(resolved.fd);
             while (try stream.next()) |raw_name| {
                 const name = contract.Name.init(raw_name) catch return error.InvalidName;
                 // Always stat: d_type is only a hint and DT_UNKNOWN is valid.
@@ -904,8 +903,7 @@ pub const PosixFs = struct {
                 }, 0) catch return error.Partial;
                 defer closeFd(destination_fd);
                 {
-                    var stream = DirStream.open(source_fd) catch return error.Partial;
-                    defer stream.close();
+                    var stream = DirStream.open(source_fd);
                     while (stream.next() catch return error.Partial) |child| {
                         const child_snapshot = statAt(self.gpa, source_fd, child) catch return error.Partial;
                         self.copyAt(source_fd, child, child_snapshot, destination_fd, child) catch return error.Partial;
@@ -951,8 +949,7 @@ pub const PosixFs = struct {
 
         var changed = false;
         {
-            var stream = try DirStream.open(directory_fd);
-            defer stream.close();
+            var stream = DirStream.open(directory_fd);
             while (stream.next() catch return if (changed) error.Partial else error.Io) |child| {
                 const child_snapshot = statAt(self.gpa, directory_fd, child) catch return if (changed) error.Partial else error.Io;
                 self.removeAt(directory_fd, child, child_snapshot) catch return error.Partial;
@@ -1671,58 +1668,33 @@ fn closeFd(fd: i32) void {
     _ = c.close(fd);
 }
 
-/// Entry names of one directory the provider already holds open.
-///
-/// `fdopendir` takes ownership of the descriptor it is given, so the stream
-/// runs on a private `F_DUPFD_CLOEXEC` duplicate: the caller's fd keeps its
-/// own lifetime (and keeps serving `*at` calls) while the stream lives. The
-/// duplicate shares the file offset, so `open` rewinds before the first read.
-/// A returned name borrows the stream's buffer and is valid until the next
-/// `next`/`rewind`/`close`. `.` and `..` are never returned.
+/// Entry names of one directory the provider already holds open, read
+/// through `std.Io.Dir.Iterator` on that same descriptor (getdents64 on
+/// Linux, getdirentries64 on Darwin — std owns the per-OS record layout, so
+/// no `DIR*` ownership dance and no `$INODE64` symbol aliasing here). The
+/// iterator only seeks and reads the fd; it never closes it. A returned name
+/// is valid until the next `next`/`rewind`. `.` and `..` are never returned.
 const DirStream = struct {
-    dir: *c.DIR,
+    /// Blocking, allocation-free `Io` — directory reads are plain syscalls.
+    threaded: std.Io.Threaded = .init_single_threaded,
+    iterator: std.Io.Dir.Iterator,
 
-    fn open(fd: i32) contract.Error!DirStream {
-        const dup_fd = c.fcntl(fd, c.F.DUPFD_CLOEXEC, @as(c_int, 0));
-        if (c.errno(dup_fd) != .SUCCESS) return error.Io;
-        const dir = c.fdopendir(dup_fd) orelse {
-            const err = c.errno(@as(c_int, -1));
-            closeFd(dup_fd);
-            return switch (err) {
-                .ACCES, .PERM => error.PermissionDenied,
-                .NOTDIR => error.NotDirectory,
-                else => error.Io,
-            };
-        };
-        c.rewinddir(dir);
-        return .{ .dir = dir };
+    fn open(fd: i32) DirStream {
+        const dir: std.Io.Dir = .{ .handle = fd };
+        return .{ .iterator = dir.iterate() };
     }
 
     fn next(self: *DirStream) contract.Error!?[]const u8 {
-        while (true) {
-            // readdir reports end-of-stream and failure both as null; only a
-            // changed errno tells them apart.
-            c._errno().* = 0;
-            const entry = c.readdir(self.dir) orelse {
-                return switch (c.errno(@as(c_int, -1))) {
-                    .SUCCESS => null,
-                    .ACCES, .PERM => error.PermissionDenied,
-                    else => error.Io,
-                };
-            };
-            const name = std.mem.sliceTo(&entry.name, 0);
-            if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-            return name;
-        }
+        const entry = self.iterator.next(self.threaded.io()) catch |err| return switch (err) {
+            error.AccessDenied, error.PermissionDenied => error.PermissionDenied,
+            else => error.Io,
+        };
+        return if (entry) |found| found.name else null;
     }
 
+    /// Start over from the first entry (the next read seeks to 0).
     fn rewind(self: *DirStream) void {
-        c.rewinddir(self.dir);
-    }
-
-    fn close(self: *DirStream) void {
-        _ = c.closedir(self.dir);
-        self.* = undefined;
+        self.iterator.reader.reset();
     }
 };
 
@@ -1903,7 +1875,7 @@ fn externalCreateEmpty(local: *PosixFs, root: contract.Root, name: []const u8) !
 }
 
 /// Open descriptors of this process, via `/dev/fd` (Linux: a link to
-/// `/proc/self/fd`; Darwin: fdescfs). The probe's own descriptors count the
+/// `/proc/self/fd`; Darwin: fdescfs). The probe's own descriptor counts the
 /// same on every call, so before/after comparisons stay exact.
 fn countOpenFds() !usize {
     const fd = try openAt(c.AT.FDCWD, "/dev/fd", .{
@@ -1912,8 +1884,7 @@ fn countOpenFds() !usize {
         .CLOEXEC = true,
     }, 0);
     defer closeFd(fd);
-    var stream = try DirStream.open(fd);
-    defer stream.close();
+    var stream = DirStream.open(fd);
     var count: usize = 0;
     while (try stream.next()) |_| count += 1;
     return count;
