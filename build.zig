@@ -1438,6 +1438,25 @@ pub fn build(b: *std.Build) void {
     // `latency_step` also depends on `run_tests`, a cycle.
     run_latency.step.dependOn(&run_tests.step);
     test_step.dependOn(latency_step);
+
+    // Built for another OS (the macOS cross check from Linux), the suite cannot
+    // run here: `zig build test` then compiles and links every test binary
+    // for that OS and skips the runs, instead of failing on the first one.
+    if (os != b.graph.host.result.os.tag) skipForeignRuns(b, test_step);
+}
+
+/// Mark every test run under `step` as skippable when its binary cannot
+/// execute on this host — the whole graph, since test runs hang off
+/// instrument and gate steps as well as `test` itself.
+fn skipForeignRuns(b: *std.Build, step: *std.Build.Step) void {
+    var seen: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty;
+    var pending: std.ArrayList(*std.Build.Step) = .empty;
+    pending.append(b.allocator, step) catch @panic("OOM");
+    while (pending.pop()) |s| {
+        if ((seen.getOrPut(b.allocator, s) catch @panic("OOM")).found_existing) continue;
+        if (s.cast(std.Build.Step.Run)) |run| run.skip_foreign_checks = true;
+        pending.appendSlice(b.allocator, s.dependencies.items) catch @panic("OOM");
+    }
 }
 
 /// Order `last` after every OTHER direct dependency of `step`, so it has the

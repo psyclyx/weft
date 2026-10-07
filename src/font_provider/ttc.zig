@@ -118,13 +118,13 @@ fn u32be(v: u32) [4]u8 {
 }
 
 test "ttc: a collection's faces are found by PostScript name" {
-    const ttc = testCollection(&.{ "Menlo-Regular", "Menlo-Bold", "Menlo-Italic" }, false);
+    const ttc = comptime testCollection(&.{ "Menlo-Regular", "Menlo-Bold", "Menlo-Italic" }, false);
     try std.testing.expectEqual(@as(?u32, 0), faceIndex(ttc, "Menlo-Regular"));
     try std.testing.expectEqual(@as(?u32, 1), faceIndex(ttc, "Menlo-Bold"));
     try std.testing.expectEqual(@as(?u32, 2), faceIndex(ttc, "Menlo-Italic"));
     try std.testing.expectEqual(@as(?u32, null), faceIndex(ttc, "Menlo-BoldItalic"));
 
-    const mac = testCollection(&.{ "Avenir-Book", "Avenir-Heavy" }, true);
+    const mac = comptime testCollection(&.{ "Avenir-Book", "Avenir-Heavy" }, true);
     try std.testing.expectEqual(@as(?u32, 1), faceIndex(mac, "Avenir-Heavy"));
 }
 

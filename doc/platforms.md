@@ -75,10 +75,18 @@ Zig, where the Linux suite runs it:
   keeps many families in (`.ttc`), the face index comes from the file itself
   (`font_provider/ttc.zig`).
 
-Known limits: during a live window resize AppKit runs its own tracking loop,
-so the window shows its last frame stretched until the drag ends. Input
-methods compose, but their candidate window sits at the window's corner
-(weft does not report a caret position to AppKit yet).
+Known limits:
+
+- During a live window resize AppKit runs its own tracking loop, so the window
+  shows its last frame stretched until the drag ends.
+- Input methods compose, but their candidate window sits at the window's
+  corner: weft does not report a caret position to AppKit yet.
+- Launched from Finder or the Dock, weft.app inherits launchd's minimal `PATH`,
+  not your shell's, so tools a plugin runs (git, rg, a language server) may not
+  be found. Run the executable from a shell (`weft`, or
+  `weft.app/Contents/MacOS/weft` — `open` goes through launchd too), or let a
+  provider publish the shell's environment for the place (`core/env.zig`).
+- Apple Silicon only: the pinned nixpkgs has dropped x86_64-darwin.
 
 `zig build` on macOS also installs `Applications/weft.app`, the install
 prefix's layout under `Contents/`, so the bundled executable finds its
@@ -101,7 +109,7 @@ checks the Objective-C against AppKit's headers, and links every symbol:
 
 ```sh
 nix-shell nix/macos-cross.nix --run 'zig build -Dtarget=aarch64-macos'
-nix-shell nix/macos-cross.nix --run 'zig build -Dtarget=aarch64-macos test --skip-foreign-checks'
+nix-shell nix/macos-cross.nix --run 'zig build -Dtarget=aarch64-macos test'  # links every test, runs none
 ```
 
 ## Keeping Linux out of the Mac

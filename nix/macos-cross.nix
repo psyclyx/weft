@@ -5,17 +5,16 @@
 # proves the macOS port compiles, links, and resolves every symbol.
 #
 #   nix-shell nix/macos-cross.nix --run 'zig build -Dtarget=aarch64-macos'
-#   nix-shell nix/macos-cross.nix --run 'zig build -Dtarget=aarch64-macos test --skip-foreign-checks'
+#   nix-shell nix/macos-cross.nix --run 'zig build -Dtarget=aarch64-macos test'  # links every test, runs none
 #
-# `darwinSystem` picks the architecture (x86_64-darwin for Intel Macs); pass
-# the matching `-Dtarget`.
+# Apple Silicon only: the pinned nixpkgs has dropped x86_64-darwin, so there
+# are no Intel Darwin libraries to link against.
 {
   sources ? import ../npins,
   pkgs ? import sources.nixpkgs { },
-  darwinSystem ? "aarch64-darwin",
 }:
 let
-  darwin = import sources.nixpkgs { system = darwinSystem; };
+  darwin = import sources.nixpkgs { system = "aarch64-darwin"; };
   native = import ../shell.nix { inherit pkgs; };
   # Every library the build links, as Darwin binaries: only their pkg-config
   # files and store paths are used here, so substitution is all it takes.
