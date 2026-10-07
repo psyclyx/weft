@@ -53,7 +53,7 @@ pub const Ephemeral = struct {
 /// getrandom(2) (blocks only until the pool is first seeded at boot), and
 /// elsewhere libc's `arc4random_buf` — on Darwin the kernel-seeded CSPRNG,
 /// which cannot fail.
-fn osRandom(buf: []u8) void {
+pub fn osRandom(buf: []u8) void {
     if (builtin.os.tag == .linux) {
         var got: usize = 0;
         while (got < buf.len) {

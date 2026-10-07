@@ -28,9 +28,8 @@ pub const Kind = enum(i32) { none = 0, file = 1, dir = 2, other = 3 };
 /// Anything else asking "where am I" is the ambient-cwd bug `doc/place.md`
 /// exists to remove; ask for a place instead.
 pub fn processDirectory(buf: []u8) ?[]const u8 {
-    const rc = std.os.linux.getcwd(buf.ptr, buf.len);
-    if (@as(isize, @bitCast(rc)) < 0) return null;
-    return std.mem.sliceTo(buf[0..rc], 0);
+    _ = std.c.getcwd(buf.ptr, buf.len) orelse return null;
+    return std.mem.sliceTo(buf, 0);
 }
 
 /// What a path is, beyond its `Kind` — the facts a lister or an annotator
@@ -125,7 +124,7 @@ pub fn writeBytesMakingDirs(gpa: Allocator, dir: []const u8, path: []const u8, b
     const io = threaded.io();
     const cwd = std.Io.Dir.cwd();
     cwd.createDirPath(io, dir) catch {};
-    const tmp = try std.fmt.allocPrint(gpa, "{s}.{d}.weft-tmp", .{ path, std.os.linux.getpid() });
+    const tmp = try std.fmt.allocPrint(gpa, "{s}.{d}.weft-tmp", .{ path, std.c.getpid() });
     defer gpa.free(tmp);
     errdefer cwd.deleteFile(io, tmp) catch {};
     try cwd.writeFile(io, .{ .sub_path = tmp, .data = bytes });

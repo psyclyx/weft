@@ -46,8 +46,8 @@
 //! `../../../.cache/weft/modules` nor a symlink pointed at it walks in.
 //!
 //! **The residue, stated plainly.** This is a check-then-use, unlike the
-//! `.fs_root` confinement next door, which hands the kernel a dir-fd and lets
-//! `openat2(RESOLVE_BENEATH)` decide atomically. A denial has no root to hand
+//! `.fs_root` confinement next door, which holds a dir-fd and walks beneath it
+//! one no-follow `openat` at a time (`rooted_fs`). A denial has no root to hand
 //! over, so there is no fd for the subsequent open to inherit, and a
 //! sufficiently determined plugin could in principle swap a symlink between
 //! the check and the read. That race is not the cheap way in: a plugin able

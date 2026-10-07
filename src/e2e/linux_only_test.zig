@@ -30,20 +30,9 @@ const std = @import("std");
 const t = std.testing;
 const demolition_options = @import("demolition_options");
 
-/// Offenders known and owned elsewhere, by repo-relative path.
-const awaiting = [_]struct { path: []const u8, owner: []const u8 }{
-    .{ .path = "src/core/Document.zig", .owner = "macOS port, filesystem lane" },
-    .{ .path = "src/core/file.zig", .owner = "macOS port, filesystem lane" },
-    .{ .path = "src/core/identity.zig", .owner = "macOS port, filesystem lane" },
-    .{ .path = "src/core/known_peers.zig", .owner = "macOS port, filesystem lane" },
-    .{ .path = "src/core/kv_file.zig", .owner = "macOS port, filesystem lane" },
-    .{ .path = "src/core/peer_fs.zig", .owner = "macOS port, filesystem lane" },
-    .{ .path = "src/core/rooted_fs.zig", .owner = "macOS port, filesystem lane" },
-    .{ .path = "src/core/session/remote_fs.zig", .owner = "macOS port, filesystem lane" },
-    .{ .path = "src/core/wasm_host/fs.zig", .owner = "macOS port, filesystem lane" },
-    .{ .path = "src/core/watch.zig", .owner = "macOS port, filesystem lane" },
-    .{ .path = "src/fs_linux/provider.zig", .owner = "macOS port, filesystem lane" },
-};
+/// Offenders known and owned elsewhere, by repo-relative path. Empty: every
+/// host file is portable or guarded; a new entry is a regression to justify.
+const awaiting = [_]struct { path: []const u8, owner: []const u8 }{};
 
 /// Directories under `src/` holding wasm guests, not host code.
 const guest_dirs = [_][]const u8{ "plugins/", "plugin_fixtures/", "plugin_lib/" };

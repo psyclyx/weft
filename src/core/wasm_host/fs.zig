@@ -69,15 +69,17 @@
 //!      ever falsely DENIES, never falsely allows. A miss here is
 //!      `error.OutOfLimit`, trapped by `wasm_host/plugin.zig`'s
 //!      `trapOutOfLimit` with BOTH the path and the root named.
-//!   2. **`RootedFs` — the KERNEL gate**, `openat2(RESOLVE_BENEATH |
-//!      RESOLVE_NO_SYMLINKS)` (the same primitive `fsList`'s `"here"`
-//!      authority already used, pre-W4), applied to the root-relative
-//!      remainder `rootRelative` computed. This is where a `.."`-laden
-//!      remainder that STAYS inside `root` (legitimate) is allowed and one
-//!      that escapes it (a confused `rootRelative` pass, or plain malice)
-//!      is rejected atomically, in the kernel — no TOCTOU window. **The
-//!      symlink policy, stated plainly**: `RESOLVE_NO_SYMLINKS` refuses ANY
-//!      symlink anywhere in the resolution chain outright — stricter than
+//!   2. **`RootedFs` — the KERNEL gate**, a component-by-component
+//!      `openat(O_NOFOLLOW)` walk from a held root fd (the same semantics
+//!      `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` gave `fsList`'s
+//!      `"here"` authority pre-W4, now portable to macOS), applied to the
+//!      root-relative remainder `rootRelative` computed. This is where a
+//!      `.."`-laden remainder that STAYS inside `root` (legitimate) is
+//!      allowed and one that escapes it (a confused `rootRelative` pass, or
+//!      plain malice) is rejected — every step is the kernel resolving ONE
+//!      name relative to a descriptor already held, so there is no TOCTOU
+//!      window. **The symlink policy, stated plainly**: `O_NOFOLLOW` at
+//!      every step refuses ANY symlink anywhere in the chain outright — stricter than
 //!      "resolve symlinks then verify they land in-root," which still has
 //!      to trust userspace to get that verification right. v1 applies this
 //!      to BOTH reads and writes uniformly (exceeding the "at minimum for
@@ -92,9 +94,9 @@
 //! construction — confined it not at all, which is precisely what the
 //! `.git` climb in `guest/git.zig` and `guest/project.zig` ran on before
 //! `wl_place_has` retired both climbs and both grants). It now
-//! stats the ALREADY-OPEN confined descriptor (`RootedFs.kind`: `O_PATH`
-//! under the same `openat2`, then `statx(AT_EMPTY_PATH)`) instead of the
-//! raw path, so "does this exist, and what is it" is answerable for
+//! stats the leaf relative to the ALREADY-OPEN confined parent descriptor
+//! (`RootedFs.kind`: the same walk, then a no-follow `fstatat`) instead of
+//! the raw path, so "does this exist, and what is it" is answerable for
 //! exactly the set of paths `fsRead` would hand over bytes for — one
 //! confinement, five doors, no door that merely describes what the others
 //! refuse.
@@ -280,7 +282,7 @@ fn rootRelative(root_in: []const u8, path: []const u8) ?[]const u8 {
 ///
 /// With no kernel layer, a `.place` confinement here is the lexical rule
 /// ALONE. That is why `Within.relative` refuses a `..` component outright
-/// rather than deferring it to `openat2` the way `.fs_root` does: a place must
+/// rather than deferring it to `RootedFs` the way `.fs_root` does: a place must
 /// mean the same thing at both doors, and the door without a descriptor is the
 /// one that sets the bar.
 pub fn pathAllowed(id: anytype, comptime perm: shared.Perm, path: []const u8) PermError!void {
@@ -790,7 +792,7 @@ const TestPrincipal = struct {
 /// `link_path` → `target`, best effort. Returns false if the platform
 /// refused (nothing in these tests depends on symlinks being creatable).
 fn makeSymlink(target: [*:0]const u8, link_path: [*:0]const u8) bool {
-    return std.os.linux.errno(std.os.linux.symlinkat(target, std.os.linux.AT.FDCWD, link_path)) == .SUCCESS;
+    return std.c.errno(std.c.symlinkat(target, std.c.AT.FDCWD, link_path)) == .SUCCESS;
 }
 
 test "fsExists: a symlink planted INSIDE the root cannot report on a target outside it" {
@@ -926,7 +928,7 @@ test "fsExists: a `root = \".\"` grant confines it — the whole-cwd case is a k
     id.grant_handles[shared.perm_fs_read] =
         try table.grant(.{ .capability = "fs_read", .limit = .{ .fs_root = "." } }, "cwd-only", null);
 
-    // Absolute: rejected in the kernel (RESOLVE_BENEATH → EXDEV), where it
+    // Absolute: rejected by `RootedFs` (an absolute path is Confined), where it
     // used to be answered `.dir`.
     try t.expectError(error.OutOfLimit, fsExists(gpa, &id, "/etc"));
     // Traversal out of cwd: same refusal.

@@ -248,7 +248,7 @@ The refusal is a third error (`error.Machinery` → `trapMachinery`), never a
 mundane miss, so `fs.exists` cannot be used to probe for machinery it may not
 read.
 
-Two honest edges. It is a check-then-use, not the atomic `openat2` the
+Two honest edges. It is a check-then-use, not the held-fd `openat` walk the
 `.fs_root` confinement gets — a denial has no root to hand the kernel — so a
 plugin that can swap a symlink mid-call could in principle race it; such a
 plugin holds `proc`, which reads the cache without consulting this at all.
@@ -396,9 +396,10 @@ Two further primitives close the honest gaps:
   list when a file is opened and hands every entry the answer. What was left
   was a question about ONE name inside a place you are already in, and that is
   what the door is. `wasm_host/proc.zig`'s `placeKind` resolves it through
-  `RootedFs` — `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`, exactly as
-  `fsExists` was fixed to — so an absolute `rel`, a `..`, and a symlink planted
-  inside the place all fail in the kernel, atomically, with no lexical check to
+  `RootedFs` — a no-follow `openat` walk from the held place fd (formerly
+  `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`), exactly as `fsExists` was
+  fixed to — so an absolute `rel`, a `..` out, and a symlink planted inside the
+  place all fail, each step relative to a held fd, with no lexical check to
   get wrong. The §4.1 machinery carve-out applies unconditionally, because an
   ungated door is precisely the one a capability-less plugin would use to
   confirm the module cache is there.
@@ -567,8 +568,8 @@ are each structural rather than argued: it reveals strictly less than
 `wl_place_root` beside it (which hands out the whole directory); strictly less
 than `proc` (whose holder runs children at that place and can `test -e` freely);
 and it cannot escape the place, because it resolves through `RootedFs` —
-`openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` — so an absolute `rel`, a `..`,
-and a symlink planted inside the place all fail in the kernel. Every refusal
+a no-follow `openat` walk from the held place fd — so an absolute `rel`, a `..`
+out, and a symlink planted inside the place all fail. Every refusal
 answers `.none`: with no grant to diagnose, a *distinguishable* refusal would
 itself be a signal. The §4.1 machinery carve-out applies unconditionally here
 too — a place can be an ancestor of the editor's own state (the

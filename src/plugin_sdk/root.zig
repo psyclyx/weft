@@ -2989,7 +2989,7 @@ pub fn placeRoot() []const u8 {
 /// (`doc/place.md` §4.2). Same four answers as `fsExists`, and NO permission:
 /// it reveals strictly less than `placeRoot`, which already hands you the
 /// directory, and it cannot escape the place (the host resolves it beneath the
-/// place root with `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`).
+/// place root by `RootedFs`'s no-follow walk: no `..` out, no symlinks).
 ///
 /// This is what "is this project a git repository", "is there an `.envrc`
 /// here", "is a rebase mid-flight" ask, and it is the reason neither `git` nor
