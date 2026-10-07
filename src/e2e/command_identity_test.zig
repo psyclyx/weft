@@ -266,8 +266,10 @@ test "e2e/identity: which key runs it depends on where you are — the grammar, 
     ide.ed.typeText("x"); // an edit, so the history offer is armed
     const under_ide = try keys_for.keysFor(ide.ed.ctx, gpa, "files.find", keys_for.personMode(ide.ed.ctx));
     defer keys_for.free(gpa, under_ide);
-    try t.expectEqual(@as(usize, 1), under_ide.len);
-    try t.expectEqualStrings("C-p", under_ide[0]);
+    // ide's key, and its ⌘ twin (super, `s-`) for a Mac: exactly those two.
+    try t.expectEqual(@as(usize, 2), under_ide.len);
+    try t.expect(contains(under_ide, "C-p"));
+    try t.expect(contains(under_ide, "s-p"));
 
     // An intention arm: ide binds C-z to [std.history.undo, edit.undo]. In a
     // text entry holding an edit the history offer answers with `edit.undo`,
