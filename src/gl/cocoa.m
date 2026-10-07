@@ -7,6 +7,11 @@
 #import <Cocoa/Cocoa.h>
 #import <OpenGL/OpenGL.h>
 
+// NSOpenGL is deprecated (since macOS 10.14, in favour of Metal) and still
+// supported; it is the API this file exists to use. Every use here would
+// warn, so the warning is off for this file alone.
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
 #include <dlfcn.h>
 #include <stdlib.h>
 

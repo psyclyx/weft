@@ -689,7 +689,7 @@ pub fn main(init: std.process.Init) !void {
     // (see collab.zig's `connect`/`runtimeConnectFinish`/reconnect-rebind).
     if (collab_state.share_ctx.conn_wake_fd >= 0)
         _ = try sched.addFd(collab_state.share_ctx.conn_wake_fd, .{ .read = true }, null, null, "conn");
-    // The hub's eventfd, by contrast, doesn't exist until the Hub struct
+    // The hub's wake fd, by contrast, doesn't exist until the Hub struct
     // itself does (--listen at boot, or the `listen` command at runtime) —
     // tracked so it's registered/removed exactly once per transition.
     var hub_src_id: ?scheduler.Id = null;

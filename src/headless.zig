@@ -11,7 +11,7 @@
 //! shape here was a fixed 15ms futex park regardless of whether anything
 //! was pending; that's gone — an idle host with no peers, no in-flight
 //! saves, and nothing dirty genuinely blocks in `poll()` until a peer's
-//! reader thread (or the accept thread) signals the hub's eventfd, or the
+//! reader thread (or the accept thread) signals the hub's wake fd, or the
 //! pool signals a finished task, or the autosave-idle deadline (armed only
 //! while a change is actually pending) comes due.
 //!

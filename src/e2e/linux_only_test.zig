@@ -43,8 +43,6 @@ const awaiting = [_]struct { path: []const u8, owner: []const u8 }{
     .{ .path = "src/core/wasm_host/fs.zig", .owner = "macOS port, filesystem lane" },
     .{ .path = "src/core/watch.zig", .owner = "macOS port, filesystem lane" },
     .{ .path = "src/fs_linux/provider.zig", .owner = "macOS port, filesystem lane" },
-    .{ .path = "src/platform/clipboard.zig", .owner = "macOS port, platform lane (Wayland transfers split out)" },
-    .{ .path = "src/platform/wayland.zig", .owner = "macOS port, platform lane" },
 };
 
 /// Directories under `src/` holding wasm guests, not host code.

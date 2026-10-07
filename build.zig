@@ -1894,8 +1894,9 @@ fn addSkia(b: *std.Build, mod: *std.Build.Module, gpu: Gpu, macos_sdk: ?[]const 
             @panic("WEFT_LIBCXX not set — build inside the nix shell");
         var flags: std.ArrayList([]const u8) = .empty;
         flags.appendSlice(b.allocator, &common) catch @panic("OOM");
-        // `-cxx-isystem`: libc++'s headers must precede the C library's.
-        flags.appendSlice(b.allocator, &.{ "-nostdinc++", "-cxx-isystem", b.pathJoin(&.{ libcxx, "include/c++/v1" }) }) catch @panic("OOM");
+        // `-I`, not `-isystem`: libc++'s headers must be searched before the C
+        // library's, and Zig's own libc directories are system ones.
+        flags.appendSlice(b.allocator, &.{ "-nostdinc++", "-I", b.pathJoin(&.{ libcxx, "include/c++/v1" }) }) catch @panic("OOM");
         var it = std.mem.tokenizeAny(u8, includes, " \t\r\n");
         while (it.next()) |tok| flags.append(b.allocator, b.dupe(tok)) catch @panic("OOM");
         mod.addCSourceFiles(.{ .files = &sources, .flags = flags.items });
@@ -2042,7 +2043,8 @@ const objc_flags = [_][]const u8{
     "-Wextra",
     "-Werror",
     "-Wno-unused-parameter",
-    // NSOpenGL is deprecated (macOS 10.14) but supported; it is the API.
+    // OpenGL.framework's own deprecation notices (CGL); AppKit's NSOpenGL
+    // ones are silenced in gl/cocoa.m, the one file that means to use it.
     "-DGL_SILENCE_DEPRECATION",
 };
 
