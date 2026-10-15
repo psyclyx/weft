@@ -8,6 +8,8 @@
 	<string>weft</string>
 	<key>CFBundleExecutable</key>
 	<string>weft</string>
+	<key>CFBundleIconFile</key>
+	<string>weft</string>
 	<key>CFBundleIdentifier</key>
 	<string>dev.psyclyx.weft</string>
 	<key>CFBundleInfoDictionaryVersion</key>

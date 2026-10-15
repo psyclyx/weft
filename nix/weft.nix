@@ -1,4 +1,5 @@
 {
+  buildPackages,
   callPackage,
   dejavu_fonts,
   fontconfig,
@@ -24,6 +25,8 @@
 }:
 let
   inherit (stdenv.hostPlatform) isLinux isDarwin;
+  # buildPackages: the icon is rasterized on the build host (a cross build too).
+  macos-icon = buildPackages.callPackage ./macos-icon.nix { };
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "weft";
@@ -82,8 +85,26 @@ stdenv.mkDerivation (finalAttrs: {
     "--release=fast"
   ];
   dontSetZigDefaultFlags = true;
+  # The reference configs ship beside the binary, so `--config
+  # $out/share/weft/config/config.js` works from any directory (the
+  # home-manager module defaults to exactly that). Their `languages.query-root`
+  # names the repo's `assets`, which resolves against the working directory;
+  # the installed copy names the installed queries instead, and fails the build
+  # if a config stops saying it the way this expects.
   postInstall = ''
     install -Dm644 LICENSE $out/share/licenses/weft/LICENSE
+    mkdir -p $out/share/weft
+    cp -r config $out/share/weft/config
+    install -Dm644 -t $out/share/weft/queries assets/*.scm
+    for f in config helix ide; do
+      substituteInPlace $out/share/weft/config/$f.js --replace-fail \
+        'weft.set("languages", "query-root", "assets");' \
+        'weft.set("languages", "query-root", "'"$out"'/share/weft/queries");'
+    done
+  ''
+  # The bundle's icon (CFBundleIconFile in packaging/macos/Info.plist).
+  + lib.optionalString isDarwin ''
+    install -Dm644 ${macos-icon} $out/Applications/weft.app/Contents/Resources/weft.icns
   '';
   meta = {
     description = "Weft text editor";

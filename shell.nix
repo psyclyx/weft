@@ -8,28 +8,11 @@
   },
 }:
 let
-  # The grammar tree weft searches at runtime: one directory per grammar
-  # NAME, each laid out the way the nixpkgs packages are (`parser` plus
-  # `queries/highlights.scm`). Which languages exist is decided HERE and in
-  # config — weft itself has no list, and adding one is a change to this
-  # attrset, not to any Zig source.
-  grammarNames = [
-    "zig"
-    "fennel"
-    "lua"
-    "nix"
-    "javascript"
-    "html"
-  ];
-  # The shell names upstream parser packages for the sample config. Query
-  # selection lives in config/plugins/languages.js, which passes its own files to
-  # grammar-add where an upstream package does not supply the desired query.
-  grammarDir = pkgs.linkFarm "weft-grammars" (
-    map (n: {
-      name = n;
-      path = pkgs.tree-sitter-grammars."tree-sitter-${n}";
-    }) grammarNames
-  );
+  # The upstream parser packages the sample config uses (nix/grammars.nix has
+  # the list). Query selection lives in config/plugins/languages.js, which
+  # passes its own files to grammar-add where an upstream package does not
+  # supply the desired query.
+  grammarDir = pkgs.callPackage ./nix/grammars.nix { };
   inherit (pkgs.stdenv.hostPlatform) isLinux isDarwin;
 
   # The desktop stack is per platform: Wayland + Vulkan (or EGL, with
@@ -91,6 +74,8 @@ pkgs.mkShell {
       # Language servers for the sample config (phase 2: zls is already
       # above for dev; fennel-ls is the second-server demonstration).
       fennel-ls
+      gopls
+      go # gofmt, `go run`, and the toolchain gopls drives
 
       # Formatting / dev ergonomics (treefmt.toml drives nixfmt + zig fmt).
       treefmt

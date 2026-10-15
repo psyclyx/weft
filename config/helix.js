@@ -72,6 +72,7 @@ weft.use("undo");     // the undo history as a tree, docked right when shown (SP
 
 // ── Values ───────────────────────────────────────────────────────────
 weft.set("lsp", "zig", "zls");
+weft.set("lsp", "go", "gopls");
 // which-key: centered popup, a longer hold before it appears.
 weft.set("which_key", "placement", "center");
 weft.set("which_key", "delay-ms", "350");

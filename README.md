@@ -101,6 +101,20 @@ overrides that directory.
 The Nix package is available as `packages.weft` from `default.nix`. Arch and
 Debian package recipes use the same build; see [packaging/README.md](packaging/README.md).
 
+`homeManagerModules.default` from `default.nix` installs weft wrapped to run
+the reference `config/config.js`, with the grammars it registers and its
+language servers (zls, gopls, fennel-ls) on PATH. On macOS it also installs
+`weft.app`, which gets the same config and environment when Finder or the Dock
+launches it.
+
+```nix
+{
+  imports = [ (import ./path/to/weft { }).homeManagerModules.default ];
+  programs.weft.enable = true;
+  # programs.weft.configFile = "helix.js";  # or ide.js; or configDir = ./my-weft;
+}
+```
+
 Set the startup text size with `weft.set("editor", "font-size", "16")` in your
 config, or use `--em 16` without a config. `Ctrl++` (or `Ctrl+=`) and `Ctrl+-`
 adjust it while editing; `Ctrl+0` restores the configured size. The command

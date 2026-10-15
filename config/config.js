@@ -178,6 +178,7 @@ weft.use("undo");
 // Every value has an OWNER — the plugin (or core namespace) that reads it.
 // There is no grab-bag namespace; an unknown owner is refused, not stored.
 weft.set("lsp", "zig", "zls");            // a server per language: weft.set("lsp","<lang>","<cmd>")
+weft.set("lsp", "go", "gopls");
 weft.set("which_key", "delay-ms", "200"); // hold a prefix this long before the hint pops
 weft.set("which_key", "placement", "corner"); // or "center"
 weft.set("editor", "flash-ms", "150");    // how long an operator flashes its range

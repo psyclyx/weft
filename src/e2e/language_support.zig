@@ -11,6 +11,7 @@ pub const cases = [_]Case{
     .{ .name = "nix", .path = "flake.nix", .source = "{ description = \"weft\"; }\n" },
     .{ .name = "javascript", .path = "app.js", .source = "function greet() { return 1; }\n" },
     .{ .name = "html", .path = "index.html", .source = "<!doctype html>\n<title>weft demo</title>\n" },
+    .{ .name = "go", .path = "main.go", .source = "package main\n\nfunc main() {}\n" },
 };
 
 pub fn attachedSyntax(ed: *h.Editor) ?*h.core.syntax.Syntax {

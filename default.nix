@@ -28,6 +28,9 @@ in
 {
   packages = mkPackages finalPkgs;
   inherit overlay;
+  # `programs.weft`: weft wrapped to run config/config.js (or a config of your
+  # own), with its grammars and language servers — and weft.app on macOS.
+  homeManagerModules.default = import ./nix/hm-module.nix;
   shell = import ./shell.nix {
     pkgs = finalPkgs;
     inherit (finalPkgs) libghostty-vt-wasm;

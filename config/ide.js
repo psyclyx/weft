@@ -114,6 +114,7 @@ weft.set("menu", "items", [
 
 // ── Values ───────────────────────────────────────────────────────────
 weft.set("lsp", "zig", "zls");
+weft.set("lsp", "go", "gopls");
 weft.set("which_key", "delay-ms", "400"); // few chords here; don't pop eagerly
 weft.set("editor", "flash-ms", "150");
 weft.set("editor", "flash-undo", "on"); // undo/redo flash what they put back

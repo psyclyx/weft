@@ -2885,4 +2885,5 @@ fn registerGrammars(rt: *core.syntax.Runtime, gpa: Allocator) !void {
     try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
     try rt.add(gpa, .{ .extensions = ".js,.jsx,.mjs,.cjs", .grammar = "javascript", .symbol = "tree_sitter_javascript", .outline = q("javascript-outline") });
     try rt.add(gpa, .{ .extensions = ".html,.htm", .grammar = "html", .symbol = "tree_sitter_html" });
+    try rt.add(gpa, .{ .extensions = ".go", .grammar = "go", .symbol = "tree_sitter_go", .outline = q("go-outline") });
 }
