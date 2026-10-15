@@ -568,6 +568,19 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // whatever the grammar binds it to.
     if (claimedKey(ctx, spec, commit)) return;
 
+    // An INLINE pick (completion while typing) answers the few keys its
+    // layers bind — Tab, Down, Return once a row is chosen — before the
+    // grammar sees them; every other key is the grammar's, so typing goes on.
+    // Not mid-chord: a held prefix is the grammar's sequence. Before
+    // dot-repeat: moving through a list is not a change to repeat.
+    if (ctx.head.pending.len == 0) if (ctx.head.pick.keyLayers()) |layers| {
+        for (layers) |layer| {
+            const arms = ctx.keymap.layerArms(layer orelse continue, spec) orelse continue;
+            if (chooseArm(ctx, arms)) |arm| invokeArm(ctx, arm);
+            return;
+        }
+    };
+
     // Dot-repeat: record this keystroke (unless we ARE a replay), and decide at
     // the end of dispatch whether the sequence so far was a repeatable change.
     // A pointer gesture is not recorded: replayed later it would act wherever
@@ -726,9 +739,34 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     core.step.begin(ctx, commit_cmd);
     core.task.beginHotSection();
     defer core.task.endHotSection();
+    const typing = typingInto(ctx);
     _ = core.command.run(ctx.commands, ctx, commit_cmd, &.{.{ .string = commit.bytes }}) catch |err| {
         std.log.warn("{s} failed: {t}", .{ commit_cmd, err });
     };
+    if (typing) |before| if (typedInto(ctx, before)) {
+        ctx.head.typed = true;
+    };
+}
+
+/// What a keystroke's commit is about to type into, when it can count as
+/// TYPING (`Head.typed`): a person's live key — not a dot-repeat or macro
+/// replaying keys — into the active entry's text document, not a field of a
+/// listing. Its document's commit count, to compare after.
+const TypingInto = struct { entry: *core.Buffers.Buffer, commits: usize };
+
+fn typingInto(ctx: *core.command.Context) ?TypingInto {
+    if (ctx.head.dot.replaying or ctx.head.macros.depth > 0) return null;
+    const entry = ctx.buffer();
+    if (entry.posture(ctx.head.scene_selection.edit != null) != .text) return null;
+    const ed = entry.textEditor() orelse return null;
+    return .{ .entry = entry, .commits = ed.doc.commitCount() };
+}
+
+/// The commit landed in that same document: text was typed.
+fn typedInto(ctx: *core.command.Context, before: TypingInto) bool {
+    if (ctx.buffer() != before.entry) return false;
+    const ed = before.entry.textEditor() orelse return false;
+    return ed.doc.commitCount() != before.commits;
 }
 
 // ── Typing hooks (`Keymap.typing_hooks`) ─────────────────────────────

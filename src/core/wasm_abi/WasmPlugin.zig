@@ -331,6 +331,10 @@ signal_subscriptions: std.ArrayList([]u8) = .empty,
 /// (`wl_signal_emit`), delivered by `wasm_host/activation.zig`'s
 /// `deliverSignals`. Owned.
 signals_raised: std.ArrayList([]u8) = .empty,
+/// This plugin's pending `wl_signal_emit_after`s, BORROWED from the plugin
+/// loop that owns them — so a re-arm can find and cancel one by name, and
+/// `deinit` can cancel them all before this plugin's memory goes.
+signal_timers: std.ArrayList(*@import("../wasm_host/activation.zig").SignalTimer) = .empty,
 
 /// This plugin.s node-tree projection over a text buffer, if it has published
 /// one (`wasm_host/projection.zig`). Held here, released in `deinit`, like
@@ -830,6 +834,8 @@ pub fn deinit(self: *WasmPlugin) void {
     self.signal_subscriptions.deinit(gpa);
     for (self.signals_raised.items) |name| gpa.free(name);
     self.signals_raised.deinit(gpa);
+    @import("../wasm_host/activation.zig").cancelSignalTimers(self);
+    self.signal_timers.deinit(gpa);
     // Offers die with the plugin: the table is retracted and every endpoint
     // it minted is refused from here on (the invoker's generation bumps).
     if (self.offers_ready) self.offers.deinit(gpa);

@@ -2076,6 +2076,24 @@ pub fn signalSubscribe(name: []const u8) ?u32 {
 pub fn signalEmit(name: []const u8) void {
     _ = e.wl_signal_emit(p(name.ptr), @intCast(name.len));
 }
+/// Raise `name` once `ms` milliseconds have passed — a timer that arrives as
+/// a signal (`on_signal`), so a plugin listening for its own name hears it
+/// like any other. Raising the same name again before it fires MOVES it, so
+/// calling this on every keystroke is a debounce; `signalCancel` drops it.
+/// Needs `requestPerm(.timer)`.
+pub fn signalEmitAfter(name: []const u8, ms: u32) void {
+    _ = e.wl_signal_emit_after(p(name.ptr), @intCast(name.len), @intCast(@min(ms, std.math.maxInt(i32))));
+}
+/// Drop a pending `signalEmitAfter` of `name`, if one is pending.
+pub fn signalCancel(name: []const u8) void {
+    _ = e.wl_signal_emit_after(p(name.ptr), @intCast(name.len), -1);
+}
+/// The signal core raises at the frame boundary after a person's live
+/// keystroke typed text into the active text document — not a dot-repeat or
+/// macro replaying keys, not a paste, not a listing's field. Subscribe to it
+/// (`signalSubscribe`) to react to typing; the cursor and the text before it
+/// are what was typed.
+pub const typed_signal = "input.typed";
 /// The `i`-th capture of the last `query`/`nodeChildren` (name/kind into
 /// `scratch`), or null.
 pub fn queryCapture(i: usize) ?Capture {

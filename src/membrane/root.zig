@@ -126,10 +126,11 @@ pub const Group = enum {
 /// deny as unchanged in W0a, so this field documents today's real gates, it
 /// doesn't add new ones. `proc_timer` names the one recurring COMBINATION
 /// this codebase actually checks: every `perm_timer` check in wasm_host/
-/// proc.zig and sessions.zig is paired with `perm_proc`, and `timer` never
-/// gates alone — modeled honestly as the pair it always is, rather than
-/// bolting on a multi-perm field for a case that doesn't otherwise exist.
-pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer, env, clipboard };
+/// proc.zig and sessions.zig is paired with `perm_proc` — modeled honestly
+/// as the pair it always is, rather than bolting on a multi-perm field for a
+/// case that doesn't otherwise exist. `timer` alone gates the one door that
+/// is ONLY a timer (`wl_signal_emit_after`).
+pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer, env, clipboard, timer };
 
 pub const Entry = struct {
     /// The `weft.<name>` import name — matches the guest's `extern "weft" fn
@@ -382,6 +383,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_activate_path", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .activation, .doc = "the path of the buffer taking focus (host→guest activation, borrowed)" },
     .{ .name = "wl_signal_subscribe", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .activation, .doc = "hear a named signal as `on_signal(id)`; returns the id, -1 refused" },
     .{ .name = "wl_signal_emit", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .activation, .doc = "raise a named signal for every listener, delivered at the next frame boundary" },
+    .{ .name = "wl_signal_emit_after", .params = &.{ .u32, .u32, .i32 }, .results = &.{.i32}, .group = .activation, .perm = .timer, .operation = .{ .name = "legacy.wl_signal_emit" }, .doc = "raise a named signal once `ms` have passed (a pending one of the same name from this plugin moves; a negative `ms` cancels it)" },
 
     // ── tool.zig — projection ownership ─────────────────────────────────
     .{ .name = "wl_tool_backing", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .tool, .doc = "mark the active buffer as this plugin's tool projection" },
@@ -634,7 +636,7 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 275; // +1: wl_buffer_docked (a buffer switcher lists documents, not chrome)
+const max_import_count: usize = 276; // +1 wl_buffer_docked (a buffer switcher lists documents, not chrome), +1 wl_signal_emit_after (debounced signals)
 const max_export_count: usize = 22;
 const max_semantic_operation_count: usize = 296; // +1: wl_buffer_docked
 
@@ -797,7 +799,7 @@ test "membrane contract data: ABI v1 owns twenty-one full callbacks and one mini
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 274), census.imports);
+    try t.expectEqual(@as(usize, 275), census.imports);
     try t.expectEqual(@as(usize, 22), census.exports);
     try t.expectEqual(@as(usize, 295), census.semantic_operations);
 }

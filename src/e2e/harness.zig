@@ -99,6 +99,19 @@ pub const acp_js = weft.acp_js;
 /// plugin-host locals (engine/loop/plugins). Driving the real Session — not a
 /// look-alike — is why completion / hover / goto-def work without the harness
 /// re-wiring anything; a new capability the app gains is here for free.
+/// The plugin loop's clock in this harness. Its timers are DELAYS a plugin
+/// asked for — a debounce before completion pops up — and on the wall clock a
+/// delay races every `settle`: whether a popup is showing when a test presses
+/// Tab would be a matter of how busy the box was. So the clock only moves
+/// when a test says (`Editor.advanceClock`): a delay never elapses by
+/// accident, and a timer due now (zero delay) still fires on the next wake.
+/// Nothing else reads it — process streams and syntax parses keep real time.
+pub var loop_clock_ns: u64 = 0;
+
+fn loopNow() u64 {
+    return loop_clock_ns;
+}
+
 pub const Editor = struct {
     gpa: Allocator,
     pool: *core.task.Pool,
@@ -195,7 +208,7 @@ pub const Editor = struct {
         self.pointer_ms = 0;
         self.pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
         self.engine = try core.wasm.Engine.init(gpa);
-        self.loop = core.async_loop.Loop.init(gpa, self.pool, core.task.nowNs);
+        self.loop = core.async_loop.Loop.init(gpa, self.pool, loopNow);
 
         // Stand up the REAL app state, in main()'s construction order: Providers'
         // registries first (Session's capability consumers bind onto them), the
@@ -729,6 +742,14 @@ pub const Editor = struct {
             if (entry.textEditor().?.save_state != .saving) return;
             std.Thread.yield() catch {};
         }
+    }
+
+    /// Move the plugin loop's clock (`loop_clock_ns`) on by `ms`, then run one
+    /// application wake — so every plugin timer due by then (a debounce, a
+    /// `signalEmitAfter`) fires and is heard, exactly once, in a known order.
+    pub fn advanceClock(self: *Editor, ms: u64) void {
+        loop_clock_ns += ms * std.time.ns_per_ms;
+        _ = self.advanceAt(core.task.nowNs(), false) catch {};
     }
 
     /// Advance complete application wakes while background work converges.

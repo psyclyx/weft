@@ -284,6 +284,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_activate_path", .handler = activation.hActivatePath },
     .{ .name = "wl_signal_subscribe", .handler = activation.hSignalSubscribe },
     .{ .name = "wl_signal_emit", .handler = activation.hSignalEmit },
+    .{ .name = "wl_signal_emit_after", .handler = activation.hSignalEmitAfter },
 
     // ── tool.zig — projection ownership ─────────────────────────────────
     .{ .name = "wl_tool_backing", .handler = tool.hToolBacking },
@@ -651,6 +652,7 @@ const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_env_publish", .perm = .env }, // env.zig hEnvPublish: .env
     .{ .name = "wl_clipboard_set", .perm = .clipboard }, // clipboard.zig hClipboardSet: wasmDoor gate .clipboard
     .{ .name = "wl_clipboard_get", .perm = .clipboard }, // clipboard.zig hClipboardGet: wasmDoor gate .clipboard
+    .{ .name = "wl_signal_emit_after", .perm = .timer }, // activation.zig hSignalEmitAfter: .timer
 };
 
 test "membrane contract: table .perm metadata agrees with the handlers' actual requirePerm gates" {

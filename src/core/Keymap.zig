@@ -882,7 +882,15 @@ pub const menu_nav_mode = "menu-nav";
 /// The complete binding arms for `key` in the hint navigation layer.
 /// Dispatch resolves these through the same action chain as ordinary keys.
 pub fn navBindings(self: *const Keymap, key: []const u8) ?[]const []const u8 {
-    const b = self.modes.getPtr(menu_nav_mode) orelse return null;
+    return self.layerArms(menu_nav_mode, key);
+}
+
+/// The arms `layer` binds `key` to in its OWN table — no fallback chain, no
+/// `global`. For a layer consulted ahead of the grammar (`menu-nav`, an
+/// inline pick's keys): a key it does not bind must fall through to the
+/// grammar untouched, and `global` is the grammar's to answer.
+pub fn layerArms(self: *const Keymap, layer: []const u8, key: []const u8) ?[]const []const u8 {
+    const b = self.modes.getPtr(layer) orelse return null;
     return if (b.get(key)) |e| e.commands else null;
 }
 
