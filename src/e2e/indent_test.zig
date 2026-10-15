@@ -114,7 +114,7 @@ test "e2e/indent: the step comes from the file — a tab file's Tab is a tab, a 
     ed.chord("less less");
     try expectText(ed, "def f():\n    return 1\n");
 
-    // A text file indented by two, against config's (and the built-in) four.
+    // A text file indented by two, against the built-in four.
     try openFile(ed, "two.txt", "a\n  b\n    c\n  d\n");
     ed.chord("g g");
     ed.chord("greater greater");
