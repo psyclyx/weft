@@ -135,7 +135,7 @@ const State = struct {
     source: Source = .builtin,
 };
 
-/// Per buffer, keyed by the entry's designation; reused round-robin, so a
+/// Per buffer, keyed by `entryKey`; reused round-robin, so a
 /// buffer long out of use is worked out again when it comes back.
 var states: [64]State = @splat(.{});
 var next_state: usize = 0;
@@ -218,8 +218,10 @@ fn editorconfigHere() Partial {
     if (root.len == 0 or path.len <= root.len + 1) return .{};
     if (!std.mem.startsWith(u8, path, root) or path[root.len] != '/') return .{};
 
+    // Nearest first, to find where a `root = true` stops the climb: the
+    // directories (prefixes of `path`, kept as lengths) holding one.
     const max_files = 16;
-    var found: [max_files]editorconfig.Props = @splat(.{});
+    var dirs: [max_files]usize = undefined;
     var n: usize = 0;
     var dir = path[0 .. std.mem.lastIndexOfScalar(u8, path, '/') orelse return .{}];
     while (n < max_files) {
@@ -231,25 +233,32 @@ fn editorconfigHere() Partial {
         else
             std.fmt.bufPrint(&rel_buf, ".editorconfig", .{})) catch break;
         if (weft.placeHas(rel) == .file) {
-            var abs_buf: [1024]u8 = undefined;
-            const abs = std.fmt.bufPrint(&abs_buf, "{s}/.editorconfig", .{dir}) catch break;
-            if (weft.fsRead(abs)) |text| {
-                const is_root = editorconfig.apply(text, path[dir.len + 1 ..], &found[n]);
-                n += 1;
-                if (is_root) break;
-            }
+            const text = readEditorconfig(dir) orelse break;
+            dirs[n] = dir.len;
+            n += 1;
+            var preamble: editorconfig.Props = .{};
+            if (editorconfig.apply(text, path[dir.len + 1 ..], &preamble)) break;
         }
         if (dir.len <= root.len) break;
         dir = dir[0 .. std.mem.lastIndexOfScalar(u8, dir, '/') orelse break];
     }
-    // Farthest first, so a nearer file overrides.
-    var merged: editorconfig.Props = .{};
+    // Then farthest first onto one set, so a nearer file overrides — its
+    // `unset` included. Read again rather than held: each read borrows the
+    // one read scratch, and a file is read once per buffer anyway.
+    var props: editorconfig.Props = .{};
     var i = n;
     while (i > 0) {
         i -= 1;
-        merged.overlay(found[i]);
+        const d = path[0..dirs[i]];
+        _ = editorconfig.apply(readEditorconfig(d) orelse continue, path[d.len + 1 ..], &props);
     }
-    return merged.partial();
+    return props.partial();
+}
+
+fn readEditorconfig(dir: []const u8) ?[]const u8 {
+    var abs_buf: [1024]u8 = undefined;
+    const abs = std.fmt.bufPrint(&abs_buf, "{s}/.editorconfig", .{dir}) catch return null;
+    return weft.fsRead(abs);
 }
 
 fn copy(buf: []u8, s: []const u8) ?[]const u8 {

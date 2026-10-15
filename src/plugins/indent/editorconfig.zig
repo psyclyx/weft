@@ -17,19 +17,13 @@ const indentation = @import("indentation.zig");
 
 pub const Size = union(enum) { columns: u8, tab };
 
-/// What the matching sections said so far; a property set to `unset` is
-/// null again, which is how a nearer file takes back what a farther one set.
+/// What the matching sections said so far. Every file is applied onto the
+/// one `Props`, farthest first, so a nearer file overrides — and its
+/// `unset` makes a property null again, taking back what a farther one set.
 pub const Props = struct {
     tabs: ?bool = null,
     size: ?Size = null,
     tab_width: ?u8 = null,
-
-    /// What a nearer file's `p` says, over this.
-    pub fn overlay(self: *Props, p: Props) void {
-        if (p.tabs) |v| self.tabs = v;
-        if (p.size) |v| self.size = v;
-        if (p.tab_width) |v| self.tab_width = v;
-    }
 
     /// As an indent unit: the style, and the width it implies — `indent_size`
     /// in columns, or `tab_width` where the size is `tab` or the style is
@@ -262,13 +256,14 @@ test "editorconfig: later sections override, unset takes back, root stops the cl
     try t.expect(!apply("[*.js]\nindent_size = 2\n", "a.js", &q));
     try t.expectEqual(indentation.Partial{ .tabs = null, .width = 2 }, q.partial());
 
-    // A nearer file overrides a farther one, property by property.
-    var far: Props = .{};
-    _ = apply("[*]\nindent_style = space\nindent_size = 2\n", "x.zig", &far);
-    var near: Props = .{};
-    _ = apply("[*.zig]\nindent_size = 4\n", "x.zig", &near);
-    far.overlay(near);
-    try t.expectEqual(indentation.Partial{ .tabs = false, .width = 4 }, far.partial());
+    // A nearer file, applied after a farther one, overrides it property by
+    // property — and its `unset` takes a property back.
+    var both: Props = .{};
+    _ = apply("[*]\nindent_style = space\nindent_size = 2\n", "src/x.zig", &both);
+    _ = apply("[*.zig]\nindent_size = 4\n", "x.zig", &both);
+    try t.expectEqual(indentation.Partial{ .tabs = false, .width = 4 }, both.partial());
+    _ = apply("[x.zig]\nindent_style = unset\n", "x.zig", &both);
+    try t.expectEqual(indentation.Partial{ .tabs = null, .width = 4 }, both.partial());
 
     // `indent_size = tab` reads the tab width.
     var s: Props = .{};
