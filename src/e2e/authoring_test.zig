@@ -2798,7 +2798,10 @@ test "authoring/files: `..` is a row, not a button — focus starts past it, a c
     // button that fires on press.
     const pixels = try ed.renderComposite();
     gpa.free(pixels);
-    ed.click(ed.pointAtNode(parent) orelse return error.ParentNotShown);
+    // In the listing just opened, the primary pane — the config's sidebar may
+    // show the same rows beside it.
+    const primary = (ed.win_layout.primaryPane() orelse return error.NoPrimaryPane).pane().id;
+    ed.click(ed.pointAtNodeIn(primary, parent) orelse return error.ParentNotShown);
     try t.expectEqual(listing, ed.buffers.active().id);
     try t.expectEqual(parent, ed.subjectHere().?);
 
