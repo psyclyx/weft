@@ -42,6 +42,18 @@ pub fn noopFdReady(ctx: ?*anyopaque, readable: bool, writable: bool) void {
     _ = writable;
 }
 
+/// The local filesystem provider's watch descriptor is readable (a directory
+/// a plugin watches changed): fold what it queued into the watches, so the
+/// wake's body finds them ready (`wasm_host.notifyPollIfReady`). Draining
+/// here, not only in the body, is what keeps a level-triggered descriptor
+/// from waking the loop again for events no watch is polled for.
+pub fn fsWatchReady(ctx: ?*anyopaque, readable: bool, writable: bool) void {
+    _ = readable;
+    _ = writable;
+    const provider: *@import("weft_fs_platform").Provider = @ptrCast(@alignCast(ctx.?));
+    provider.pumpWatches();
+}
+
 /// The scheduler's blocking wait, delegated to the platform window
 /// (`Scheduler.waiter`): Wayland polls, Cocoa waits in its event loop.
 pub fn platformWait(ctx: *anyopaque, fds: []std.posix.pollfd, timeout_ms: i32) usize {

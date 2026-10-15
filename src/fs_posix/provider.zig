@@ -19,6 +19,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const fs = @import("weft_fs");
 const stat = @import("stat.zig");
+const Watch = @import("watch.zig");
 
 const contract = fs.contract;
 const c = std.c;
@@ -38,6 +39,11 @@ pub const PosixFs = struct {
     roots: std.ArrayList(RootSlot) = .empty,
     entries: std.ArrayList(EntrySlot) = .empty,
     leases: std.ArrayList(LeaseSlot) = .empty,
+    /// The `here` tier of `fs.watch` (`watch.zig`): ONE instance serves
+    /// every watch this provider hands out — one inotify descriptor, one
+    /// kqueue — created by the first watch (or the first `watchWakeFd`).
+    watcher: ?Watch = null,
+    watches: std.ArrayList(WatchSlot) = .empty,
 
     const RootSlot = struct {
         generation: u32,
@@ -52,6 +58,25 @@ pub const PosixFs = struct {
     const EntrySlot = struct {
         generation: u32,
         value: ?EntryState = null,
+    };
+
+    const WatchSlot = struct {
+        generation: u32,
+        value: ?WatchState = null,
+    };
+
+    /// One handed-out watch: a pinned root under the shared `watcher`, and
+    /// what the watcher said about it since the last `pollInvalidation`.
+    /// Invalidation is all the contract promises, so the named events fold
+    /// into three bits here — any number of them is one answer.
+    const WatchState = struct {
+        root: contract.Root,
+        id: Watch.RootId,
+        changed: bool = false,
+        /// The directory itself was deleted or moved.
+        left: bool = false,
+        /// Events were lost; anything may have changed.
+        lost: bool = false,
     };
 
     /// A lease is a provider-owned materialized file value. Directory trees
@@ -133,6 +158,8 @@ pub const PosixFs = struct {
         self.roots.deinit(self.gpa);
         for (self.leases.items) |*slot| self.clearLeaseSlot(slot);
         self.leases.deinit(self.gpa);
+        self.watches.deinit(self.gpa);
+        if (self.watcher) |*w| w.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -229,6 +256,12 @@ pub const PosixFs = struct {
             if (entry_slot.value) |entry|
                 if (entry.root.eql(root)) self.clearEntrySlot(entry_slot);
         }
+        // A watch outlives nothing it watches: its handle goes stale with
+        // the root, as an entry's does.
+        for (self.watches.items) |*watch_slot| {
+            if (watch_slot.value) |held|
+                if (held.root.eql(root)) self.clearWatchSlot(watch_slot);
+        }
         closeFd(state.fd);
         slot.value = null;
         bumpGeneration(&slot.generation);
@@ -242,7 +275,7 @@ pub const PosixFs = struct {
             .symlink = true,
             .posix_mode = true,
             .guard_strength = .preflight,
-            .watch = .none,
+            .watch = .recursive_invalidation,
             .quarantine = false,
         };
     }
@@ -513,28 +546,148 @@ pub const PosixFs = struct {
         return owned;
     }
 
+    /// Watch a pinned root directory (`watch.zig`; recursive, or its own
+    /// entries only). A pinned entry is not a confinement boundary — the
+    /// semantic doors only ever hand out roots — so only `.root` is watched.
+    ///
+    /// The kernel interfaces watch a PATH, so this is the one place a root
+    /// is turned back into one (`dirPath`), and the path is checked to still
+    /// name the pinned object before it is watched. What remains is a race
+    /// between that check and the kernel's lookup; a watch grants nothing
+    /// but invalidations — every read still walks the pinned descriptor —
+    /// so losing it costs at most a missed or spurious refresh.
     pub fn watch(
         self: *PosixFs,
         root: contract.Root,
         directory: contract.NodeRef,
         recursive: bool,
     ) contract.Error!contract.WatchRef {
-        _ = self;
-        _ = root;
-        _ = directory;
-        _ = recursive;
-        return error.Unsupported;
+        const state = try self.rootState(root);
+        switch (directory) {
+            .root => {},
+            .entry => return error.Unsupported,
+        }
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = dirPath(state.fd, &path_buf) orelse return error.Stale;
+        const path_z = try self.gpa.dupeZ(u8, path);
+        defer self.gpa.free(path_z);
+        const named = stat.at(c.AT.FDCWD, path_z.ptr) catch return error.Stale;
+        if (!named.identity.locationEql(state.identity)) return error.Stale;
+
+        try self.watches.ensureUnusedCapacity(self.gpa, 1);
+        const watcher = try self.ensureWatcher();
+        const id = watcher.add(self.gpa, path, .{ .recursive = recursive }) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.Io,
+        };
+        const held: WatchState = .{ .root = root, .id = id };
+        for (self.watches.items, 0..) |*slot, index| {
+            if (slot.value != null) continue;
+            slot.value = held;
+            return .{ .authority = .here, .slot = @intCast(index), .generation = slot.generation };
+        }
+        self.watches.appendAssumeCapacity(.{ .generation = self.generation_seed, .value = held });
+        return .{
+            .authority = .here,
+            .slot = @intCast(self.watches.items.len - 1),
+            .generation = self.generation_seed,
+        };
     }
 
+    /// What the watch heard since it was last asked, as ONE invalidation:
+    /// the directory itself leaving outranks lost events, which outrank
+    /// ordinary changes. Never blocks (`pumpWatches`).
     pub fn pollInvalidation(self: *PosixFs, watch_ref: contract.WatchRef) contract.Error!?contract.Invalidation {
-        _ = self;
-        _ = watch_ref;
-        return error.Unsupported;
+        _ = try self.watchState(watch_ref);
+        self.pumpWatches();
+        const state = try self.watchState(watch_ref);
+        const heard = state.*;
+        state.changed = false;
+        state.left = false;
+        state.lost = false;
+        if (heard.left) return .root_changed;
+        if (heard.lost) return .rescan_required;
+        if (heard.changed) return .{ .changed = null };
+        return null;
     }
 
     pub fn closeWatch(self: *PosixFs, watch_ref: contract.WatchRef) void {
-        _ = self;
-        _ = watch_ref;
+        const slot = self.watchSlot(watch_ref) orelse return;
+        self.clearWatchSlot(slot);
+    }
+
+    /// Take everything the shared watcher has queued and fold it into each
+    /// watch's bits. Non-blocking; the frame loop calls it when `watchWakeFd`
+    /// is readable, and every `pollInvalidation` calls it first. A watcher
+    /// that cannot be read any more has lost events for every watch.
+    pub fn pumpWatches(self: *PosixFs) void {
+        const watcher = if (self.watcher) |*w| w else return;
+        watcher.drain(self.gpa, .{ .ctx = self, .call = hear }) catch {
+            for (self.watches.items) |*slot| if (slot.value) |*held| {
+                held.lost = true;
+            };
+        };
+    }
+
+    /// A descriptor the frame loop can wait on: readable while watch events
+    /// are queued (`Watch.wakeFd`). Creates the shared watcher if no watch
+    /// has yet; null when this host has none to give.
+    pub fn watchWakeFd(self: *PosixFs) ?i32 {
+        const watcher = self.ensureWatcher() catch return null;
+        return watcher.wakeFd() catch null;
+    }
+
+    /// Watches handed out and not closed — what a test reads to prove a
+    /// close released one.
+    pub fn liveWatchCount(self: *const PosixFs) usize {
+        var n: usize = 0;
+        for (self.watches.items) |slot| n += @intFromBool(slot.value != null);
+        return n;
+    }
+
+    fn hear(ctx: *anyopaque, ev: Watch.Event) void {
+        const self: *PosixFs = @ptrCast(@alignCast(ctx));
+        for (self.watches.items) |*slot| {
+            const held = if (slot.value) |*v| v else continue;
+            if (held.id != ev.root) continue;
+            switch (ev.kind) {
+                .overflow => held.lost = true,
+                .delete, .moved => if (ev.path.len == 0) {
+                    held.left = true;
+                } else {
+                    held.changed = true;
+                },
+                .create, .modify => held.changed = true,
+            }
+            return;
+        }
+    }
+
+    fn ensureWatcher(self: *PosixFs) contract.Error!*Watch {
+        if (self.watcher == null) self.watcher = Watch.init(self.gpa) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.Unsupported,
+        };
+        return &self.watcher.?;
+    }
+
+    fn watchSlot(self: *PosixFs, watch_ref: contract.WatchRef) ?*WatchSlot {
+        if (watch_ref.authority != .here or watch_ref.slot >= self.watches.items.len) return null;
+        const slot = &self.watches.items[watch_ref.slot];
+        if (slot.generation != watch_ref.generation) return null;
+        return slot;
+    }
+
+    fn watchState(self: *PosixFs, watch_ref: contract.WatchRef) contract.Error!*WatchState {
+        const slot = self.watchSlot(watch_ref) orelse return error.Stale;
+        return if (slot.value) |*value| value else error.Stale;
+    }
+
+    fn clearWatchSlot(self: *PosixFs, slot: *WatchSlot) void {
+        const held = slot.value orelse return;
+        if (self.watcher) |*w| w.remove(self.gpa, held.id);
+        slot.value = null;
+        bumpGeneration(&slot.generation);
     }
 
     fn execute(
@@ -1461,6 +1614,27 @@ fn statFd(fd: i32) contract.Error!PosixFs.Snapshot {
     return stat.ofFd(fd);
 }
 
+/// The path that names an open directory now, as the kernel reports it:
+/// Linux's `/proc/self/fd` link, Darwin's `F_GETPATH`. Null when no path
+/// does — a directory removed since it was opened (Linux spells it
+/// "<path> (deleted)", which is no path to anything).
+fn dirPath(fd: i32, buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
+    if (builtin.os.tag == .linux) {
+        var link: [32]u8 = undefined;
+        const proc = std.fmt.bufPrintZ(&link, "/proc/self/fd/{d}", .{fd}) catch return null;
+        const n = c.readlink(proc.ptr, buf, buf.len);
+        if (n <= 0 or n >= buf.len) return null;
+        const path = buf[0..@intCast(n)];
+        if (path[0] != '/' or std.mem.endsWith(u8, path, " (deleted)")) return null;
+        return path;
+    }
+    if (builtin.os.tag.isDarwin()) {
+        if (c.fcntl(fd, c.F.GETPATH, buf) < 0) return null;
+        return std.mem.sliceTo(buf, 0);
+    }
+    return null;
+}
+
 fn revisionBytes(snapshot: *const PosixFs.Snapshot) [revision_len]u8 {
     var bytes = [_]u8{0} ** revision_len;
     std.mem.writeInt(u32, bytes[0..4], revision_magic, .little);
@@ -2267,8 +2441,8 @@ test "posix provider keeps quarantine and watch capabilities honest" {
     try t.expect(capabilities.posix_mode);
     try t.expect(!capabilities.quarantine);
     try t.expectEqual(contract.GuardStrength.preflight, capabilities.guard_strength);
-    try t.expectEqual(contract.WatchPrecision.none, capabilities.watch);
-    try t.expectError(error.Unsupported, provider.watch(fixture.root, .root, true));
+    try t.expectEqual(contract.WatchPrecision.recursive_invalidation, capabilities.watch);
+    provider.closeWatch(try provider.watch(fixture.root, .root, true));
 
     const setup = [_]contract.Planned{.{
         .id = opId(60),
@@ -2831,6 +3005,67 @@ test "posix provider closes root fds and generation-checks reused root slots" {
     const second_fd = (try fixture.local.rootState(second)).fd;
     fixture.local.deinit();
     try t.expectEqual(c.E.BADF, c.errno(c.fcntl(second_fd, c.F.GETFD)));
+}
+
+test "posix provider watches a pinned root: any number of changes is one invalidation, and quiet is null" {
+    var fixture = try Fixture.init(t.allocator);
+    defer fixture.deinit();
+    const watch_ref = try fixture.local.watch(fixture.root, .root, false);
+    try t.expectEqual(@as(?contract.Invalidation, null), try fixture.local.pollInvalidation(watch_ref));
+
+    // Both kernels queue the event inside the syscall that caused it, so one
+    // poll after the write sees it; the burst folds into one answer.
+    for (0..50) |i| {
+        var name: [16]u8 = undefined;
+        try fixture.tmp.dir.writeFile(t.io, .{ .sub_path = try std.fmt.bufPrint(&name, "f{d}", .{i}), .data = "x" });
+    }
+    const heard = (try fixture.local.pollInvalidation(watch_ref)) orelse return error.TestExpectedEqual;
+    try t.expect(heard == .changed);
+    try t.expectEqual(@as(?contract.Invalidation, null), try fixture.local.pollInvalidation(watch_ref));
+
+    fixture.local.closeWatch(watch_ref);
+    try t.expectEqual(@as(usize, 0), fixture.local.liveWatchCount());
+    try t.expectError(error.Stale, fixture.local.pollInvalidation(watch_ref));
+    try t.expectEqual(@as(usize, 0), fixture.local.watcher.?.watchCount());
+}
+
+test "posix provider reports a watched root that left as root_changed, and a released root's watch as stale" {
+    var fixture = try Fixture.init(t.allocator);
+    defer fixture.deinit();
+    try fixture.tmp.dir.createDirPath(t.io, "doomed");
+    const doomed_path = try std.fs.path.join(t.allocator, &.{ fixture.path, "doomed" });
+    defer t.allocator.free(doomed_path);
+    const doomed = try fixture.local.acquireRoot(doomed_path);
+    const watch_ref = try fixture.local.watch(doomed, .root, false);
+    // Moved away. (A DELETION of a pinned root is not observable through its
+    // own watch on Linux: the pinned descriptor keeps the inode alive, and
+    // the kernel says DELETE_SELF only when it goes.)
+    try fixture.tmp.dir.rename("doomed", fixture.tmp.dir, "moved", t.io);
+    const heard = (try fixture.local.pollInvalidation(watch_ref)) orelse return error.TestExpectedEqual;
+    try t.expect(heard == .root_changed);
+
+    // A watch never outlives its root.
+    const second = try fixture.local.watch(fixture.root, .root, false);
+    fixture.local.releaseRoot(fixture.root);
+    try t.expectError(error.Stale, fixture.local.pollInvalidation(second));
+    fixture.local.closeWatch(watch_ref);
+    try t.expectEqual(@as(usize, 0), fixture.local.liveWatchCount());
+}
+
+test "posix provider's watch wake descriptor is readable exactly while events wait" {
+    var fixture = try Fixture.init(t.allocator);
+    defer fixture.deinit();
+    const watch_ref = try fixture.local.watch(fixture.root, .root, false);
+    const fd = fixture.local.watchWakeFd() orelse return error.TestExpectedEqual;
+    var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+    try t.expectEqual(@as(usize, 0), try std.posix.poll(&fds, 0));
+    try fixture.tmp.dir.writeFile(t.io, .{ .sub_path = "woke", .data = "x" });
+    // Bounded: the macOS helper thread is asynchronous; inotify is not.
+    try t.expectEqual(@as(usize, 1), try std.posix.poll(&fds, 2000));
+    fixture.local.pumpWatches();
+    fds[0].revents = 0;
+    try t.expectEqual(@as(usize, 0), try std.posix.poll(&fds, 0));
+    try t.expect((try fixture.local.pollInvalidation(watch_ref)).? == .changed);
 }
 
 test {

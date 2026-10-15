@@ -636,6 +636,10 @@ pub fn main(init: std.process.Init) !void {
     defer scheduler.closeWakeFd(pool_wake_fd);
     pool.setNotifyFd(pool_wake_fd);
     _ = try sched.addFd(pool_wake_fd, .{ .read = true }, null, null, "pool");
+    // Directories plugins watch (a listing following its directory on disk):
+    // the local provider's one watch descriptor, a real push wakeup.
+    if (session.filesystem_provider.watchWakeFd()) |fd|
+        _ = try sched.addFd(fd, .{ .read = true }, &session.filesystem_provider, loop_sources.fsWatchReady, "fs_watch");
 
     // Reified timers (§6 W2a-3 item 2) — see loop_sources.zig for the old
     // clock-polled site each one replaces.

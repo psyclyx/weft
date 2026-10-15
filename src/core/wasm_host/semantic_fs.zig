@@ -422,6 +422,122 @@ pub fn hApply(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     });
 }
 
+// ── Watching a listed directory ─────────────────────────────────────
+//
+// A plugin holding a directory target asks to hear when it changes on disk
+// (`wl_semantic_fs_watch`); the host keeps the provider's watch, polls it at
+// the frame boundary (`pollWatches`, from `on_poll`'s readiness check), and
+// raises `on_poll` when one changed. The plugin asks which
+// (`wl_semantic_fs_changed`) and decides what to do — the files listing
+// re-reads itself. Any number of changes between two frames are one flag:
+// a checkout touching a thousand files is a re-read per frame it spans, not
+// a thousand.
+//
+// Authority: the same `fs_read` + unconfined grant + exact target revision
+// as `wl_semantic_fs_list` — a plugin may watch only what it may list. Only
+// THIS host's directories are watched (`.here`): another authority's
+// provider would answer every poll with a round trip on the frame thread,
+// so a peer's or a shell host's listing answers "not watched" (-3) and is
+// re-read only when asked. A watch ends when the plugin stops it, when its
+// target's root is released (the provider then calls it stale and the next
+// poll drops it), or with the plugin.
+
+pub fn hWatch(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intFromEnum(Status.unavailable);
+    if (!requirePerm(plugin, caller, .fs_read)) return;
+    if (!requireUnrestricted(plugin, caller, .fs_read)) return;
+    const target = targetFromArgs(args) orelse {
+        results[0] = @intFromEnum(Status.invalid);
+        return;
+    };
+    const revision = revisionFromArgs(args);
+    const router = plugin.activeCtx().filesystems orelse return;
+    const watches = &plugin.semantic_watches;
+    for (watches.items, 0..) |held, index| {
+        if (!held.target.eql(target) or held.revision != revision) continue;
+        if (args[5] == 0) {
+            router.closeWatch(held.ref) catch {};
+            _ = watches.swapRemove(index);
+        }
+        results[0] = 0;
+        return;
+    }
+    if (args[5] == 0) {
+        results[0] = 0;
+        return;
+    }
+    const authorized = authorize(plugin, target, revision) catch |err| {
+        results[0] = status(err);
+        return;
+    };
+    if (authorized.root.authority != .here) {
+        results[0] = @intFromEnum(Status.unsupported);
+        return;
+    }
+    watches.ensureUnusedCapacity(plugin.gpa, 1) catch {
+        results[0] = @intFromEnum(Status.failed);
+        return;
+    };
+    const ref = router.watch(authorized.root, authorized.node, false) catch |err| {
+        results[0] = status(err);
+        return;
+    };
+    watches.appendAssumeCapacity(.{ .target = target, .revision = revision, .ref = ref });
+    results[0] = 0;
+}
+
+pub fn hChanged(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intFromEnum(Status.unavailable);
+    if (!requirePerm(plugin, caller, .fs_read)) return;
+    const target = targetFromArgs(args) orelse {
+        results[0] = @intFromEnum(Status.invalid);
+        return;
+    };
+    const revision = revisionFromArgs(args);
+    for (plugin.semantic_watches.items) |*held| {
+        if (!held.target.eql(target) or held.revision != revision) continue;
+        results[0] = @intFromBool(held.changed);
+        held.changed = false;
+        return;
+    }
+}
+
+/// Ask every watch `plugin` holds whether its directory changed, without
+/// blocking. True when one changed that the plugin has not yet been told
+/// about — the caller raises `on_poll`. A watch the provider no longer knows
+/// (its root was released with its target) is dropped.
+pub fn pollWatches(plugin: *WasmPlugin) bool {
+    const watches = &plugin.semantic_watches;
+    if (watches.items.len == 0) return false;
+    const router = plugin.activeCtx().filesystems orelse return false;
+    var news = false;
+    var index: usize = 0;
+    while (index < watches.items.len) {
+        const held = &watches.items[index];
+        const heard = router.pollInvalidation(held.ref) catch {
+            router.closeWatch(held.ref) catch {};
+            _ = watches.swapRemove(index);
+            continue;
+        };
+        if (heard != null and !held.changed) {
+            held.changed = true;
+            news = true;
+        }
+        index += 1;
+    }
+    return news;
+}
+
+/// Every watch `plugin` holds ends (it is unloading).
+pub fn closeWatches(plugin: *WasmPlugin) void {
+    if (plugin.ctx.filesystems) |router| {
+        for (plugin.semantic_watches.items) |held| router.closeWatch(held.ref) catch {};
+    }
+    plugin.semantic_watches.clearRetainingCapacity();
+}
+
 test "typed filesystem plans cannot cross the target root boundary" {
     const root: fs.contract.Root = .{ .authority = .here, .slot = 1, .generation = 2 };
     const foreign: fs.contract.Root = .{ .authority = .here, .slot = 3, .generation = 4 };

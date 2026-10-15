@@ -29,13 +29,6 @@ pub const kv_file = @import("kv_file.zig");
 pub const proc = @import("proc.zig");
 pub const subbuffer = @import("subbuffer.zig");
 pub const register = @import("register.zig");
-/// BUILT AHEAD, NOT YET WIRED. The local tier of `fs.watch` (inotify): 387
-/// lines, 3 tests, and nothing in this tree calls it — core does not import it
-/// and no consumer names `core.watch`. It stays exported because this line is
-/// its ONLY reachability: prune it and the code and its tests leave the build
-/// entirely. Kept visible rather than quietly dropped, because "unwired" and
-/// "unwanted" are different claims and only the author can make the second.
-pub const watch = @import("watch.zig");
 pub const Editor = @import("Editor.zig");
 /// A text entry as a frame reads it, at one revision (doc/model.md §2.7).
 pub const TextSnapshot = @import("TextSnapshot.zig");

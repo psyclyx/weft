@@ -326,6 +326,8 @@ pub extern "weft:abi/1" fn wl_semantic_fs_publish_child_file(request_ptr: u32, r
 pub extern "weft:abi/1" fn wl_semantic_fs_capabilities(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_semantic_fs_list(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_semantic_fs_apply(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, plan_ptr: u32, plan_len: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_semantic_fs_watch(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, on: u32) i32;
+pub extern "weft:abi/1" fn wl_semantic_fs_changed(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32) i32;
 // D2's generic, schema-directed slot verbs (doc/d2-schema-payloads.md §3.2).
 pub extern "weft:abi/1" fn wl_slot_declare(name_ptr: u32, name_len: u32, shape: u32, composition: u32, schema_ptr: u32, schema_len: u32) void;
 pub extern "weft:abi/1" fn wl_slot_bind(name_ptr: u32, name_len: u32, pred_ptr: u32, pred_len: u32, tier: u32, priority: i32) void;

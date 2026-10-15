@@ -10,6 +10,7 @@ const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 const pty_doors = @import("pty.zig");
 const async_loop = @import("../async.zig");
+const semantic_fs_doors = @import("semantic_fs.zig");
 
 /// Fire the activation event (design §3): tell a plugin a buffer with `path`
 /// took focus, so it can attach language keymaps/facts. A no-op for a plugin
@@ -25,11 +26,16 @@ pub fn notifyActivate(p: *WasmPlugin, path: []const u8) void {
 /// A plugin "registers" interest by opening a raw proc stream (`wl_proc_spawn`);
 /// the host calls its `on_poll` export ONLY when one of those streams has bytes
 /// pending. So idle plugins (and every plugin without a stream) cost nothing —
-/// this is readiness-driven, not a blind per-frame poll. Returns whether it ran.
+/// this is readiness-driven, not a blind per-frame poll. A directory the
+/// plugin watches (`wl_semantic_fs_watch`) that changed is ready too.
+/// Returns whether it ran.
 pub fn notifyPollIfReady(p: *WasmPlugin) bool {
-    const ready = for (p.resources.streams.slice()) |maybe| {
+    // Asked every time, first: polling a watch is what drains it.
+    const watched = semantic_fs_doors.pollWatches(p);
+    const streamed = for (p.resources.streams.slice()) |maybe| {
         if (maybe) |s| if (s.pending() > 0) break true;
     } else pty_doors.anyPtyReady(p) or pty_doors.anyExtentMoved(p);
+    const ready = watched or streamed;
     if (!ready) return false;
     notifyPoll(p);
     return true;

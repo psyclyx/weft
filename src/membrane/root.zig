@@ -509,6 +509,8 @@ pub const imports = [_]Entry{
     .{ .name = "wl_semantic_fs_capabilities", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "query provider capabilities for a live semantic target revision" },
     .{ .name = "wl_semantic_fs_list", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "list the filesystem directory attached to a live semantic target revision" },
     .{ .name = "wl_semantic_fs_apply", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_write, .doc = "apply a bounded typed filesystem plan against a live semantic target revision" },
+    .{ .name = "wl_semantic_fs_watch", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "watch (1) or stop watching (0) the directory a live semantic target revision lists; a change raises `on_poll`, and `wl_semantic_fs_changed` says which; local directories only (another authority: -3, not watched); 0 ok, negative a transport status" },
+    .{ .name = "wl_semantic_fs_changed", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "whether the watched directory of this target revision changed since last asked (1, and the flag clears) or not (0); -1 not watched" },
 
     // ── slot.zig — D2's generic, schema-directed membrane verbs ────────
     // (doc/d2-schema-payloads.md §3.2). These four carry `(SchemaRef
@@ -593,7 +595,7 @@ pub const exports = [_]Export{
     .{ .name = "on_pick_accept", .params = &.{.i32}, .results = &.{}, .required = true, .doc = "a fuzzy pick this plugin opened was accepted, tagged by pick_id" },
     .{ .name = "on_menu", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a menu mode this plugin owns was entered (1) or left (0)" },
     .{ .name = "on_activate", .params = &.{}, .results = &.{}, .required = false, .doc = "a buffer took focus (path readable via wl_activate_path during the call)" },
-    .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when something this plugin holds is ready — a raw proc stream or a pty with output pending, a pty whose child ended, a grid entry of its the last frame gave a new extent, or an entry holding a grid closed" },
+    .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when something this plugin holds is ready — a raw proc stream or a pty with output pending, a pty whose child ended, a grid entry of its the last frame gave a new extent, an entry holding a grid closed, or a directory it watches (wl_semantic_fs_watch) changed" },
     .{ .name = "on_signal", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a named signal this plugin subscribed to (by id) was raised; at the frame boundary, never inside a dispatch" },
     .{ .name = "on_context_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "keys of the head's primary context moved (entry, mode, offers, a published key…; wl_context_changed lists them); at most once per frame, after layout, never inside a dispatch" },
     .{ .name = "on_subject_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "a subject this plugin watches (wl_subject_watch) reads differently; bound to the subject's entry for the call, so the document doors read it; at the frame boundary, once per moved subject, never inside a dispatch" },
@@ -636,9 +638,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 276; // +1 wl_buffer_docked (a buffer switcher lists documents, not chrome), +1 wl_signal_emit_after (debounced signals)
+const max_import_count: usize = 278; // +1 wl_buffer_docked (a buffer switcher lists documents, not chrome), +1 wl_signal_emit_after (debounced signals), +2 wl_semantic_fs_watch + wl_semantic_fs_changed (a listing follows its directory on disk)
 const max_export_count: usize = 22;
-const max_semantic_operation_count: usize = 296; // +1: wl_buffer_docked
+const max_semantic_operation_count: usize = 298; // +1 wl_buffer_docked, +2 wl_semantic_fs_watch + wl_semantic_fs_changed
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;

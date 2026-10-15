@@ -47,6 +47,16 @@ pub const SemanticFileRegistration = struct {
     router: *fs_runtime.Router,
 };
 
+/// One directory this plugin watches (`wl_semantic_fs_watch`): the target
+/// revision it named, the provider's watch, and whether a change is waiting
+/// for `wl_semantic_fs_changed` to take it.
+pub const SemanticWatch = struct {
+    target: semantic_model.target.Ref,
+    revision: u64,
+    ref: @import("weft_fs").contract.WatchRef,
+    changed: bool = false,
+};
+
 /// Resolves a buffer's live tree-sitter `Syntax` (kept opaque in the shell's
 /// `Buffer.frontend`) — the host provides this so the membrane can expose
 /// structural reads without core learning the frontend's shape. Mirrors
@@ -423,6 +433,9 @@ semantic_directories: std.ArrayList(fs_runtime.publication.ChildRegistration) = 
 /// filesystem authority.
 semantic_files: std.ArrayList(SemanticFileRegistration) = .empty,
 
+/// The directories this plugin watches (`wasm_host/semantic_fs.zig`).
+semantic_watches: std.ArrayList(SemanticWatch) = .empty,
+
 // ── Sandboxed semantic transfer attachments ──
 /// Guest references are owner-scoped and are revoked with this plugin. Host
 /// transfer owners retain the resolved resource independently.
@@ -796,6 +809,9 @@ pub fn deinit(self: *WasmPlugin) void {
     // ordinary answer), then the acceptor's cleanup frees the binding.
     self.cancelOwnPick();
     @import("../wasm_host/projection.zig").release(self);
+    // Watches first: they name roots the publications below release.
+    @import("../wasm_host/semantic_fs.zig").closeWatches(self);
+    self.semantic_watches.deinit(gpa);
     // Semantic resources hold provider pointers into this plugin. Revoke the
     // whole owner namespace while the guest instance is still alive; every
     // retained handle becomes stale before either side can dangle.

@@ -3349,6 +3349,23 @@ pub fn semanticFsList(gpa: std.mem.Allocator, target: semantic.target.Ref, revis
     }
 }
 
+/// Hear about changes on disk to the directory a live target revision lists
+/// (`on`), or stop (`!on`; not watched is not an error). A change raises
+/// `on_poll`; `semanticFsChanged` then says which watched directory it was.
+/// Only this host's own directories are watched: another authority answers
+/// `error.Unsupported`, and its listing is re-read only when asked.
+pub fn semanticFsWatch(target: semantic.target.Ref, revision: u64, on: bool) SemanticFsError!void {
+    const wire = target.toWire();
+    try semanticFsError(e.wl_semantic_fs_watch(wire.authority, wire.slot, wire.generation, semanticFsRevisionLow(revision), semanticFsRevisionHigh(revision), @intFromBool(on)));
+}
+
+/// Whether the watched directory of this target revision changed since it
+/// was last asked — asking clears it. False when it is not watched.
+pub fn semanticFsChanged(target: semantic.target.Ref, revision: u64) bool {
+    const wire = target.toWire();
+    return e.wl_semantic_fs_changed(wire.authority, wire.slot, wire.generation, semanticFsRevisionLow(revision), semanticFsRevisionHigh(revision)) == 1;
+}
+
 /// Apply a canonical typed plan against the exact target revision.  Cross-root
 /// sources are rejected by the host until a provider supplies an explicit
 /// durable lease; this wrapper therefore carries no ambient root capability.
