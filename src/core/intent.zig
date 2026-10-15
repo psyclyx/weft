@@ -196,7 +196,10 @@ const core_offers = [_]CoreOffer{
     // listing applies its draft), so the gate is theirs and holding text is
     // not a precondition.
     .{ .intention = "std.persistence.save", .command = "file.save", .needs_text = false, .gate = .persists },
-    .{ .intention = "std.editing.insert-line-break", .command = "edit.insert-newline" },
+    // The line break is an ACTION (`edit.break-line`): what breaking a line
+    // means in a text entry — carrying its indentation over, say — is its
+    // providers' call; core's own is the bare newline.
+    .{ .intention = "std.editing.insert-line-break", .command = "edit.break-line" },
     .{ .intention = "std.input.break-out", .command = "mode.break-out", .needs_text = false },
     // Its inverse: absent unless the entry broke out of a capture it can
     // resume, so a grammar can put it ahead of its own insert on one key.

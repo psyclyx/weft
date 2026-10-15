@@ -576,6 +576,12 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     if (dot_recording and !core.pointer.isPointerSpec(spec)) dotRecord(&ctx.head.dot, spec, commit);
     defer if (dot_recording) dotBoundary(ctx);
 
+    // The typing hooks hear what this key TYPED — or that it ended the
+    // typing — once the key has done whatever it does, and before the
+    // repeat boundary, so what they change is part of the key.
+    const typing = ctx.keymap.typing_hooks.count() > 0 and ctx.keymap.commitCommand(ctx.head.currentMode()) != null;
+    defer if (typing) afterTyping(ctx, commit);
+
     // Mid-chord META keys act on the which-key overlay, NOT the sequence:
     //  · Backspace steps BACK one key of the pending chord (pop a level).
     //  · a NAV key (page down/up — `menu-nav` in defaults.js) pages the hint and
@@ -723,6 +729,35 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     _ = core.command.run(ctx.commands, ctx, commit_cmd, &.{.{ .string = commit.bytes }}) catch |err| {
         std.log.warn("{s} failed: {t}", .{ commit_cmd, err });
     };
+}
+
+// ── Typing hooks (`Keymap.typing_hooks`) ─────────────────────────────
+
+/// After a key dispatched in a mode that commits text: run each typing hook
+/// that hears it — with the text the key committed while the head still
+/// commits text, or with "" — each that asked for it — when the key took it
+/// out of such a mode (the typing ended). A key that only began a chord
+/// typed nothing yet, and a key that committed nothing while typing goes on
+/// is not typing.
+fn afterTyping(ctx: *core.command.Context, commit: core.TextCommit) void {
+    if (ctx.head.pending.len > 0) return;
+    const still = ctx.keymap.commitCommand(ctx.head.currentMode()) != null;
+    const text: []const u8 = if (still) commit.bytes else "";
+    if (still and text.len == 0) return;
+    // By index, with each name copied out: a hook may declare another, and
+    // that may move the table under the iteration.
+    var i: usize = 0;
+    while (i < ctx.keymap.typing_hooks.count()) : (i += 1) {
+        if (!ctx.keymap.typing_hooks.values()[i].hears(text)) continue;
+        var buf: [128]u8 = undefined;
+        const held = ctx.keymap.typing_hooks.keys()[i];
+        if (held.len > buf.len) continue;
+        @memcpy(buf[0..held.len], held);
+        const name = buf[0..held.len];
+        _ = core.command.run(ctx.commands, ctx, name, &.{.{ .string = text }}) catch |err| {
+            std.log.warn("typing hook {s} failed: {t}", .{ name, err });
+        };
+    }
 }
 
 // ── Capture (architecture §10.4) ─────────────────────────────────────

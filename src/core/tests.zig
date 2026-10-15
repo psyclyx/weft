@@ -605,6 +605,34 @@ test "editor: insert-text through the edit door types at every selection, and re
     try expectEdText(gpa, ed, "x y");
 }
 
+test "editor: the typing keys are actions whose floor is the bare character, and seal-undo cuts after the edit before it" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try testHost(gpa, &host);
+    defer host.deinit(gpa);
+    const ed = host.editor();
+
+    // No provider says more: Return's break is a newline, Tab a tab,
+    // Backspace one character.
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "a" }});
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.break-line", &.{});
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.tab", &.{});
+    try expectEdText(gpa, ed, "a\n\t");
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.backspace", &.{});
+    try expectEdText(gpa, ed, "a\n");
+
+    // A seal right after an edit closes the unit WITH that edit in it: undo
+    // takes back what came after, and only that.
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.seal-undo", &.{});
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "b" }});
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.undo", &.{});
+    try expectEdText(gpa, ed, "a\n");
+
+    // The rule a mode no grammar declared for reads back as `command`.
+    const rule = try core.command.run(&host.commands, &host.ctx, "mode.undo-step", &.{});
+    try t.expectEqualStrings("command", rule.string);
+}
+
 test "editor: vertical movement with goal column, utf-8 safe" {
     const gpa = t.allocator;
     var pool = try task.Pool.init(gpa, .{ .threads = 1 });
