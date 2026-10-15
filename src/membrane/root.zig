@@ -320,6 +320,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_buffer_name", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .buffers, .doc = "the `i`-th open buffer's name, into guest memory" },
     .{ .name = "wl_buffer_active", .params = &.{.u32}, .results = &.{.u32}, .group = .buffers, .doc = "whether the `i`-th buffer is the active one" },
     .{ .name = "wl_buffer_readonly", .params = &.{.u32}, .results = &.{.u32}, .group = .buffers, .doc = "whether the `i`-th buffer is read-only" },
+    .{ .name = "wl_buffer_docked", .params = &.{.u32}, .results = &.{.u32}, .group = .buffers, .doc = "whether the `i`-th buffer is what a docked viewport holds (a sidebar's listing, a toolbar) rather than a document" },
     .{ .name = "wl_buffer_path", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .buffers, .doc = "the `i`-th buffer's file backing, into guest memory, or -1 when nothing backs it" },
     .{ .name = "wl_buffer_dirty", .params = &.{.u32}, .results = &.{.i32}, .group = .buffers, .doc = "whether the `i`-th buffer holds edits its file never received; -1 when unanswerable (a projection is never dirty)" },
     .{ .name = "wl_buffer_lang", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .buffers, .doc = "the `i`-th buffer's language (`action.langOfName`: an extension sans dot), into guest memory" },
@@ -633,9 +634,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 274;
+const max_import_count: usize = 275; // +1: wl_buffer_docked (a buffer switcher lists documents, not chrome)
 const max_export_count: usize = 22;
-const max_semantic_operation_count: usize = 295;
+const max_semantic_operation_count: usize = 296; // +1: wl_buffer_docked
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;

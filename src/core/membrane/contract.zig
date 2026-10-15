@@ -222,6 +222,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_buffer_name", .handler = buffers.hBufferName },
     .{ .name = "wl_buffer_active", .handler = buffers.hBufferActive },
     .{ .name = "wl_buffer_readonly", .handler = buffers.hBufferReadonly },
+    .{ .name = "wl_buffer_docked", .handler = buffers.hBufferDocked },
     .{ .name = "wl_buffer_path", .handler = buffers.hBufferPath },
     .{ .name = "wl_buffer_dirty", .handler = buffers.hBufferDirty },
     .{ .name = "wl_buffer_lang", .handler = buffers.hBufferLang },

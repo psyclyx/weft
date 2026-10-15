@@ -1475,6 +1475,12 @@ pub fn bufferActive(i: usize) bool {
 pub fn bufferReadOnly(i: usize) bool {
     return e.wl_buffer_readonly(@intCast(i)) != 0;
 }
+/// Whether the `i`-th buffer is what a docked viewport holds — a sidebar's
+/// listing, a toolbar's strip — rather than a document. A buffer switcher
+/// lists documents; the same listing opened in a pane is one.
+pub fn bufferDocked(i: usize) bool {
+    return e.wl_buffer_docked(@intCast(i)) != 0;
+}
 /// The `i`-th buffer's file backing, or null when nothing backs it (a
 /// scratch, a projection, an entry holding no text). Lands in the shared read
 /// scratch — copy it out before the next read call.

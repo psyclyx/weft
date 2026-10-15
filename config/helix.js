@@ -73,6 +73,11 @@ weft.use("undo");     // the undo history as a tree, docked right when shown (SP
 // ── Values ───────────────────────────────────────────────────────────
 weft.set("lsp", "zig", "zls");
 weft.set("lsp", "go", "gopls");
+weft.set("lsp", "nix", "nixd");
+weft.set("lsp", "fnl", "fennel-ls");
+weft.set("lsp", "lua", "lua-language-server");
+for (const ext of ["js", "mjs", "cjs", "jsx"]) weft.set("lsp", ext, "typescript-language-server --stdio");
+weft.set("lsp", "html", "vscode-html-language-server --stdio");
 // which-key: centered popup, a longer hold before it appears.
 weft.set("which_key", "placement", "center");
 weft.set("which_key", "delay-ms", "350");

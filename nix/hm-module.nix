@@ -135,10 +135,14 @@ in
         gopls
         go
         fennel-ls
+        nixd
+        lua-language-server
+        typescript-language-server
+        vscode-langservers-extracted # vscode-html-language-server
         git
         ripgrep
       ];
-      defaultText = lib.literalExpression "with pkgs; [ zls gopls go fennel-ls git ripgrep ]";
+      defaultText = lib.literalExpression "with pkgs; [ zls gopls go fennel-ls nixd lua-language-server typescript-language-server vscode-langservers-extracted git ripgrep ]";
       description = ''
         Programs weft's plugins run — language servers, formatters, git and
         ripgrep — appended to its PATH. Appended, so a project's own (a direnv

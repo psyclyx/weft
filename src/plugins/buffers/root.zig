@@ -40,6 +40,9 @@ fn bufPick() void {
     var i: usize = 0;
     while (i < count and n_candidates < candidates.len) : (i += 1) {
         const id = weft.bufferId(i) orelse continue;
+        // A docked viewport's own entry (the sidebar's listing, the toolbar)
+        // is chrome, not somewhere to switch to.
+        if (weft.bufferDocked(i)) continue;
         candidates[n_candidates] = .{
             .buffer_index = i,
             .id = id,

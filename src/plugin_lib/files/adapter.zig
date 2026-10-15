@@ -142,6 +142,11 @@ pub const Plugin = struct {
         }
         for (self.sessions.items) |session| {
             if (session.target.eql(request.value.target) and session.target_revision == request.value.revision) {
+                // Opening a directory shows what it holds NOW: a retained
+                // listing (the sidebar's, from an earlier frame) re-reads the
+                // disk first. The refresh keeps a draft — a pending rename
+                // stays — so this costs a listing, never someone's edit.
+                session.refresh(false) catch {};
                 _ = weft.semanticTargetHandlerOpenView(session.view_ref);
                 return;
             }

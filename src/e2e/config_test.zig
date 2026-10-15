@@ -279,6 +279,13 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     var proj: Project = undefined;
     try proj.init(gpa);
     defer proj.deinit();
+    // Seed both capability-varying row kinds so the real files scene has
+    // concrete rows whose advertised target/actions can be checked below.
+    // This remains a test-only observation of the plugin protocol; config and
+    // core do not inspect files roles or dispatch files commands. Seeded
+    // BEFORE boot: the config's sidebar lists this directory from the first
+    // frame, and a listing does not yet follow changes made behind it.
+    _ = try proj.oracle("printf x > plain-file; mkdir -- child-directory");
 
     var ed: Editor = undefined;
     try Editor.init(gpa, &ed);
@@ -459,12 +466,6 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // line reaches them by that one name.
     try t.expect(ed.commands.resolve(semantic.action.standard.open) != null);
     try t.expect(ed.commands.resolve(semantic.action.standard.copy) != null);
-
-    // Seed both capability-varying row kinds so the real files scene has
-    // concrete rows whose advertised target/actions can be checked below.
-    // This remains a test-only observation of the plugin protocol; config and
-    // core do not inspect files roles or dispatch files commands.
-    _ = try proj.oracle("printf x > plain-file; mkdir -- child-directory");
 
     // The sample's ordinary file-group binding reaches the shipped launcher,
     // which delegates to generic target opening. Its observable result is a
@@ -1345,13 +1346,12 @@ fn jsPluginNamed(ed: *Editor, name: []const u8) ?*core.quickjs.JsPlugin {
 }
 
 // The sidebar fragment (doc/cwa-config-decisions.md D1's acceptance gate) as
-// config.js documents it: one `weft.use("sidebar")` line — commented there,
-// because a docked companion is a workspace opinion the reference config
-// declines to hold — declaring viewport attributes plus one `present`, with
-// the workspace doing the rest. window_test drives the resulting sidebar's
-// BEHAVIOR; this gate is about CONFIG: the documented line composes on top of
-// the shipped config exactly as written, and it is pure manifest data until
-// the layout phase realizes it.
+// config.js uses it: one `weft.use("sidebar")` line declaring viewport
+// attributes plus one `present`, with the workspace doing the rest.
+// window_test drives the resulting sidebar's BEHAVIOR; this gate is about
+// CONFIG: the line composes on top of the shipped config exactly as written
+// (using it again replaces the declaration, it does not add one), and it is
+// pure manifest data until the layout phase realizes it.
 test "e2e/config: the sidebar fragment the config documents declares and docks a files companion" {
     const gpa = t.allocator;
     var proj: Project = undefined;
@@ -1364,7 +1364,7 @@ test "e2e/config: the sidebar fragment the config documents declares and docks a
     defer loader.deinit();
     try bootShowcase(gpa, &proj, &ed, &loader);
 
-    // The config's own line, uncommented — the ordinary import verb, sealed
+    // The config's own line once more — the ordinary import verb, sealed
     // eval, no test-only door.
     const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
     defer gpa.free(config_dir);
@@ -1390,7 +1390,8 @@ test "e2e/config: the sidebar fragment the config documents declares and docks a
     // The layout phase realizes it — an ordinary application wake, with no
     // sidebar-specific path anywhere.
     ed.applyWindow();
-    try t.expectEqual(@as(usize, 2), ed.paneCount());
+    // The primary pane, the sidebar, and config.js's toolbar and menubar.
+    try t.expectEqual(@as(usize, 4), ed.paneCount());
     const panel = ed.win_layout.dockedPanel(.left) orelse return error.NoSidebarPane;
     const primary = ed.win_layout.primaryPane() orelse return error.NoPrimaryPane;
     try t.expect(panel != primary);
