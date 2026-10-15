@@ -1012,15 +1012,21 @@ pub const FrameBuilder = struct {
         const cursor_diag = if (editor) |ed| cursorDiag(doc_layers.diagnostics, ed.cursorOffset()) else null;
 
         var pos_buf: [24]u8 = undefined;
+        // Where the entry stands among the open DOCUMENTS — the same set the
+        // tab strip and `buffer.next` walk. What docked chrome holds (the
+        // sidebar's listing, the toolbar) is not counted, and an entry that is
+        // itself chrome has no position to show.
         const buffer_pos = blk: {
             var index: usize = 0;
             var nth: usize = 0;
             var bit2 = fx.buffers.iterator();
             while (bit2.next()) |b| {
+                if (!fx.viewports.isDocument(b)) continue;
                 nth += 1;
                 if (b == abuf) index = nth;
             }
-            break :blk std.fmt.bufPrint(&pos_buf, "{d}/{d}", .{ index, fx.buffers.count() }) catch null;
+            if (index == 0) break :blk null;
+            break :blk std.fmt.bufPrint(&pos_buf, "{d}/{d}", .{ index, nth }) catch null;
         };
         const shared_here = blk: {
             if (fx.conn.*) |*c| {

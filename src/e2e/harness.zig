@@ -994,6 +994,20 @@ pub const Editor = struct {
         return self.win_layout.count();
     }
 
+    /// Number of EDITING panes: those no named viewport owns. A split is one
+    /// more of these; a config's docked chrome (sidebar, toolbar, menubar) is
+    /// none of them, so a test about splitting does not count the config's
+    /// furniture.
+    pub fn editingPaneCount(self: *Editor) usize {
+        var n: usize = 0;
+        self.win_layout.eachPane(&n, struct {
+            fn visit(count: *usize, pane: *window_layout.Pane) void {
+                if (pane.viewport == null) count.* += 1;
+            }
+        }.visit);
+        return n;
+    }
+
     /// Cut this editor over to the selected production renderer on a standard
     /// standard offscreen target (`gfx.headless`: a Vulkan image or a GL context
     /// with no drawable). There is no surface, swapchain, window-system binding,

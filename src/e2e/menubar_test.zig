@@ -320,9 +320,9 @@ test "e2e/menubar: under config.js with the fragment, the same File menu shows v
     try expectKeys(file, "Save As…", "SPC f S");
     try expectKeys(file, "Open File…", "SPC SPC");
     try expectKeys(file, "Save", "C-s");
-    // Text chrome, the config's style: a clean cell box.
-    try t.expectEqual(h.view.chrome.Style.text, (try ed.ensureView()).chrome);
-    shot(&app, "menubar-file-text");
+    // Widget chrome, the config's style: a shadowed, rounded menu.
+    try t.expectEqual(h.view.chrome.Style.widget, (try ed.ensureView()).chrome);
+    shot(&app, "menubar-file-widget");
     ed.press("Escape", "");
     ed.press("Escape", "");
     try t.expect(ed.head.interactions.active() == null);

@@ -267,7 +267,10 @@ test "e2e/status: a pane's own line still says where its entry stands" {
     try core.file.writeBytes(gpa, "m.txt", "hello\n");
     ed.runStr("file.open", "m.txt");
     ed.applyWindow();
-    try frame(&ed);
+    // Past the startup echo ("config.js loaded"): a brief message, which on
+    // a pane narrowed by the config's sidebar would crowd out the line's
+    // quieter chips. This is about what the line says once it has settled.
+    ed.gpa.free(try ed.renderCompositeAt(core.task.nowNs() + 30 * std.time.ns_per_s));
     const line = try lineOf(&ed, try primaryPane(&ed));
     errdefer line.print();
     try t.expect(hasBufferPos(&line));

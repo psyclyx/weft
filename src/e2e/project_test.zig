@@ -684,11 +684,11 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.press("Escape", "");
     ed.chord("SPC w v");
     ed.applyWindow();
-    try t.expectEqual(@as(usize, 2), ed.paneCount());
+    try t.expectEqual(@as(usize, 2), ed.editingPaneCount());
     proj.capture(&ed, "spine-window-split");
     ed.chord("SPC w o");
     ed.applyWindow();
-    try t.expectEqual(@as(usize, 1), ed.paneCount());
+    try t.expectEqual(@as(usize, 1), ed.editingPaneCount());
     ed.run("buffer.scratch");
     ed.press("i", "");
     ed.press("parenleft", "(");

@@ -447,16 +447,12 @@ weft.bind("normal", "C-SPC", "complete.show");
 // SPC-c r/x split (modes.run vs run.line) into one language-aware key; a
 // buffer with no provider echoes "no plugin.code.run provider here".
 // `:action.explain plugin.code.run` says which provider wins here and why.
-weft.action("plugin.code.run");
-weft.provide("plugin.code.run", {}, "run.line");                 // default: run the current line
-weft.provide("plugin.code.run", { lang: "zig" }, "make.build");  // a .zig buffer builds the project
-weft.provide("plugin.code.run", { lang: "py" }, "modes.run");     // python: the language runner
+// The actions and their providers — run the line by default, build a .zig,
+// run a .py or .go; format through fmt — are config/code.js's (used above,
+// shared with ide.js and its toolbar); this file binds the keys.
 weft.bind("normal-source", "SPC e", "plugin.code.run");          // SPC e — eval/run, by language
-
 // format is likewise an action: fmt handles most languages by extension, but a
 // language plugin can weft.provide("plugin.code.format", {lang:"…"}, "…") to override.
-weft.action("plugin.code.format");
-weft.provide("plugin.code.format", {}, "fmt.format-buffer");
 
 // ── SPC o — tools, and the INSTANCING surface ────────────────────────
 // A tool that holds state is instantiable: each start mints its own buffer

@@ -258,7 +258,7 @@ test "e2e/chrome: the toolbar is one row along the top, the pinned entries plus 
     try t.expectEqualStrings("muted", fact(undo, "tone").?);
     try t.expectEqualStrings("std.history.undo", fact(undo, "name").?);
     // The winner rides along — what a tooltip would say.
-    try t.expectEqualStrings("config", fact(button(try toolbarView(ed), "Build").?, "provider").?);
+    try t.expectEqualStrings("import:code", fact(button(try toolbarView(ed), "Build").?, "provider").?);
     // Every button carries its command's icon (doc/chrome.md §1.2) for the
     // styles that draw one: an intention's from the command that answers it
     // here, a pinned command's from itself, an action's from its provider.
@@ -398,7 +398,7 @@ test "e2e/chrome: Send to REPL is on the strip exactly while a REPL is live, wit
     try t.expectEqual(source, ed.buffers.active_id);
     ed.applyWindow();
     try expectStrip(ed, "Save Undo~ Redo~ Palette | Run line Send to REPL | Format Rename");
-    try t.expectEqualStrings("config", fact(button(try toolbarView(ed), "Send to REPL").?, "provider").?);
+    try t.expectEqualStrings("import:code", fact(button(try toolbarView(ed), "Send to REPL").?, "provider").?);
 
     // The button acts on the editor it describes: the source's line goes to
     // the live interpreter, which echoes it into its own buffer.

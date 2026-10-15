@@ -553,10 +553,11 @@ test "e2e/ide: a live REPL is a key of the context — the event names it, a pre
     try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "offerwatch.keys", &.{}), "repl.session") == null);
 
     // Explain and the keypress read the same freshly synced table: both say
-    // the config's provider runs it, and running it sends the line.
+    // the provider config/code.js declares runs it, and running it sends
+    // the line.
     const why = core.intent.explain(ed.ctx, &arms);
     try t.expect(why == .ready);
-    try t.expectEqualStrings("config", why.ready.provider);
+    try t.expectEqualStrings("import:code", why.ready.provider);
     try t.expect(offered(ed, "plugin.code.send-to-repl"));
     var refusal: [256]u8 = undefined;
     try t.expect(ed.ctx.intent.?.invokeNamed(ed.ctx, "plugin.code.send-to-repl", &refusal) == .invoked);
