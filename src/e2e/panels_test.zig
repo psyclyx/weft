@@ -493,7 +493,7 @@ test "e2e/panels: ide.js — the dashboard's items are clicked, or Enter'd, with
     try t.expect(ed.pick.active);
 }
 
-test "e2e/panels: only a FILE's edits are unsaved work — a scratch or a REPL closes; quit names what it would lose, and quit-force quits" {
+test "e2e/panels: only a FILE's edits are unsaved work — a scratch or a REPL closes; quit asks about what it would lose, and quit-force quits" {
     const gpa = t.allocator;
     var app: IdeApp = undefined;
     try app.init(gpa);
@@ -515,9 +515,15 @@ test "e2e/panels: only a FILE's edits are unsaved work — a scratch or a REPL c
     const a = ed.buffers.active_id;
     ed.run("buffer.close-unmodified");
     try t.expect(ed.buffers.get(a) != null);
-    ed.run("app.quit");
+    // Quitting ASKS (ide.js loads `buffers`, whose `app.quit` provider asks),
+    // naming the file; Escape keeps everything.
+    ed.press("C-q", "");
     try t.expect(!ed.session.system.quit);
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "a.txt") != null);
+    try t.expect(ed.pick.active);
+    try t.expect(std.mem.indexOf(u8, ed.pick.prompt, "a.txt") != null);
+    ed.press("Escape", "");
+    try t.expect(!ed.pick.active);
+    try t.expect(!ed.session.system.quit);
     ed.run("app.quit-force");
     try t.expect(ed.session.system.quit);
 }

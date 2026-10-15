@@ -52,6 +52,7 @@ File	open	5	Open…	file.open
 File	open	6	Open Recent…	project.open-recent
 File	open	60	Browse Remote Files…	file.browse-remote
 File	save	10	Save	file.save
+File	save	15	Save All	file.save-all
 File	save	20	Save As…	file.save-as
 File/Notes	embeds	1	Show Note Embeds	notes.show-embeds
 File/Notes	embeds	2	Hide Note Embeds	notes.hide-embeds

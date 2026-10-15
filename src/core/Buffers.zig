@@ -108,6 +108,11 @@ closed: std.ArrayList(u64) = .empty,
 /// publishes grids hears that one of its entries went (a terminal's tab
 /// closed), so it can end what fed it. Compared, never interpreted.
 grid_closes: u32 = 0,
+/// A command waiting for saves to land (`file.when-saved`, `unsaved.zig`),
+/// or null. The frame runs or drops it once they settle.
+after_saves: ?@import("unsaved.zig").AfterSaves = null,
+/// The `app.unsaved` listing, rebuilt per call and borrowed until the next.
+unsaved_listing: std.ArrayList(u8) = .empty,
 
 pub const parked_cap = 16;
 
@@ -521,6 +526,8 @@ pub fn deinit(self: *Buffers, gpa: Allocator) void {
     self.parked.deinit(gpa);
     self.documents.deinit(gpa);
     self.closed.deinit(gpa);
+    if (self.after_saves) |*waiting| waiting.deinit(gpa);
+    self.unsaved_listing.deinit(gpa);
     gpa.free(self.user_agent);
     gpa.free(self.default_mode);
     for (&self.posture_modes.values) |mode| gpa.free(mode);

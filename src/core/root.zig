@@ -98,6 +98,9 @@ pub const flash = @import("flash.zig");
 /// A head's position history and its travel (C-o/C-i), anchored so entries
 /// survive edits.
 pub const jumplist = @import("jumplist.zig");
+/// Unsaved work across every entry: quitting, save-all, and running a command
+/// once the saves in flight land.
+pub const unsaved = @import("unsaved.zig");
 pub const designation = @import("designation.zig");
 /// A head's system clipboard: an in-memory store, or the platform's once the
 /// shell installs a backend.

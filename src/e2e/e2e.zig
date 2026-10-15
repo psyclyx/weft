@@ -52,4 +52,5 @@ test {
     _ = @import("command_identity_test.zig");
     _ = @import("status_test.zig");
     _ = @import("undo_test.zig");
+    _ = @import("quit_test.zig");
 }

@@ -468,6 +468,9 @@ pub fn tickAsync(
                 dirty = true;
             };
         }
+        // What waited on those saves (`file.when-saved` — save-all, then
+        // quit) runs once they have all landed, or is dropped if one failed.
+        if (try core.unsaved.settle(cmd_ctx)) dirty = true;
     }
     // Drive any async pick source (completion race-and-refine, file
     // finder, dir browser) — a no-op for a static or source-less

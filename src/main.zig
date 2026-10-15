@@ -753,8 +753,9 @@ pub fn main(init: std.process.Init) !void {
         while (whead.window.nextPointerEvent()) |ev| {
             try whead.dispatchPointer(&application, ev);
         }
-        // The window's close button is a quit like any other: it refuses,
-        // and says why, while anything unsaved would be lost.
+        // The window's close button (⌘Q and the Dock's Quit, on a Mac) is a
+        // quit like any other: the `app.quit` action, whose provider asks
+        // about anything unsaved — or, with none loaded, refuses and says why.
         if (whead.window.takeCloseRequest()) {
             _ = core.command.run(&session.system.commands, &session.cmd_ctx, "app.quit", &.{}) catch {};
             if (session.system.quit) break;

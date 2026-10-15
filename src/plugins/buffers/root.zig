@@ -5,10 +5,14 @@
 //! names and under a buffer closing mid-pick), `buffer.scratch` opens a fresh
 //! scratch. The plain next/close/save verbs stay the core primitives a config
 //! binds directly.
+//!
+//! And quitting with unsaved buffers ASKS (`quit.zig`): `buffer.quit-asking`
+//! provides the `app.quit` action over core's floor, which only refuses.
 
 const std = @import("std");
 const weft = @import("weft");
 const ordering = @import("order.zig");
+const quit = @import("quit.zig");
 
 const buf_pick = 0;
 
@@ -18,6 +22,7 @@ var order: [1024]usize = undefined;
 const cmds = [_]weft.CommandEntry{
     .{ .name = "buffer.pick", .arity = .whole, .call = bufPick, .summary = "Switch to another open buffer.", .label = "Switch Editor", .menu = "Go", .group = "buffers", .order = 1, .prompts = true },
     .{ .name = "buffer.scratch", .arity = .whole, .call = bufScratch, .summary = "Open a new, untitled scratch buffer.", .label = "New File", .menu = "File", .group = "new", .order = 1, .icon = "file-plus" },
+    .{ .name = "buffer.quit-asking", .arity = .whole, .call = quit.quit, .summary = "Quit, asking whether to save, discard or keep anything unsaved.", .internal = true },
 };
 
 fn onPickAccept(pick_id: u32) void {
@@ -81,6 +86,11 @@ fn bufScratch() void {
     weft.runStr("buffer.create", "*scratch*");
 }
 
+/// Over core's floor (priority -1), everywhere: the quit that asks.
+fn init() void {
+    weft.provide("app.quit", .{ .all = &.{} }, "buffer.quit-asking", 0);
+}
+
 comptime {
-    weft.plugin(&cmds, .{ .pick = onPickAccept }).exportAll();
+    weft.plugin(&cmds, .{ .pick = onPickAccept, .init = init }).exportAll();
 }

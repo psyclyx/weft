@@ -457,8 +457,8 @@ static uint8_t otherButton(NSInteger number) {
     postWakeEvent();
 }
 
-// The window's close button asks; weft decides (it may refuse while work is
-// unsaved), so the window never closes itself.
+// The window's close button asks; weft decides (it asks in turn, or refuses,
+// while work is unsaved), so the window never closes itself.
 - (BOOL)windowShouldClose:(NSWindow*)sender {
     [self requestClose];
     return NO;
