@@ -592,8 +592,8 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // The typing hooks hear what this key TYPED — or that it ended the
     // typing — once the key has done whatever it does, and before the
     // repeat boundary, so what they change is part of the key.
-    const typing = ctx.keymap.typing_hooks.count() > 0 and ctx.keymap.commitCommand(ctx.head.currentMode()) != null;
-    defer if (typing) afterTyping(ctx, commit);
+    const hooks_hear = ctx.keymap.typing_hooks.count() > 0 and ctx.keymap.commitCommand(ctx.head.currentMode()) != null;
+    defer if (hooks_hear) afterTyping(ctx, commit);
 
     // Mid-chord META keys act on the which-key overlay, NOT the sequence:
     //  · Backspace steps BACK one key of the pending chord (pop a level).
