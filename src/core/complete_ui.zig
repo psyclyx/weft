@@ -10,6 +10,16 @@
 //! folds new results in and closing the pick cancels the caps session —
 //! one drive loop, no bespoke tick call in the frame loop.
 //!
+//! Two ways to open the same list. `complete.show` takes the keyboard (the
+//! "pick" mode): what you type narrows the query, and accepting replaces the
+//! prefix it was fired with. `complete.show-inline` does not (an INLINE pick,
+//! `pick.InlineKeys`): typing goes on into the buffer, the query is the word
+//! being typed read back off it each frame, and the popup closes itself once
+//! it describes nothing being typed — the caret left the word, the mode was
+//! left, nothing matches, or the one match is what is already there. Deciding
+//! WHEN to open it is not here: that is an auto-trigger's policy, and the
+//! `complete` plugin holds it.
+//!
 //! Stale policy (declared): completion items are plain text — if peer
 //! commits land while the popup is open, accepted text still inserts at
 //! the *current* cursor, which is the only honest interpretation; range
@@ -21,6 +31,7 @@ const Allocator = std.mem.Allocator;
 const command = @import("command.zig");
 const capability = @import("capability.zig");
 const Buffers = @import("Buffers.zig");
+const Editor = @import("Editor.zig");
 const pick_mod = @import("pick.zig");
 const task = @import("task.zig");
 
@@ -34,8 +45,25 @@ pub const CompletionUi = struct {
     /// Stashed at fire time so the source's `close` (which gets no ctx)
     /// can cancel the session when the pick is dismissed.
     caps: ?*capability.Caps = null,
+    /// The popup on screen (or last on screen) is INLINE
+    /// (`complete.show-inline`): typing goes on into the buffer and the query
+    /// is read back off it. Kept past close — `accept` runs after the pick
+    /// has closed, and replaces what was typed rather than the fired prefix.
+    inline_open: bool = false,
+    /// Inline: where the word being completed begins. The popup lives while
+    /// the caret stays in one run of word bytes from here.
+    word_start: usize = 0,
+    /// Inline: the mode the popup was opened in. Leaving it (vim's Escape out
+    /// of insert) is leaving the typing the popup was about.
+    mode_buf: [64]u8 = undefined,
+    mode_len: usize = 0,
 
     pub const empty: CompletionUi = .{};
+
+    /// The key layers an inline popup answers through (`pick.InlineKeys`):
+    /// config binds `complete` (move, dismiss) and `complete-chosen` (accept,
+    /// only once a row was chosen). Core binds neither.
+    pub const inline_keys: pick_mod.InlineKeys = .{ .base = "complete", .chosen = "complete-chosen" };
 
     pub fn commandSpec(self: *CompletionUi) command.Command {
         return .{
@@ -48,22 +76,60 @@ pub const CompletionUi = struct {
         };
     }
 
+    /// The door an auto-trigger opens: the same race, drawn at the word being
+    /// typed WITHOUT taking the keyboard (`pick.InlineKeys`). When to open it
+    /// — after how many characters, after what pause, on which trigger
+    /// characters, never in a comment — is the caller's; the `complete`
+    /// plugin is one such caller.
+    pub fn inlineCommandSpec(self: *CompletionUi) command.Command {
+        return .{
+            .name = "complete.show-inline",
+            .summary = "Show completions for the word being typed, while typing goes on into the buffer.",
+            .args = &.{},
+            .handler = inlineHandler,
+            .data = self,
+            .meta = .{ .label = "Show Completions While Typing", .internal = true },
+        };
+    }
+
     fn fireHandler(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
         _ = args;
         const self: *CompletionUi = @ptrCast(@alignCast(data.?));
+        try self.fire(ctx, false);
+        return .nil;
+    }
+
+    fn inlineHandler(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
+        _ = args;
+        const self: *CompletionUi = @ptrCast(@alignCast(data.?));
+        // Whatever is open is the person's — a picker, the modal popup, or
+        // this word's inline list already showing. An inline popup displaces
+        // none of them.
+        if (ctx.head.pick.active) return .nil;
+        // Inline means the typing goes on into the buffer; where typing
+        // commits nothing (a normal mode) there is no typing to follow.
+        if (ctx.head.commitCommand(ctx.keymap) == null) return .nil;
+        try self.fire(ctx, true);
+        return .nil;
+    }
+
+    fn fire(self: *CompletionUi, ctx: *command.Context, inline_popup: bool) !void {
         if (self.session) |old| {
             ctx.caps.finish(old);
             self.session = null;
         }
         self.caps = ctx.caps;
         const buffer = ctx.buffer();
-        const editor = buffer.textEditor() orelse return .nil;
+        const editor = buffer.textEditor() orelse return;
+        const mode = ctx.head.currentMode();
+        if (inline_popup and mode.len > self.mode_buf.len) return;
         const prefix = try editor.wordPrefix(ctx.gpa);
         defer ctx.gpa.free(prefix);
+        const cursor = editor.cursorOffset();
         const id = try ctx.fireRace(.completion, &editor.doc, editor.backingPath(), .{
-            .offset = editor.cursorOffset(),
+            .offset = cursor,
             .text = prefix,
-        }) orelse return .nil;
+        }) orelse return;
         errdefer ctx.caps.finish(id);
         const plen = prefix.len;
         // Open with the source BEFORE recording the session, so a failed
@@ -72,15 +138,50 @@ pub const CompletionUi = struct {
         try ctx.head.pick.openWith(ctx, "complete", &.{}, .{
             .handler = accept,
             .data = self,
-        }, .{ .source = self.source(), .category = "complete" });
-        // Draw the completion list as a popup AT the caret, not the bottom dock.
-        ctx.head.pick.caret_anchor = editor.cursorOffset();
+        }, .{
+            .source = self.source(),
+            .category = "complete",
+            .inline_keys = if (inline_popup) inline_keys else null,
+        });
+        // Draw the completion list as a popup AT the caret, not the bottom
+        // dock — inline, at the word's start, so it holds still while the
+        // word grows under it.
+        ctx.head.pick.caret_anchor = if (inline_popup) cursor - plen else cursor;
         self.session = id;
         self.buffer = buffer.ref();
         self.prefix_len = plen;
+        self.inline_open = inline_popup;
+        self.word_start = cursor - plen;
+        if (inline_popup) {
+            @memcpy(self.mode_buf[0..mode.len], mode);
+            self.mode_len = mode.len;
+        }
         // Surface instant-tier results (they answered during fire) now.
         _ = try poll(self, ctx);
-        return .nil;
+    }
+
+    /// Inline: follow the typing. The query is the word from `word_start` to
+    /// the caret, read back off the buffer. False when the popup no longer
+    /// describes anything being typed: the mode was left, or the caret is out
+    /// of the word (a non-word byte typed, a jump, a deletion past its start).
+    fn followTyping(self: *CompletionUi, ctx: *command.Context, editor: *Editor) !bool {
+        if (!std.mem.eql(u8, ctx.head.currentMode(), self.mode_buf[0..self.mode_len])) return false;
+        const cursor = editor.cursorOffset();
+        if (cursor < self.word_start) return false;
+        const word = try editor.wordPrefix(ctx.gpa);
+        defer ctx.gpa.free(word);
+        if (cursor - self.word_start != word.len) return false;
+        _ = try ctx.head.pick.setQuery(ctx.gpa, word);
+        return true;
+    }
+
+    /// Inline: close rather than hang about. Every provider has answered and
+    /// nothing matches what is typed — or the one match left IS what is
+    /// typed, so there is nothing to complete it to.
+    fn nothingToOffer(self: *const CompletionUi, p: *const pick_mod.Pick) bool {
+        const rows = p.filtered.items;
+        if (rows.len == 0) return self.session == null;
+        return rows.len == 1 and std.mem.eql(u8, p.items.items[rows[0]], p.query.items);
     }
 
     pub fn source(self: *CompletionUi) pick_mod.Source {
@@ -103,6 +204,26 @@ pub const CompletionUi = struct {
             try ctx.head.pick.dismiss(ctx);
             return true;
         }
+        if (self.inline_open) {
+            const editor = buffer.textEditor() orelse {
+                try ctx.head.pick.dismiss(ctx);
+                return true;
+            };
+            if (!try self.followTyping(ctx, editor)) {
+                try ctx.head.pick.dismiss(ctx);
+                return true;
+            }
+        }
+        const changed = try self.fold(ctx);
+        if (self.inline_open and self.nothingToOffer(&ctx.head.pick)) {
+            try ctx.head.pick.dismiss(ctx);
+            return true;
+        }
+        return changed;
+    }
+
+    /// Fold the session's newly arrived results into the live pick.
+    fn fold(self: *CompletionUi, ctx: *command.Context) !bool {
         const id = self.session orelse return false;
         const s = ctx.caps.session(id) orelse {
             self.session = null;
@@ -201,7 +322,14 @@ pub const CompletionUi = struct {
         if (buffer != ctx.buffer()) return;
         const editor = buffer.textEditor() orelse return;
         const cur = editor.cursorOffset();
-        const start = cur -| self.prefix_len;
+        // Inline, what was typed since the fire is in the buffer too: the
+        // whole word before the caret is what the choice replaces.
+        const typed = if (self.inline_open) blk: {
+            const word = try editor.wordPrefix(ctx.gpa);
+            defer ctx.gpa.free(word);
+            break :blk word.len;
+        } else self.prefix_len;
+        const start = cur -| typed;
         // The one edit door: authored by the invoking principal and grade
         // -gated (a view peer's accept is refused, leaving no ghost). Which
         // undo step the accept belongs to is the grammar's declaration, cut

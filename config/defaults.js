@@ -19,6 +19,24 @@ weft.bind("pick", "Tab", "pick.complete");
 weft.bind("pick", "C-j", "pick.accept-input");
 weft.bind("pick", "S-Return", "pick.accept-input");
 
+// ── Completion while typing (the "complete" layers) ──────────────────
+// The popup that opens by itself as you type (`complete.show-inline`) does
+// not take the keyboard: typing goes on into the buffer. Dispatch offers a
+// key to these two layers first — "complete-chosen" only once you have moved
+// through the list — and anything they leave unbound is your grammar's. So
+// Return types a newline until you pick a row, and only then accepts it.
+// Closing it is each grammar's: in a modal one Escape leaves insert, which
+// closes the popup with it (one press, the way nvim-cmp and helix do it); a
+// modeless config binds Escape to close the popup alone (ide.js).
+weft.bind("complete", "Tab", "pick.next");
+weft.bind("complete", "S-Tab", "pick.prev");
+weft.bind("complete", "ISO_Left_Tab", "pick.prev"); // Shift+Tab, as xkb names it
+weft.bind("complete", "Down", "pick.next");
+weft.bind("complete", "Up", "pick.prev");
+weft.bind("complete", "C-n", "pick.next");
+weft.bind("complete", "C-p", "pick.prev");
+weft.bind("complete-chosen", "Return", "pick.accept");
+
 // ── which-key navigation keys ─────────────────────────────────────────
 // META keys that act on the which-key hint while you're mid-chord, WITHOUT
 // dead-ending the sequence: dispatch consults this "menu-nav" layer before

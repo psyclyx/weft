@@ -239,6 +239,16 @@ weft.bind("ide", "F12", "lsp.goto-definition");
 weft.bind("ide", "S-F12", "lsp.references");
 weft.bind("ide", "C-period", "lsp.code-actions");
 weft.bind("ide", "C-space", "complete.show");
+// Suggestions pop up by themselves as you type: after `auto-prefix` word
+// characters and an `auto-delay` ms pause, at once after a language server's
+// trigger character (`.`), never in a comment or a string. Typing goes on
+// into the editor; Tab / arrows move through the list, Return accepts only a
+// row you moved to, and Escape closes it (the "complete" layers, defaults.js).
+weft.set("complete", "auto", "on");        // "off": only C-space opens it
+weft.set("complete", "auto-prefix", "2");  // word characters before it pops up
+weft.set("complete", "auto-delay", "120"); // ms of pause first
+weft.set("complete", "auto-quiet-in", ["comment", "string"]);
+weft.bind("complete", "Escape", "pick.cancel");
 weft.bind("ide", "C-S-b", "plugin.code.run");   // build / run, by language
 weft.bind("ide", "M-S-f", "plugin.code.format");  // format the buffer
 

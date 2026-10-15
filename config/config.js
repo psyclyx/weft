@@ -446,6 +446,19 @@ weft.bind("normal-source", "SPC c x", "run.line");
 // C-SPC from insert (where you're typing) and normal (browse from rest).
 weft.bind("insert", "C-SPC", "complete.show");
 weft.bind("normal", "C-SPC", "complete.show");
+// …and it pops up by itself as you type (the `complete` plugin's policy):
+// once a word is `auto-prefix` characters long and typing has paused for
+// `auto-delay` ms, or at once after a language server's trigger character
+// (`.`), never inside a comment or a string (`auto-quiet-in`). The popup
+// leaves the keys to vim: Tab / C-n / C-p / arrows move through it, Return
+// accepts only a row you moved to, Escape leaves insert (closing it), and C-e
+// closes it where you are (nvim-cmp's key). The rest of the "complete" layers
+// are in defaults.js.
+weft.set("complete", "auto", "on");        // "off": only C-SPC opens it
+weft.set("complete", "auto-prefix", "2");  // word characters before it pops up
+weft.set("complete", "auto-delay", "120"); // ms of pause first
+weft.set("complete", "auto-quiet-in", ["comment", "string"]);
+weft.bind("complete", "C-e", "pick.cancel");
 
 // ── Actions: abstract intents resolved by CONTEXT ────────────────────
 // The dispatch middle tier. weft.action(name) declares an intent a key binds
