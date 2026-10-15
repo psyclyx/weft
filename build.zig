@@ -1290,6 +1290,16 @@ pub fn build(b: *std.Build) void {
     const regex_lib_tests = b.addTest(.{ .root_module = regex_lib });
     test_step.dependOn(&b.addRunArtifact(regex_lib_tests).step);
 
+    // The `indent` plugin's pure half — unit specs, detection from a file's
+    // lines, the bracket reading, `.editorconfig` globs — imports no `weft`,
+    // so it is tested natively too (`editorconfig.zig` imports the rest).
+    const indent_pure = b.createModule(.{
+        .root_source_file = b.path("src/plugins/indent/editorconfig.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = indent_pure })).step);
+
     // The offer arrangement chrome shares (group, order) is plain data too.
     const affordances_lib = b.createModule(.{
         .root_source_file = b.path("src/plugin_lib/affordances/root.zig"),

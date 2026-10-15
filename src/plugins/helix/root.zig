@@ -644,8 +644,8 @@ fn initExtra() void {
 
     // Only insert commits typed text; helix-normal is modal and declares
     // nothing, so nothing can leak into it. `helix-insert` falls back to the
-    // core `default` floor for its BINDINGS (Return -> edit.insert-newline, the
-    // std.editing.insert-line-break arm; Backspace, Tab-as-indent) the same
+    // core `default` floor for its BINDINGS (Return -> edit.break-line, the
+    // std.editing.insert-line-break arm; edit.backspace, edit.tab) the same
     // way vim's `insert` mode does. Typing inserts at every caret (core's
     // `editEach`), so `i` after `C` types on both lines.
     weft.setFallback("helix-insert", "default");

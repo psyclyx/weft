@@ -2540,13 +2540,17 @@ pub fn whichKeyShows(ed: *Editor, needle: []const u8) bool {
 }
 
 /// Author a file the way a person does: open it (adopts the path), enter
-/// insert, type the body, escape, save, and drive the save to disk. The natural
-/// motion — `open` then `i…Esc` then `save`. Assumes a normal-editing resting
-/// mode (call before entering any tool buffer, so no tool mode swallows typing).
+/// insert, PASTE the body, escape, save, and drive the save to disk. The
+/// natural motion — `open` then `i…Esc` then `save`. Pasted, not typed: the
+/// body is finished text, indentation and closing brackets included, and a
+/// person typing it key by key would have auto-indent and autopair writing
+/// half of it for them (`ed.typeText` is that, where a test means it).
+/// Assumes a normal-editing resting mode (call before entering any tool
+/// buffer, so no tool mode swallows typing).
 pub fn authorFile(ed: *Editor, name: []const u8, body: []const u8) void {
     ed.runStr("file.open", name);
     ed.press("i", "");
-    ed.typeText(body);
+    ed.runStr("edit.insert-text", body);
     ed.press("Escape", "");
     ed.run("file.save");
     ed.waitSave();

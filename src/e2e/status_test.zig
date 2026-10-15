@@ -469,3 +469,22 @@ test "e2e/status: every chrome style draws the bar" {
         shot(ed, std.fmt.bufPrint(&name, "ide-bar-{s}", .{style}) catch "ide-bar");
     }
 }
+
+test "e2e/status: the indentation segment says what the file uses — Tabs, or Spaces and the step" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    ed.applyWindow();
+
+    try ide.openFile(ed, "main.go", "package main\n\nfunc main() {\n\tx := 1\n}\n");
+    _ = try awaitSegment(ed, try barPane(ed), "Tabs");
+    try ide.openFile(ed, "two.js", "if (a) {\n  b();\n}\n");
+    try t.expectEqualStrings("Spaces: 2", try awaitSegment(ed, try barPane(ed), "Spaces"));
+    // A click on it (its command) switches the buffer to tabs.
+    const line = try lineOf(ed, try barPane(ed));
+    try t.expectEqualStrings("indent.toggle-tabs", line.commands[line.find("Spaces: 2").?]);
+    ed.run("indent.toggle-tabs");
+    _ = try awaitSegment(ed, try barPane(ed), "Tabs");
+}

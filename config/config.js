@@ -207,6 +207,15 @@ weft.set("offers", "pinned", [
   "std.history.redo\tRedo",
   "palette.open\tPalette",
 ]);
+// Indentation (the `indent` plugin, src/plugins/indent): a buffer's step is
+// its .editorconfig's, else what its own lines use, else these — by language
+// (the extension, as lsp's), else weft.set("indent", "default", …), else four
+// spaces. "auto", "electric", "backspace" (per language: "go.auto", …) "off"
+// turn auto-indent, closer re-indent, and whole-step Backspace off.
+weft.set("indent", "go", "tabs");      // gofmt
+weft.set("indent", "zig", "spaces:4"); // zig fmt
+weft.set("indent", "js", "spaces:2");
+weft.set("indent", "nix", "spaces:2");
 weft.set("which_key", "delay-ms", "200"); // hold a prefix this long before the hint pops
 weft.set("which_key", "placement", "corner"); // or "center"
 weft.set("editor", "flash-ms", "150");    // how long an operator flashes its range

@@ -124,6 +124,12 @@ weft.set("lsp", "fnl", "fennel-ls");
 weft.set("lsp", "lua", "lua-language-server");
 for (const ext of ["js", "mjs", "cjs", "jsx"]) weft.set("lsp", ext, "typescript-language-server --stdio");
 weft.set("lsp", "html", "vscode-html-language-server --stdio");
+// Indentation: .editorconfig, else the file's own lines, else these by
+// language, else four spaces (config.js says more).
+weft.set("indent", "go", "tabs");      // gofmt
+weft.set("indent", "zig", "spaces:4"); // zig fmt
+weft.set("indent", "js", "spaces:2");
+weft.set("indent", "nix", "spaces:2");
 weft.set("which_key", "delay-ms", "400"); // few chords here; don't pop eagerly
 weft.set("editor", "flash-ms", "150");
 weft.set("editor", "flash-undo", "on"); // undo/redo flash what they put back

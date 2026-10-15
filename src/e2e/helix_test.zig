@@ -821,3 +821,23 @@ test "e2e/helix: Q records a macro, Q stops, q replays it" {
     keys(ed, "q");
     try expectText(ed, "x1\nx1\nx\n");
 }
+
+test "e2e/helix: o and O open a line where the code goes (indent), and one left blank keeps none" {
+    const gpa = t.allocator;
+    var app: HelixApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try openFile(ed, "o.js", "function f() {\n  return 1;\n}\n");
+
+    // Below an opener: a step in.
+    keys(ed, "o");
+    keys(ed, "x();");
+    ed.press("Escape", "");
+    try expectText(ed, "function f() {\n  x();\n  return 1;\n}\n");
+    // Above `x();`: what `function f() {` leads to — and left blank, nothing.
+    keys(ed, "O");
+    try expectText(ed, "function f() {\n  \n  x();\n  return 1;\n}\n");
+    ed.press("Escape", "");
+    try expectText(ed, "function f() {\n\n  x();\n  return 1;\n}\n");
+}

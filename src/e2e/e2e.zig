@@ -53,4 +53,5 @@ test {
     _ = @import("status_test.zig");
     _ = @import("undo_test.zig");
     _ = @import("quit_test.zig");
+    _ = @import("indent_test.zig");
 }
