@@ -86,6 +86,19 @@ A fresh fill of a tool buffer costs what opening a file of that size
 costs, through the same base path stemma gives a file
 (`base-anchors-stemma-07`). It does not cost a CRDT operation per chunk.
 
+*Landed:* output is PRODUCED, not authored. The cost was `renderInto`'s
+peer path, a shadow replica bootstrapped and merged per scalar: 5.5 µs a
+byte in ReleaseFast, so 19 s for the 1.5 MB fill in a Debug test.
+`Document.produce` writes to the main replica at 40 ns a byte, and
+`refound` folds the history away through `openFromContent`.
+- `Document.becomes(text)` writes only the replacement that differs.
+- `command.produceInto` serves REPL output, tool fills and transcripts.
+- The projection repaint and the transcript projection use `becomes`.
+- `renderInto` stays for authored edits: agent file writes, formatter
+  results, command output read into a file.
+
+The 1.5 MB case takes about a second in a Debug test.
+
 ## 4. Lists at scale
 
 The picker builds and draws the window it shows, so a live source's
