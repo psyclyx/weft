@@ -7,11 +7,14 @@
 //! for an icon by NAME and places it; a renderer only ever sees a path.
 //!
 //! A `Set` maps chrome names (`save`, `split-right`, `error`) to geometry.
-//! The one bundled set is Lucide (ISC; `icons/lucide/LICENSE`), embedded as
-//! the upstream SVG files unchanged and parsed at load. A theme picks a set
-//! by name (`theme/icons`); `none` draws no icons, and another set is one
-//! more `Source` table — the parser takes any stroke-style SVG in a 24-unit
-//! viewBox, which is the format every Lucide/Feather-shaped set ships in.
+//! Two sets are bundled (`Bundled`): Lucide (ISC; `icons/lucide/LICENSE`),
+//! embedded as the upstream SVG files unchanged, and weft's own
+//! (`icons/weft/`, drawn to doc/icons.md), which has every chrome name
+//! Lucide's table has plus the completion kinds (`kind_names`). A theme picks
+//! a set by name (`theme/icons`); `none` draws no icons, and another set is
+//! one more `Source` table — the parser takes any stroke-style SVG in a
+//! 24-unit viewBox, which is the format every Lucide/Feather-shaped set
+//! ships in.
 //!
 //! The parser covers what such sets use: `path` (every command, arcs
 //! converted to cubics, quadratics raised to cubics), `circle`, `ellipse`,
@@ -180,6 +183,171 @@ pub const lucide = [_]Source{
 fn lucideIcon(comptime name: []const u8, comptime file: []const u8) Source {
     return .{ .name = name, .svg = @embedFile("icons/lucide/" ++ file ++ ".svg") };
 }
+
+/// weft's own set (doc/icons.md): every chrome name the Lucide table has,
+/// drawn to one grid and one vocabulary, then the completion kinds.
+pub const weft = [_]Source{
+    weftIcon("save"),
+    weftIcon("undo"),
+    weftIcon("redo"),
+    weftIcon("command"),
+    weftIcon("play"),
+    weftIcon("build"),
+    weftIcon("bug"),
+    weftIcon("test"),
+    weftIcon("format"),
+    weftIcon("rename"),
+    weftIcon("split-right"),
+    weftIcon("split-down"),
+    weftIcon("close"),
+    weftIcon("file"),
+    weftIcon("file-text"),
+    weftIcon("folder"),
+    weftIcon("folder-open"),
+    weftIcon("chevron-right"),
+    weftIcon("chevron-down"),
+    weftIcon("chevron-left"),
+    weftIcon("chevron-up"),
+    weftIcon("git-branch"),
+    weftIcon("git-commit"),
+    weftIcon("error"),
+    weftIcon("warning"),
+    weftIcon("info"),
+    weftIcon("search"),
+    weftIcon("terminal"),
+    weftIcon("check"),
+    weftIcon("more"),
+    weftIcon("plus"),
+    weftIcon("minus"),
+    weftIcon("dot"),
+    weftIcon("circle"),
+    weftIcon("stop"),
+    weftIcon("settings"),
+    weftIcon("refresh"),
+    weftIcon("external-link"),
+    weftIcon("lightbulb"),
+    weftIcon("list"),
+    weftIcon("sidebar"),
+    weftIcon("shield-check"),
+    weftIcon("users"),
+    weftIcon("bell"),
+    weftIcon("keyboard"),
+    weftIcon("link"),
+    weftIcon("cloud"),
+    weftIcon("file-plus"),
+    weftIcon("folder-plus"),
+    weftIcon("copy"),
+    weftIcon("scissors"),
+    weftIcon("clipboard-paste"),
+    weftIcon("replace"),
+    weftIcon("arrow-left"),
+    weftIcon("arrow-right"),
+    weftIcon("history"),
+    weftIcon("bookmark"),
+    weftIcon("list-tree"),
+    weftIcon("crosshair"),
+    weftIcon("upload"),
+    weftIcon("download"),
+    weftIcon("git-merge"),
+    weftIcon("git-pull-request"),
+    weftIcon("bot"),
+    weftIcon("sparkles"),
+    weftIcon("notebook-pen"),
+    weftIcon("share-2"),
+    weftIcon("plug"),
+    weftIcon("unplug"),
+    weftIcon("log-out"),
+    weftIcon("palette"),
+    weftIcon("type"),
+    weftIcon("zoom-in"),
+    weftIcon("zoom-out"),
+    weftIcon("indent-increase"),
+    weftIcon("indent-decrease"),
+    weftIcon("circle-dot"),
+    weftIcon("step-forward"),
+    weftIcon("arrow-down-to-line"),
+    weftIcon("arrow-up-from-line"),
+    weftIcon("panel-bottom"),
+    weftIcon("text-search"),
+    weftIcon("file-search"),
+    weftIcon("globe"),
+    weftIcon("network"),
+    weftIcon("eye"),
+    weftIcon("list-checks"),
+    weftIcon("hash"),
+    weftIcon("case-upper"),
+    weftIcon("case-lower"),
+    weftIcon("text-cursor-input"),
+    weftIcon("folder-tree"),
+    weftIcon("layout-dashboard"),
+    weftIcon("messages-square"),
+    // The completion kinds, in LSP's CompletionItemKind order (`kind_names`).
+    weftIcon("kind-text"),
+    weftIcon("kind-method"),
+    weftIcon("kind-function"),
+    weftIcon("kind-constructor"),
+    weftIcon("kind-field"),
+    weftIcon("kind-variable"),
+    weftIcon("kind-class"),
+    weftIcon("kind-interface"),
+    weftIcon("kind-module"),
+    weftIcon("kind-property"),
+    weftIcon("kind-unit"),
+    weftIcon("kind-value"),
+    weftIcon("kind-enum"),
+    weftIcon("kind-keyword"),
+    weftIcon("kind-snippet"),
+    weftIcon("kind-color"),
+    weftIcon("kind-file"),
+    weftIcon("kind-reference"),
+    weftIcon("kind-folder"),
+    weftIcon("kind-enum-member"),
+    weftIcon("kind-constant"),
+    weftIcon("kind-struct"),
+    weftIcon("kind-event"),
+    weftIcon("kind-operator"),
+    weftIcon("kind-type-parameter"),
+};
+
+fn weftIcon(comptime name: []const u8) Source {
+    return .{ .name = name, .svg = @embedFile("icons/weft/" ++ name ++ ".svg") };
+}
+
+/// The completion kinds' icon names, in LSP's `CompletionItemKind` order:
+/// kind `k` (1-25) is `kind_names[k - 1]`. A completion UI asks the set for
+/// `kindIcon(k)`; doc/icons.md §4 keeps the same table.
+pub const kind_names = [_][]const u8{
+    "kind-text",     "kind-method", "kind-function",  "kind-constructor", "kind-field",
+    "kind-variable", "kind-class",  "kind-interface", "kind-module",      "kind-property",
+    "kind-unit",     "kind-value",  "kind-enum",      "kind-keyword",     "kind-snippet",
+    "kind-color",    "kind-file",   "kind-reference", "kind-folder",      "kind-enum-member",
+    "kind-constant", "kind-struct", "kind-event",     "kind-operator",    "kind-type-parameter",
+};
+
+/// The icon name for LSP `CompletionItemKind` `kind`, or null outside 1-25.
+pub fn kindIcon(kind: u32) ?[]const u8 {
+    if (kind < 1 or kind > kind_names.len) return null;
+    return kind_names[kind - 1];
+}
+
+/// The sets this build ships, by the name `theme/icons` spells them with.
+pub const Bundled = enum {
+    lucide,
+    weft,
+
+    pub fn sources(self: Bundled) []const Source {
+        return switch (self) {
+            .lucide => &lucide,
+            .weft => &weft,
+        };
+    }
+
+    /// The set `name` spells, or null for any other name (`none` included —
+    /// turning icons off is the view's, not a set).
+    pub fn parse(name: []const u8) ?Bundled {
+        return std.meta.stringToEnum(Bundled, name);
+    }
+};
 
 // ── SVG → path commands ─────────────────────────────────────────────
 
@@ -544,31 +712,175 @@ fn quadTo(out: *Builder, qx: f32, qy: f32, x: f32, y: f32) !void {
 
 const t = std.testing;
 
-test "icons: every bundled icon parses into geometry inside its box" {
-    var set = try Set.parse(t.allocator, "lucide", &lucide);
-    defer set.deinit();
-    try t.expectEqual(lucide.len, set.icons.len);
-    for (set.names, set.icons) |name, icon| {
-        errdefer std.debug.print("icon '{s}'\n", .{name});
-        try t.expect(icon.commands.len >= 2);
-        try t.expectEqual(scene.PathVerb.move, icon.commands[0].verb);
-        for (icon.commands) |c| {
-            const n: usize = switch (c.verb) {
-                .move, .line => 2,
-                .cubic => 6,
-                .close => 0,
-            };
-            // A stroke-style icon stays within its 24-unit box (control
-            // points of a curve may reach a little past the stroke).
-            for (c.points[0..n]) |v| if (!(v > -1 and v < 25)) {
-                std.debug.print("out of box: {any}\n", .{c});
-                return error.TestUnexpectedResult;
-            };
+/// The box a path's points span — on-curve and control points alike, so a
+/// cubic (which stays inside its control points' hull) is inside it too.
+fn pointBounds(commands: []const PathCommand) [4]f32 {
+    var b: [4]f32 = .{ std.math.inf(f32), std.math.inf(f32), -std.math.inf(f32), -std.math.inf(f32) };
+    for (commands) |c| {
+        const n: usize = switch (c.verb) {
+            .move, .line => 2,
+            .cubic => 6,
+            .close => 0,
+        };
+        var i: usize = 0;
+        while (i < n) : (i += 2) {
+            b[0] = @min(b[0], c.points[i]);
+            b[1] = @min(b[1], c.points[i + 1]);
+            b[2] = @max(b[2], c.points[i]);
+            b[3] = @max(b[3], c.points[i + 1]);
         }
     }
-    try t.expect(set.get("save") != null);
-    try t.expect(set.get("split-right") != null);
-    try t.expect(set.get("no-such-icon") == null);
+    return b;
+}
+
+test "icons: every bundled icon parses into geometry inside its box" {
+    for (std.enums.values(Bundled)) |bundled| {
+        var set = try Set.parse(t.allocator, @tagName(bundled), bundled.sources());
+        defer set.deinit();
+        try t.expectEqual(bundled.sources().len, set.icons.len);
+        for (set.names, set.icons) |name, icon| {
+            errdefer std.debug.print("{s} icon '{s}'\n", .{ @tagName(bundled), name });
+            try t.expect(icon.commands.len >= 2);
+            try t.expectEqual(scene.PathVerb.move, icon.commands[0].verb);
+            // A stroke-style icon stays within its 24-unit box (Lucide's
+            // curves may put a control point a little past the stroke).
+            const b = pointBounds(icon.commands);
+            try t.expect(b[0] > -1 and b[1] > -1 and b[2] < 25 and b[3] < 25);
+        }
+        try t.expect(set.get("save") != null);
+        try t.expect(set.get("split-right") != null);
+        try t.expect(set.get("no-such-icon") == null);
+    }
+}
+
+test "icons: weft's set has every chrome name Lucide's has, every completion kind, and no other" {
+    try t.expectEqual(lucide.len + kind_names.len, weft.len);
+    for (lucide) |src| {
+        errdefer std.debug.print("weft has no '{s}'\n", .{src.name});
+        for (weft) |w| {
+            if (std.mem.eql(u8, w.name, src.name)) break;
+        } else return error.TestUnexpectedResult;
+    }
+    for (kind_names) |kind| {
+        errdefer std.debug.print("weft has no '{s}'\n", .{kind});
+        for (weft) |w| {
+            if (std.mem.eql(u8, w.name, kind)) break;
+        } else return error.TestUnexpectedResult;
+    }
+    // Each name once: a duplicate would shadow its twin in `Set.get`.
+    for (weft, 0..) |a, i| for (weft[i + 1 ..]) |b| {
+        errdefer std.debug.print("weft names '{s}' twice\n", .{a.name});
+        try t.expect(!std.mem.eql(u8, a.name, b.name));
+    };
+}
+
+test "icons: weft's ink, stroke included, keeps a unit inside the 24-unit box" {
+    // doc/icons.md §1: centrelines live in 3..21 (ink 2..22, the padding);
+    // a round or pointed shape may overshoot by one unit for optical size,
+    // never further — so no point's stroke comes within a unit of the edge.
+    var set = try Set.parse(t.allocator, "weft", &weft);
+    defer set.deinit();
+    for (set.names, set.icons) |name, icon| {
+        errdefer std.debug.print("weft icon '{s}' reaches past its padding\n", .{name});
+        try t.expectEqual(@as(f32, 24), icon.size);
+        const half = icon.stroke_width / 2;
+        const b = pointBounds(icon.commands);
+        try t.expect(b[0] - half >= 1 and b[1] - half >= 1);
+        try t.expect(b[2] + half <= 23 and b[3] + half <= 23);
+    }
+}
+
+test "icons: an LSP CompletionItemKind names its kind icon, 1 to 25" {
+    try t.expectEqualStrings("kind-text", kindIcon(1).?);
+    try t.expectEqualStrings("kind-function", kindIcon(3).?);
+    try t.expectEqualStrings("kind-struct", kindIcon(22).?);
+    try t.expectEqualStrings("kind-type-parameter", kindIcon(25).?);
+    try t.expect(kindIcon(0) == null);
+    try t.expect(kindIcon(26) == null);
+}
+
+test "icons: `theme/icons` spells the bundled sets by name, and nothing else" {
+    try t.expectEqual(Bundled.lucide, Bundled.parse("lucide").?);
+    try t.expectEqual(Bundled.weft, Bundled.parse("weft").?);
+    try t.expect(Bundled.parse("none") == null);
+    try t.expect(Bundled.parse("Weft") == null);
+}
+
+/// A contact sheet of `set`: every icon at 14, 16, 24 and 48 px, light on
+/// the editor's background, labelled in the editor's mono face, drawn
+/// through the same raster path a frame takes. Returns the pixels (caller
+/// owns them) and the sheet's size; asserts each icon left ink at 14 px.
+fn contactSheet(gpa: Allocator, set: *const Set) !struct { pixels: []u8, w: u32, h: u32 } {
+    const harness = @import("harness.zig");
+    const View = @import("view/View.zig");
+    const font_provider = @import("weft_font_provider");
+    var view = try View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    const font = view.face_set.monoFont();
+
+    const sizes = [_]f32{ 14, 16, 24, 48 };
+    const cols: u32 = 8;
+    const cell_w: u32 = 176;
+    const cell_h: u32 = 92;
+    const pad: u32 = 12;
+    const label_size: f32 = 11;
+    const rows: u32 = @intCast((set.icons.len + cols - 1) / cols);
+    const w = cols * cell_w + 2 * pad;
+    const h = rows * cell_h + 2 * pad;
+    const fg = view.theme.foreground;
+    const dim: scene.Color = .{ fg[0] * 0.45, fg[1] * 0.45, fg[2] * 0.45, 1 };
+
+    var items: std.ArrayList(scene.DrawItem) = .empty;
+    defer items.deinit(gpa);
+    const advance = view.cell_w * label_size / view.em;
+    for (set.names, set.icons, 0..) |name, *icon, i| {
+        const cx: f32 = @floatFromInt(pad + @as(u32, @intCast(i % cols)) * cell_w + 8);
+        const cy: f32 = @floatFromInt(pad + @as(u32, @intCast(i / cols)) * cell_h + 6);
+        var x = cx;
+        for (sizes) |side| {
+            // Bottom-aligned on the 48 px icon's baseline, each on whole
+            // pixels, as chrome places them (`chrome.Sink.icon`).
+            try items.append(gpa, .{ .path = .{
+                .commands = icon.commands,
+                .x = x,
+                .y = cy + 48 - side,
+                .scale = side / icon.size,
+                .stroke_width = icon.stroke_width,
+                .color = fg,
+                .cap = .round,
+                .join = .round,
+            } });
+            x += side + 12;
+        }
+        var lx = cx;
+        for (name) |c| {
+            try items.append(gpa, .{ .glyph = .{ .font_id = 1, .glyph_id = try font.glyphIndex(c), .x = lx, .y = cy + 48 + 24, .size = label_size, .color = dim } });
+            lx += advance;
+        }
+    }
+    const pixels = try harness.rasterize(gpa, &view, &.{items.items}, w, h);
+    errdefer gpa.free(pixels);
+    for (set.names, 0..) |name, i| {
+        errdefer std.debug.print("icon '{s}' drew nothing at 14 px\n", .{name});
+        const x0 = pad + @as(u32, @intCast(i % cols)) * cell_w + 8;
+        const y0 = pad + @as(u32, @intCast(i / cols)) * cell_h + 6 + 48 - 14;
+        try t.expect(harness.hasContent(pixels, w, x0, y0, x0 + 14, y0 + 14));
+    }
+    return .{ .pixels = pixels, .w = w, .h = h };
+}
+
+test "icons: every bundled icon draws at 14 px through the raster path (contact sheets)" {
+    // The sheets land in .zig-cache/tmp (`magick x.ppm x.png` to view);
+    // assets/icon-sets/ keeps the reviewed copies.
+    for (std.enums.values(Bundled)) |bundled| {
+        var set = try Set.parse(t.allocator, @tagName(bundled), bundled.sources());
+        defer set.deinit();
+        const sheet = try contactSheet(t.allocator, &set);
+        defer t.allocator.free(sheet.pixels);
+        var path_buf: [96]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/weft-icons-{s}.ppm", .{@tagName(bundled)});
+        @import("harness.zig").writePpm(t.allocator, path, sheet.pixels, sheet.w, sheet.h) catch {};
+    }
 }
 
 test "icons: relative path commands, implicit repeats and closes resolve to absolute points" {

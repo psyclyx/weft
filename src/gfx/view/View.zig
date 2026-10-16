@@ -135,10 +135,13 @@ theme: Theme,
 /// How chrome looks (`theme/chrome`, doc/chrome.md §3.2). Resolved from the
 /// theme slot each frame (`resolveChrome`), so a rebind is the next frame's.
 chrome: chrome_mod.Style = .text,
-/// The bundled icon set, parsed once at init.
-icon_set: icons.Set,
-/// Whether the theme's icon set is the bundled one (`theme/icons`); `none`
-/// turns every icon off, whatever the chrome style.
+/// Every bundled icon set (`icons.Bundled`), parsed once at init.
+icon_sets: std.EnumArray(icons.Bundled, icons.Set),
+/// The set `theme/icons` names (`lucide`, `weft`); what `icon()` reads.
+icon_choice: icons.Bundled = .lucide,
+/// False when `theme/icons` is `none`: every icon off, whatever the
+/// chrome style. The choice of set is kept, so turning icons back on by
+/// name restores the set it names.
 icons_on: bool = true,
 /// The tooltip the current build's hovered element offers — due or not, so
 /// what the pointer rests on is known before the frame that shows it.
@@ -219,8 +222,13 @@ pub fn init(gpa: Allocator, font_bytes: []const u8, em: f32) !View {
     const ascent: f32 = @floatFromInt(lm.ascent);
     const descent: f32 = @floatFromInt(lm.descent);
     const gap: f32 = @floatFromInt(lm.line_gap);
-    var icon_set = try icons.Set.parse(gpa, "lucide", &icons.lucide);
-    errdefer icon_set.deinit();
+    var icon_sets: std.EnumArray(icons.Bundled, icons.Set) = undefined;
+    var parsed: usize = 0;
+    errdefer for (icon_sets.values[0..parsed]) |*set| set.deinit();
+    for (std.enums.values(icons.Bundled), &icon_sets.values) |bundled, *set| {
+        set.* = try icons.Set.parse(gpa, @tagName(bundled), bundled.sources());
+        parsed += 1;
+    }
     const widths = try gpa.create(ui_font.Widths);
     widths.* = .{};
 
@@ -228,7 +236,7 @@ pub fn init(gpa: Allocator, font_bytes: []const u8, em: f32) !View {
         .gpa = gpa,
         .face_set = face_set,
         .theme = (Theme{}).linearized(),
-        .icon_set = icon_set,
+        .icon_sets = icon_sets,
         .em = em,
         .cell_w = em * @as(f32, @floatFromInt(advance)) / upem,
         .line_h = em * (ascent - descent + gap) / upem,
@@ -243,7 +251,7 @@ pub fn init(gpa: Allocator, font_bytes: []const u8, em: f32) !View {
 pub fn deinit(self: *View) void {
     self.gpa.destroy(self.ui_widths);
     self.layout_arena.deinit();
-    self.icon_set.deinit();
+    for (&self.icon_sets.values) |*set| set.deinit();
     self.face_set.deinit();
     self.* = undefined;
 }
@@ -252,11 +260,12 @@ pub fn deinit(self: *View) void {
 /// has one by that name; null otherwise, and the style draws text alone.
 pub fn icon(self: *const View, name: []const u8) ?*const icons.Icon {
     if (!self.icons_on or !self.chrome.showsIcons()) return null;
-    return self.icon_set.get(name);
+    return self.icon_sets.getPtrConst(self.icon_choice).get(name);
 }
 
 /// The slots a chrome style and icon set are chosen through: `theme/chrome`
-/// (`text`, `text-icons`, `widget`) and `theme/icons` (`lucide`, `none`).
+/// (`text`, `text-icons`, `widget`) and `theme/icons` (`lucide`, `weft`,
+/// `none`).
 /// Value-shaped and first-wins, like every `theme/<leaf>`; the view declares
 /// them because the view is what reads them.
 pub const chrome_slot = "theme/chrome";
@@ -279,7 +288,14 @@ pub fn resolveChrome(self: *View, container: *const core.container.Container, fa
     if (slotValue(container, facts, chrome_slot)) |name| {
         if (chrome_mod.Style.parse(name)) |style| self.chrome = style;
     }
-    if (slotValue(container, facts, icons_slot)) |name| self.icons_on = !std.mem.eql(u8, name, "none");
+    if (slotValue(container, facts, icons_slot)) |name| {
+        if (std.mem.eql(u8, name, "none")) {
+            self.icons_on = false;
+        } else if (icons.Bundled.parse(name)) |set| {
+            self.icons_on = true;
+            self.icon_choice = set;
+        }
+    }
     if (slotValue(container, facts, ui_scale_slot)) |spelled| {
         const scale = std.fmt.parseFloat(f32, spelled) catch self.ui_scale;
         if (std.math.isFinite(scale) and scale >= 0.5 and scale <= 2) self.ui_scale = scale;
@@ -1186,4 +1202,43 @@ test "monospace parity gate: view-computed vertical target == old column target"
             };
         }
     }
+}
+
+test "theme/icons: names the bundled set, `none` turns icons off, and a typo changes nothing" {
+    const gpa = testing.allocator;
+    var view = try View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    view.chrome = .widget;
+    var container = core.container.Container.init(gpa);
+    defer container.deinit();
+    try declareChromeSlots(&container);
+    const facts: core.facts.Facts = .{};
+    const lucide_save = view.icon_sets.getPtrConst(.lucide).get("save").?;
+    const weft_save = view.icon_sets.getPtrConst(.weft).get("save").?;
+    try testing.expect(lucide_save != weft_save);
+
+    // Unbound: the default, Lucide, as before there was a choice.
+    view.resolveChrome(&container, facts);
+    try testing.expectEqual(lucide_save, view.icon("save").?);
+
+    const Step = struct { bind: []const u8, save: ?*const icons.Icon };
+    const steps = [_]Step{
+        .{ .bind = "weft", .save = weft_save },
+        .{ .bind = "none", .save = null },
+        // Back on by name: the set it names.
+        .{ .bind = "lucide", .save = lucide_save },
+        .{ .bind = "weft", .save = weft_save },
+        // A misspelt set leaves the choice as it was.
+        .{ .bind = "wefft", .save = weft_save },
+    };
+    for (steps) |step| {
+        errdefer std.debug.print("theme/icons = {s}\n", .{step.bind});
+        try container.rebind(.{ .slot = icons_slot, .provider = .{ .value = step.bind }, .predicate = .{ .all = &.{} }, .tier = .transient, .owner = "test" });
+        view.resolveChrome(&container, facts);
+        try testing.expectEqual(step.save, view.icon("save"));
+    }
+    // The weft set answers the completion kinds; Lucide's has none.
+    try testing.expect(view.icon("kind-struct") != null);
+    view.icon_choice = .lucide;
+    try testing.expect(view.icon("kind-struct") == null);
 }
