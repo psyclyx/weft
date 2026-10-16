@@ -1220,6 +1220,37 @@ test "e2e/grep: Find in Files searches as you type, and the chosen row opens the
     try t.expect(std.mem.indexOf(u8, disk, "const a = 1;") != null);
 }
 
+// A search with many matches once found NONE: the exec door refused to hand
+// back a window of an output bigger than the reader's buffer, and the empty
+// answer looked like "no matches". About 300 KiB here — past both the live
+// search's read and the 64 KiB the *grep* fill read with. (Sized to stay
+// quick until tool output stops re-rendering whole on every commit.)
+test "e2e/grep: a search with hundreds of kilobytes of matches shows them, live and in *grep*" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+    {
+        const r = try proj.oracle("i=1; while [ $i -le 4000 ]; do printf 'const needle_%05d = \"padding the line out to a realistic width\";\\n' $i; i=$((i+1)); done > big.js");
+        gpa.free(r);
+    }
+
+    ed.run("grep.search");
+    ed.typeText("needle");
+    try t.expect(try waitPick(&ed, "big.js:1:", ""));
+    try t.expect(ed.pick.filtered.items.len > 1000);
+    ed.run("pick.cancel");
+
+    // The kept list holds every match: the last line is the proof.
+    ed.runStr("grep.search", "needle");
+    try t.expect(drainToolContains(&ed, "*grep*", "big.js:4000:"));
+}
+
 test "e2e/output: Return on a `file:line` in run output jumps there" {
     const gpa = t.allocator;
     var proj: Project = undefined;

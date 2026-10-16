@@ -473,10 +473,6 @@ pub fn tickAsync(
         // quit) runs once they have all landed, or is dropped if one failed.
         if (try core.unsaved.settle(cmd_ctx)) dirty = true;
     }
-    // Drive any async pick source (completion race-and-refine, file
-    // finder, dir browser) — a no-op for a static or source-less
-    // pick. Completion now rides this instead of a bespoke tick.
-    if (try fx.head.pick.tick(cmd_ctx)) dirty = true;
     // Deliver native async completions (subprocess/timer output, deferred
     // edits) on the frame thread; a completion repaints.
     if (plugin_loop.tick()) dirty = true;
@@ -486,6 +482,11 @@ pub fn tickAsync(
         // Service raw-proc plugins (the lsp client) when their stream has bytes.
         if (core.wasm_host.notifyPollIfReady(pl)) dirty = true;
     }
+    // Drive any async pick source (completion race-and-refine, file
+    // finder, a plugin's live pick) — a no-op for a static or source-less
+    // pick. AFTER the deliveries above: what a process just answered, or a
+    // poll just pushed, is in THIS frame, not left for whatever wakes next.
+    if (try fx.head.pick.tick(cmd_ctx)) dirty = true;
     // Fire the activation event when the focused buffer's path changes, so
     // language-aware plugins (`modes`) can attach keymaps/facts.
     {

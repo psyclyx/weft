@@ -127,7 +127,9 @@ fn liveLanded(r: weft.ExecDone, feed: weft.Feed) void {
     }
     const out = weft.allocator.alloc(u8, @min(r.len(.out), live_read_max)) catch return;
     defer weft.allocator.free(out);
-    const text = r.read(.out, 0, out);
+    var text = r.read(.out, 0, out);
+    // A full window may end mid-line: that line is not a row.
+    if (text.len < r.len(.out)) text = text[0..(std.mem.lastIndexOfScalar(u8, text, '\n') orelse 0)];
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;

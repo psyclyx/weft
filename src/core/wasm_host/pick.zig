@@ -138,6 +138,7 @@ fn liveSource(live: *LiveSource) pick_mod.Source {
         .onQuery = if (live.spec.query_driven) liveQuery else null,
         .poll = livePoll,
         .close = liveClose,
+        .ready = liveReady,
         .data = live,
         .min_query = live.spec.min_query,
         .debounce_ns = @as(u64, live.spec.debounce_ms) * std.time.ns_per_ms,
@@ -196,6 +197,11 @@ fn livePoll(data: ?*anyopaque, ctx: *command.Context) anyerror!bool {
         try p.appendItems(gpa, texts, docs);
     }
     return true;
+}
+
+fn liveReady(data: ?*anyopaque) bool {
+    const live: *LiveSource = @ptrCast(@alignCast(data.?));
+    return live.pending.items.len > 0 or (live.done and live.shown != live.epoch);
 }
 
 fn liveClose(data: ?*anyopaque, gpa: Allocator) void {

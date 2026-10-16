@@ -224,14 +224,17 @@ test "output: a view parameter round-trips any bytes" {
 /// what the fill door could never say.
 fn landed(r: weft.ExecDone, req: Request) void {
     settle(req);
-    var scratch: [1 << 16]u8 = undefined;
-    const out = r.read(.out, 0, &scratch);
+    // All of it: a tool's output is the buffer (the host caps what it keeps).
+    // A fixed scratch here once showed a search with many matches as none.
+    const out = r.dupe(weft.allocator, .out) catch "";
+    defer if (out.len > 0) weft.allocator.free(out);
     if (out.len > 0 or !req.want_err) return fill(req, out);
     // A build that printed nothing to stdout said whatever it had to say on
     // stderr; showing an empty buffer instead is the failure mode this exists
     // to end.
-    var err_scratch: [1 << 16]u8 = undefined;
-    fill(req, r.read(.err, 0, &err_scratch));
+    const err = r.dupe(weft.allocator, .err) catch "";
+    defer if (err.len > 0) weft.allocator.free(err);
+    fill(req, err);
 }
 
 /// A row that names a place, and one that does not. Roles rather than a boolean

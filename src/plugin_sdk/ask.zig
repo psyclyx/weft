@@ -53,7 +53,7 @@ pub const SearchSpec = struct {
     /// order, unfiltered by the picker. Off: the picker narrows them.
     matched: bool = true,
     /// How long the query must be still before it is asked about.
-    debounce_ms: u32 = 120,
+    debounce_ms: u32 = 30,
     /// Shorter queries are not asked about.
     min_query: u32 = 0,
 };

@@ -75,6 +75,10 @@ pub const Source = struct {
     onQuery: ?*const fn (data: ?*anyopaque, ctx: *command.Context, query: []const u8, epoch: u64) anyerror!void = null,
     poll: ?*const fn (data: ?*anyopaque, ctx: *command.Context) anyerror!bool = null,
     close: ?*const fn (data: ?*anyopaque, gpa: Allocator) void = null,
+    /// Whether `poll` has something to take NOW — rows a producer handed over
+    /// between frames. The loop wakes for it (`loop_sources.pickDebounceDue`):
+    /// rows must not wait for an unrelated wake (a caret blink, a key).
+    ready: ?*const fn (data: ?*anyopaque) bool = null,
     data: ?*anyopaque = null,
     /// Below this query length `onQuery` is not fired (grep guard).
     min_query: usize = 0,

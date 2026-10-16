@@ -1028,7 +1028,13 @@ pub fn hExecRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     const stream = if (args[0] == 0) e.stdout else e.stderr;
     const offset: usize = @intCast(@max(args[1], 0));
     const from = if (offset >= stream.len) stream[0..0] else stream[offset..];
-    shared.writeExact(caller, args[2..], results, from);
+    // A WINDOW, as the door says: as much as fits, from `offset`. This was an
+    // exact write of the whole remainder, refused (-2) whenever the remainder
+    // outgrew the reader's buffer — so any output bigger than the buffer it
+    // was read into arrived EMPTY: a search with many matches found none.
+    // `cap` 0 still reports how much remains (the length read `Done.len` makes).
+    const cap: usize = @intCast(@max(args[3], 0));
+    shared.writeExact(caller, args[2..], results, if (cap == 0) from else from[0..@min(from.len, cap)]);
 }
 
 /// A deferred proc FILTER: run `[start,end)` through a command (which rewrites

@@ -166,10 +166,11 @@ pub fn reconnectDue(ctx: ?*anyopaque, now: u64) ?u64 {
 // while a picker with an async source is open. ──
 
 pub fn pickDebounceDue(ctx: ?*anyopaque, now: u64) ?u64 {
-    _ = now;
     const head: *const core.Head = @ptrCast(@alignCast(ctx.?));
     if (!head.pick.active) return null;
     const src = head.pick.source orelse return null;
+    // Rows waiting to be taken are due now, whatever woke the loop last.
+    if (src.ready) |ready| if (ready(src.data)) return now;
     if (head.pick.source_epoch == head.pick.query_epoch) return null; // nothing pending
     return head.pick.last_query_ns + src.debounce_ns;
 }
@@ -279,4 +280,22 @@ pub fn pluginStreamDue(ctx: ?*anyopaque, now: u64) ?u64 {
     const self: *const PluginStreamCtx = @ptrCast(@alignCast(ctx.?));
     if (!hasLiveStream(self)) return null;
     return now + plugin_stream_interval_ns;
+}
+
+test "loop sources: a pick source with rows ready wakes the loop now, not at the next unrelated wake" {
+    const Fake = struct {
+        var has_rows = false;
+        fn ready(_: ?*anyopaque) bool {
+            return has_rows;
+        }
+    };
+    var head: core.Head = .empty;
+    head.pick.active = true;
+    head.pick.source = .{ .ready = Fake.ready, .debounce_ns = 30 * std.time.ns_per_ms };
+    const now: u64 = 1_000_000_000;
+    // Nothing waiting and no query moved: the source is dormant.
+    try std.testing.expectEqual(@as(?u64, null), pickDebounceDue(&head, now));
+    // A producer handed rows over between frames: due immediately.
+    Fake.has_rows = true;
+    try std.testing.expectEqual(@as(?u64, now), pickDebounceDue(&head, now));
 }
