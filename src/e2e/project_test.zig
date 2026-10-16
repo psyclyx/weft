@@ -1122,6 +1122,104 @@ test "e2e/grep: Return on a result jumps to that file at that line" {
     try t.expect(std.mem.indexOf(u8, disk, "const b = 2;") != null);
 }
 
+/// The rows of the open pick, as shown, joined by newlines (owned).
+fn pickShown(ed: *Editor) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (ed.pick.filtered.items) |i| {
+        try out.appendSlice(ed.gpa, ed.pick.items.items[i]);
+        try out.append(ed.gpa, '\n');
+    }
+    return out.toOwnedSlice(ed.gpa);
+}
+
+/// Drive whole frames until the open pick shows a row containing `present`
+/// and none containing `absent` — both, so a wait cannot pass on the rows
+/// the LAST query left standing. An empty `present` waits for no rows.
+fn waitPick(ed: *Editor, present: []const u8, absent: []const u8) !bool {
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        ed.settle(1);
+        if (!ed.pick.active) return false;
+        if (present.len == 0) {
+            if (ed.pick.filtered.items.len == 0) return true;
+            continue;
+        }
+        const shown = try pickShown(ed);
+        defer ed.gpa.free(shown);
+        if (std.mem.indexOf(u8, shown, present) != null and
+            (absent.len == 0 or std.mem.indexOf(u8, shown, absent) == null)) return true;
+    }
+    const shown = try pickShown(ed);
+    defer ed.gpa.free(shown);
+    std.debug.print("\n[waitPick] gave up: query='{s}' rows='{s}'\n", .{ ed.pick.query.items, shown });
+    return false;
+}
+
+/// Delete `n` characters from the end of the pick's query (the command the
+/// pick's BackSpace runs; this harness loads no default keys).
+fn pickBackspace(ed: *Editor, n: usize) void {
+    for (0..n) |_| ed.run("pick.backspace");
+}
+
+// Find in Files with nothing to search for is a LIVE search: the ordinary
+// picker, fed by grep as the query settles — not a prompt for an argument,
+// and not a silent return (which is what a key bound to it used to get).
+test "e2e/grep: Find in Files searches as you type, and the chosen row opens there" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+    {
+        const r1 = try proj.oracle("printf 'const a = 1;\\nconst target = 42;\\nconst b = 2;\\n' > app.js");
+        gpa.free(r1);
+        const r2 = try proj.oracle("printf 'const c = 3;\\nlet targets = [];\\n' > other.js");
+        gpa.free(r2);
+    }
+
+    ed.run("grep.search");
+    try t.expect(ed.pick.active);
+    try t.expectEqualStrings("Find in Files", ed.pick.prompt);
+
+    // The rows are ripgrep's matches for what is typed so far.
+    ed.typeText("target");
+    try t.expect(try waitPick(&ed, "app.js:2:", ""));
+    {
+        const shown = try pickShown(&ed);
+        defer gpa.free(shown);
+        try t.expect(std.mem.indexOf(u8, shown, "other.js:2:") != null);
+        try t.expect(std.mem.indexOf(u8, shown, "const a") == null);
+    }
+
+    // The source matched them, so the picker does not filter them again: a
+    // regular expression, which no fuzzy match would pass, still finds them.
+    pickBackspace(&ed, "target".len);
+    ed.typeText("tar.et =");
+    try t.expect(try waitPick(&ed, "app.js:2:", "other.js"));
+
+    // A query that matches nothing clears the last query's rows.
+    ed.typeText("zzz");
+    try t.expect(try waitPick(&ed, "", ""));
+    pickBackspace(&ed, "zzz".len);
+    try t.expect(try waitPick(&ed, "app.js:2:", "other.js"));
+
+    // Accepting (Return) opens the chosen row's file on its line.
+    ed.run("pick.accept");
+    try t.expect(!ed.pick.active);
+    try t.expect(std.mem.endsWith(u8, ed.bufferName(), "app.js"));
+    ed.chord("d d");
+    ed.run("file.save");
+    ed.waitSave();
+    const disk = try core.file.readAlloc(gpa, "app.js");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "target") == null);
+    try t.expect(std.mem.indexOf(u8, disk, "const a = 1;") != null);
+}
+
 test "e2e/output: Return on a `file:line` in run output jumps there" {
     const gpa = t.allocator;
     var proj: Project = undefined;

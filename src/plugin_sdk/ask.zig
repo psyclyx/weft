@@ -39,6 +39,43 @@ pub const Spec = struct {
     category: []const u8 = "",
 };
 
+/// A question whose rows the plugin FEEDS (`search`): asked again as the
+/// query settles, or once at open, and answered as rows arrive — a search
+/// per query (ripgrep), a file list that takes a moment, a server's symbols.
+pub const SearchSpec = struct {
+    prompt: []const u8,
+    category: []const u8 = "",
+    free_text: bool = false,
+    /// Ask `on_query` again each time the query settles. Off: it is asked
+    /// once, at open, with an empty query, and the picker narrows its rows.
+    per_query: bool = true,
+    /// The rows ARE the match (the plugin searched): shown as given, in its
+    /// order, unfiltered by the picker. Off: the picker narrows them.
+    matched: bool = true,
+    /// How long the query must be still before it is asked about.
+    debounce_ms: u32 = 120,
+    /// Shorter queries are not asked about.
+    min_query: u32 = 0,
+};
+
+/// Where a query's rows go. Carries its query's generation, so rows pushed
+/// after the query has moved on are refused rather than mixed in — keep one
+/// and push from a later callback (a process's answer) freely.
+pub const Feed = struct {
+    epoch: u32,
+
+    /// One row. False once the query has moved on or its rows are full:
+    /// stop producing.
+    pub fn push(self: Feed, text: []const u8, doc: []const u8) bool {
+        return e.wl_pick_push(self.epoch, @intCast(@intFromPtr(text.ptr)), @intCast(text.len), @intCast(@intFromPtr(doc.ptr)), @intCast(doc.len)) == 1;
+    }
+
+    /// Every row for this query is in (so an answer of none clears the last).
+    pub fn done(self: Feed) void {
+        e.wl_pick_done(self.epoch);
+    }
+};
+
 /// What came back. `text` is the answer either way, so a caller that does not
 /// care whether a row was chosen or typed need not ask.
 pub const Answer = union(enum) {
@@ -62,6 +99,8 @@ pub const Answer = union(enum) {
 
 const Pending = struct {
     thunk: *const fn (Answer, ?*anyopaque) void,
+    /// A `search`'s rows: asked with each settled query.
+    on_query: ?*const fn ([]const u8, Feed) void = null,
     ctx: ?*anyopaque = null,
     release: ?*const fn (std.mem.Allocator, ?*anyopaque) void = null,
 };
@@ -158,6 +197,49 @@ fn confirmSpec(question: []const u8) Spec {
             .{ .text = yes, .doc = "go ahead" },
         },
     };
+}
+
+/// Open a pick this plugin feeds: `on_query` is handed each settled query
+/// (or, without `per_query`, one empty query at open) and a `Feed` for its
+/// rows; `on_answer` gets the chosen row, the typed text, or a cancel.
+pub fn search(
+    spec: SearchSpec,
+    on_query: *const fn ([]const u8, Feed) void,
+    on_answer: *const fn (Answer) void,
+) bool {
+    if (spec.prompt.len == 0) return false;
+    const Shim = struct {
+        fn call(answer: Answer, ctx: ?*anyopaque) void {
+            const f: *const fn (Answer) void = @ptrCast(@alignCast(ctx.?));
+            f(answer);
+        }
+    };
+    const slot = claim(.{ .thunk = Shim.call, .ctx = @ptrCast(@constCast(on_answer)), .on_query = on_query }) orelse return false;
+    weft.pickBegin(spec.prompt, sdk_bit | slot);
+    if (spec.free_text) weft.pickFreeText();
+    if (spec.category.len > 0) weft.pickCategory(spec.category);
+    const flags: u32 = @as(u32, @intFromBool(spec.per_query)) | @as(u32, @intFromBool(spec.matched)) << 1;
+    e.wl_pick_live(flags, spec.debounce_ms, spec.min_query);
+    weft.pickEnd();
+    if (!spec.per_query) on_query("", .{ .epoch = 0 });
+    return true;
+}
+
+/// The host's `on_pick_query`, routed to the `search` that asked. False for
+/// an id that is not ours.
+pub fn deliverQuery(pick_id: u32, epoch: u32) bool {
+    if (pick_id & sdk_bit == 0) return false;
+    const slot = pick_id & ~sdk_bit;
+    if (slot >= pending.items.len) return true;
+    const cont = pending.items[slot] orelse return true;
+    const f = cont.on_query orelse return true;
+    const len = e.wl_pick_query(0, 0);
+    if (len < 0) return true;
+    const query = weft.allocator.alloc(u8, @intCast(len)) catch return true;
+    defer weft.allocator.free(query);
+    if (len > 0 and e.wl_pick_query(@intCast(@intFromPtr(query.ptr)), @intCast(query.len)) != len) return true;
+    f(query, .{ .epoch = epoch });
+    return true;
 }
 
 fn open(spec: Spec, cont: Pending) bool {

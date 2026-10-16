@@ -18,6 +18,8 @@ const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 const requireDispatch = shared.requireDispatch;
 const WasmBoundPick = @import("../wasm_abi.zig").WasmBoundPick;
+const WasmPluginT = @import("../wasm_abi/WasmPlugin.zig");
+const LiveSource = WasmPluginT.LiveSource;
 
 // trampoline that dispatches to the guest's on_pick_accept.
 pub fn hPickBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -44,6 +46,185 @@ pub fn hPickBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     p.pick_id = @bitCast(args[2]);
     p.pick_free_text = false; // each pick opts in for itself
     p.pick_category.clearRetainingCapacity(); // …and so does annotation
+    p.pick_live = null; // …and so does being fed live
+}
+
+/// `wl_pick_live(flags, debounce_ms, min_query)` — between `begin` and
+/// `end`: the plugin FEEDS this pick rather than handing it rows at open.
+/// Flag bit 0: query-driven — each time the query settles (`debounce_ms`
+/// still, at least `min_query` bytes) the plugin hears `on_pick_query` and
+/// pushes rows for that query (`wl_pick_push`); without it the plugin
+/// fills the pick once and the picker narrows the rows as usual. Bit 1: the
+/// plugin matched the rows itself (a search per query), so they are shown
+/// as given, unfiltered and in its order. Ungated: it touches only this
+/// plugin's own scratch, as `wl_pick_free_text` does.
+pub fn hPickLive(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const flags: u32 = @bitCast(args[0]);
+    p.pick_live = .{
+        .query_driven = flags & 1 != 0,
+        .given = flags & 2 != 0,
+        .debounce_ms = @bitCast(args[1]),
+        .min_query = @bitCast(args[2]),
+    };
+}
+
+/// `wl_pick_query(ptr, cap)` — the settled query, during `on_pick_query`
+/// only (-1 outside it); the exact two-pass read every outcome read uses.
+pub fn hPickQuery(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const query = p.cur_live_query orelse {
+        results[0] = -1;
+        return;
+    };
+    writeOutcomeBytes(caller, args, results, query);
+}
+
+/// `wl_pick_push(epoch, text, doc)` — a row for the query `epoch` names
+/// (the one `on_pick_query` was handed; 0 for a fill-once pick). 1 taken;
+/// 0 refused — the query has moved on, or this one has its `max_rows` —
+/// so a plugin can stop producing; -1 when it has no live pick open. Never
+/// touches the head: the rows wait on the pick's source until the next
+/// frame, so a plugin may push from anywhere it runs (a process's answer
+/// included), not only from a dispatch.
+pub fn hPickPush(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const live = p.live_pick orelse {
+        results[0] = -1;
+        return;
+    };
+    const epoch: u32 = @bitCast(args[0]);
+    if (epoch != live.epoch or live.taken >= LiveSource.max_rows) {
+        results[0] = 0;
+        return;
+    }
+    const gpa = p.gpa;
+    const text = caller.readMemory(gpa, @intCast(args[1]), @intCast(args[2])) catch {
+        results[0] = 0;
+        return;
+    };
+    const doc = caller.readMemory(gpa, @intCast(args[3]), @intCast(args[4])) catch {
+        gpa.free(text);
+        results[0] = 0;
+        return;
+    };
+    live.pending.append(gpa, .{ .text = text, .doc = doc }) catch {
+        gpa.free(text);
+        gpa.free(doc);
+        results[0] = 0;
+        return;
+    };
+    live.taken += 1;
+    results[0] = 1;
+}
+
+/// `wl_pick_done(epoch)` — every row for that query has been pushed. What
+/// lets an answer of NO rows replace the last query's rows, rather than
+/// leave them standing as if they still matched.
+pub fn hPickDone(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const live = p.live_pick orelse return;
+    if (@as(u32, @bitCast(args[0])) == live.epoch) live.done = true;
+}
+
+// ── The live source: the pick's side of `wl_pick_live` ───────────────
+
+fn liveSource(live: *LiveSource) pick_mod.Source {
+    return .{
+        .onQuery = if (live.spec.query_driven) liveQuery else null,
+        .poll = livePoll,
+        .close = liveClose,
+        .data = live,
+        .min_query = live.spec.min_query,
+        .debounce_ns = @as(u64, live.spec.debounce_ms) * std.time.ns_per_ms,
+    };
+}
+
+fn dropPending(live: *LiveSource, gpa: Allocator) void {
+    for (live.pending.items) |row| {
+        gpa.free(row.text);
+        gpa.free(row.doc);
+    }
+    live.pending.clearRetainingCapacity();
+}
+
+/// The query settled: a new generation. Rows still waiting for the last one
+/// are dropped, and the plugin is asked about this one — framed as a
+/// dispatch on the head whose pick it is, the way `on_pick_accept` is.
+fn liveQuery(data: ?*anyopaque, ctx: *command.Context, query: []const u8, epoch: u64) anyerror!void {
+    const live: *LiveSource = @ptrCast(@alignCast(data.?));
+    const p = live.plugin;
+    dropPending(live, p.gpa);
+    live.epoch = @truncate(epoch);
+    live.taken = 0;
+    live.done = false;
+    const saved_query = p.cur_live_query;
+    p.cur_live_query = query;
+    defer p.cur_live_query = saved_query;
+    try callFramed(p, ctx, "on_pick_query", .{ @as(i32, @bitCast(live.pick_id)), @as(i32, @bitCast(live.epoch)) });
+}
+
+/// Each frame: take the waiting rows into the pick. The first rows of a new
+/// generation (or its `done` with none) replace the last one's, so a query's
+/// answer never shows mixed with the one before it.
+fn livePoll(data: ?*anyopaque, ctx: *command.Context) anyerror!bool {
+    const live: *LiveSource = @ptrCast(@alignCast(data.?));
+    const gpa = live.plugin.gpa;
+    const fresh = live.shown != live.epoch;
+    if (live.pending.items.len == 0 and !(fresh and live.done)) return false;
+    defer dropPending(live, gpa);
+    const texts = try gpa.alloc([]const u8, live.pending.items.len);
+    defer gpa.free(texts);
+    const docs = try gpa.alloc([]const u8, live.pending.items.len);
+    defer gpa.free(docs);
+    for (live.pending.items, texts, docs) |row, *tx, *dc| {
+        tx.* = row.text;
+        dc.* = row.doc;
+    }
+    const p = &ctx.head.pick;
+    if (fresh) {
+        const entries = try gpa.alloc(pick_mod.Entry, texts.len);
+        defer gpa.free(entries);
+        for (entries, texts, docs) |*en, tx, dc| en.* = .{ .text = tx, .doc = dc };
+        try p.refresh(gpa, entries, &.{});
+        live.shown = live.epoch;
+    } else {
+        try p.appendItems(gpa, texts, docs);
+    }
+    return true;
+}
+
+fn liveClose(data: ?*anyopaque, gpa: Allocator) void {
+    const live: *LiveSource = @ptrCast(@alignCast(data.?));
+    if (live.plugin.live_pick == live) live.plugin.live_pick = null;
+    dropPending(live, gpa);
+    live.pending.deinit(gpa);
+    gpa.destroy(live);
+}
+
+/// Call a plugin's callback as a DISPATCH on `ctx`'s head — the framing
+/// `wpPickAccept` gives `on_pick_accept` (see its doc), for the live
+/// source's `on_pick_query`.
+fn callFramed(p: *WasmPlugin, ctx: *command.Context, comptime name: []const u8, args: anytype) !void {
+    if (p.dispatch_depth == 0) {
+        p.clearEphemeralRanges();
+        p.clearRetiredResultBuffers();
+    }
+    const saved_ctx = p.active_ctx;
+    const saved_dispatch = p.in_dispatch;
+    p.dispatch_depth += 1;
+    p.active_ctx = ctx;
+    p.in_dispatch = true;
+    defer {
+        p.dispatch_depth -= 1;
+        p.active_ctx = saved_ctx;
+        p.in_dispatch = saved_dispatch;
+    }
+    try contract.callOptionalExport(name, p, args);
 }
 
 /// `wl_pick_free_text(on)` — between `begin` and `end`: let this pick accept
@@ -160,14 +341,35 @@ pub fn hPickEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     };
     defer gpa.free(entries);
     for (p.pick_items.items, entries) |it, *e| e.* = .{ .text = it.text, .doc = it.doc, .key = it.key };
+    // A live pick's feed, handed to the pick as its source: `openWith` owns
+    // it from here, closing it on failure as on close.
+    const live: ?*LiveSource = if (p.pick_live) |spec| blk: {
+        const l = gpa.create(LiveSource) catch {
+            gpa.free(keys);
+            gpa.destroy(bp);
+            return;
+        };
+        l.* = .{ .plugin = p, .pick_id = p.pick_id, .spec = spec };
+        break :blk l;
+    } else null;
+    const given = if (p.pick_live) |spec| spec.given else false;
     p.activeCtx().head.pick.openWith(p.activeCtx(), p.pick_prompt.items, entries, .{
         .handler = wpPickAccept,
         .cleanup = wpPickCleanup,
         .data = bp,
-    }, .{ .allow_free_text = p.pick_free_text, .category = p.pick_category.items }) catch {
+    }, .{
+        .allow_free_text = p.pick_free_text,
+        .category = p.pick_category.items,
+        .source = if (live) |l| liveSource(l) else null,
+        .style = if (given) .given else .orderless,
+    }) catch {
         gpa.free(keys);
         gpa.destroy(bp);
+        return;
     };
+    // Open: the feed is live. (Opening closed any live pick before it, whose
+    // source cleared this field on the way out.)
+    p.live_pick = live;
 }
 
 pub fn hOpenFilePick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

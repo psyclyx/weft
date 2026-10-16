@@ -1,10 +1,15 @@
 //! grep — project search over the ripgrep subprocess (design §6.6), a `.wasm`
-//! plugin. Each command creates+focuses the `*grep*` tool buffer and fills it
-//! asynchronously with `rg`'s matches via the native `proc` surface — the
-//! output lands authored as this plugin's peer, off the frame thread. perms
-//! `{proc, timer}`; grant_max edit (it only writes its own tool buffer).
-//! `grep` takes an explicit pattern arg; `grep.search-word` lifts the identifier under
-//! the cursor and searches for that — search-for-the-thing-I'm-on.
+//! plugin.
+//!
+//! `grep.search` with nothing to search for is a LIVE search: an ordinary
+//! pick this plugin feeds (`weft.search`), ripgrep run on the query each time
+//! it settles, its matches the rows, Return opening the one chosen. Nothing
+//! here draws a search UI; it is the picker every other list uses.
+//!
+//! Given a pattern — or `grep.search-word`, which lifts the identifier under
+//! the cursor — it fills the `*grep*` tool buffer instead: a results list that
+//! stays, re-runnable by designation. perms `{proc, timer}`; grant_max edit (it
+//! only writes its own tool buffer).
 
 const std = @import("std");
 const weft = @import("weft");
@@ -27,7 +32,7 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "grep.search", .call = grep, .arity = .whole, .params = "pattern", .summary = "Search the project for a pattern, listing the matches in *grep*.", .label = "Find in Files", .menu = "Edit", .group = "search", .order = 1, .icon = "text-search", .prompts = true },
+    .{ .name = "grep.search", .call = grep, .arity = .whole, .params = "[pattern]", .summary = "Search the project as you type, or list a given pattern's matches in *grep*.", .label = "Find in Files", .menu = "Edit", .group = "search", .order = 1, .icon = "text-search" },
     .{ .name = "grep.search-word", .arity = .one, .call = grepWord, .summary = "Search the project for the word under the cursor.", .label = "Find Word in Files", .menu = "Edit", .group = "search", .order = 2 },
     .{ .name = "grep.visit", .call = output.visit, .arity = .one, .summary = "Open the location the focused result row names.", .internal = true },
     .{ .name = "grep.open", .call = reopen, .arity = .whole, .params = "designation", .summary = "Run the search a `weft://here/grep/…` designation names.", .internal = true },
@@ -89,10 +94,55 @@ fn reopen() void {
     runGrep(pattern);
 }
 
-/// Search for the pattern passed as arg 0; a no-op when none was given.
+/// Search for the pattern passed as arg 0 into *grep*; with none, search
+/// live as the query is typed.
 fn grep() void {
-    const pattern = weft.argStr(0) orelse return;
-    runGrep(pattern);
+    const pattern = weft.argStr(0) orelse "";
+    if (pattern.len > 0) return runGrep(pattern);
+    if (!weft.search(.{ .prompt = "Find in Files", .category = "location", .min_query = 1 }, liveQuery, liveAnswer))
+        weft.echo("grep: could not open the search");
+}
+
+/// The most rows one query reads back from ripgrep — the pick holds 2000;
+/// this keeps a match-everything query from reading megabytes to show them.
+const live_read_max = 1 << 18;
+
+/// A query settled: run ripgrep on it, its matches the query's rows.
+fn liveQuery(query: []const u8, feed: weft.Feed) void {
+    if (query.len == 0) return feed.done();
+    const argv = [_][]const u8{ "rg", "--line-number", "--column", "--no-heading", "--color=never", "--max-columns=240", "--max-columns-preview", "--smart-case", "--", query };
+    if (!weft.execWith(weft.Feed, feed, .{ .argv = &argv }, liveLanded)) {
+        weft.echo("grep: could not run rg");
+        feed.done();
+    }
+}
+
+fn liveLanded(r: weft.ExecDone, feed: weft.Feed) void {
+    defer feed.done();
+    // rg exits 1 for "no matches" and 2 for a bad pattern: say why only then.
+    if (r.status == 2) {
+        var err_buf: [256]u8 = undefined;
+        weft.echo(r.firstLine(.err, &err_buf));
+        return;
+    }
+    const out = weft.allocator.alloc(u8, @min(r.len(.out), live_read_max)) catch return;
+    defer weft.allocator.free(out);
+    const text = r.read(.out, 0, out);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        if (!feed.push(line, "")) break;
+    }
+}
+
+/// A row chosen: open where it points.
+fn liveAnswer(answer: weft.Answer) void {
+    const line = switch (answer) {
+        .chosen => |text| text,
+        .typed, .cancelled => return,
+    };
+    const target = output.locate(line) orelse return;
+    output.visitTarget(target);
 }
 
 /// Emphasize a literal occurrence of the searched pattern in a result row.

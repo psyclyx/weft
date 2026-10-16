@@ -18,6 +18,10 @@ pub const Style = enum {
     substring,
     /// The item begins with the query (case-insensitive).
     prefix,
+    /// The SOURCE matched these rows against the query (a search run per
+    /// query: ripgrep, a server's workspace symbols). Every row passes, in
+    /// the order the source gave it; the picker ranks nothing.
+    given,
 
     pub fn parse(s: []const u8) ?Style {
         return std.meta.stringToEnum(Style, s);
@@ -132,6 +136,7 @@ pub fn matchScore(style: Style, query: []const u8, item: []const u8) ?Match {
         .flex => flexMatch(query, item),
         .substring => substringMatch(query, item),
         .prefix => prefixMatch(query, item),
+        .given => empty_match,
     };
 }
 

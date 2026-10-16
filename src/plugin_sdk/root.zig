@@ -210,6 +210,9 @@ pub const ask = @import("ask.zig").ask;
 pub const askWith = @import("ask.zig").askWith;
 pub const confirm = @import("ask.zig").confirm;
 pub const confirmWith = @import("ask.zig").confirmWith;
+pub const SearchSpec = @import("ask.zig").SearchSpec;
+pub const Feed = @import("ask.zig").Feed;
+pub const search = @import("ask.zig").search;
 
 // ── projection: publish a node tree; the host owns every offset ───────
 // See `projection.zig`. This is the door that lets a tool plugin stop

@@ -799,3 +799,20 @@ test "e2e/menubar: ide.js's menubar holds exactly the rows it always has — cor
         return error.TestUnexpectedMenubar;
     }
 }
+
+// Edit → Find in Files… once asked for its pattern on the status line, which
+// read as nothing happening. It opens the live search: the picker, its rows
+// the project's matches for what is typed.
+test "e2e/menubar: Edit → Find in Files… opens the search, not a prompt for its argument" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ide.openFile(ed, "main.zig", "const needle = 1;\n");
+    ed.applyWindow();
+    try clickTitle(ed, "Edit");
+    try clickRow(ed, try menu(ed), "Find in Files");
+    try t.expect(ed.pick.active);
+    try t.expectEqualStrings("Find in Files", ed.pick.prompt);
+}

@@ -281,6 +281,12 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
             if (hooks.pick) |f| f(pick_id);
         }
 
+        /// A live pick's query settled. Only `weft.search` opens one, so the
+        /// SDK answers it; exported unconditionally, like `on_exec`.
+        fn onPickQuery(pick_id: u32, epoch: u32) callconv(.c) void {
+            _ = @import("ask.zig").deliverQuery(pick_id, epoch);
+        }
+
         pub fn exportAll() void {
             exportCallback("describe", &describeFn);
             exportCallback("init", &initFn);
@@ -288,6 +294,7 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
             exportCallback("on_exec", &onExec);
             if (hooks.after != null) exportCallback("on_mapping_end", &onMappingEnd);
             exportCallback("on_pick_accept", &onPickAccept);
+            exportCallback("on_pick_query", &onPickQuery);
         }
 
         /// The host id for a command this plugin declared, by name — for the

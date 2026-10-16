@@ -307,14 +307,22 @@ pub fn visit() void {
     // hit-tests its own rendering; this library never learns where the caret is.
     const key = weft.projectionAtCursor() orelse return;
     const target = slot.table.get(indexOfKey(key) orelse return) orelse return;
-    // The path is the table's; `open` reuses the read scratch, not this.
-    // Relative to where the tool ran: this entry's place (it inherited the
-    // place it was produced in, doc/place.md §2.1).
+    visitTarget(target);
+}
+
+/// Open the file `target` names, the caret on its line (and column).
+pub fn visitTarget(target: Target) void {
+    // The path is the caller's (a table's, an answer's); `open` reuses the
+    // read scratch, not this. Relative to where the tool ran: this entry's
+    // place (it inherited the place it was produced in, doc/place.md §2.1).
     weft.openTyped(target.path);
     var at = lineStartOffset(target.line);
     if (target.col > 1) at = @min(at + target.col - 1, weft.lineAt(at).end);
     weft.jump(at);
 }
+
+/// The location an output line names (`path:line[:col]`), if any.
+pub const locate = targets.parse;
 
 /// `"r12"` → 12. The inverse of the key `emitRow` minted, and the only place
 /// this format is read — a handle into our own table, not a parse of anything

@@ -538,6 +538,12 @@ fn refilter(self: *Pick, gpa: Allocator) !void {
     var scored: std.ArrayList(Scored) = .empty;
     defer scored.deinit(gpa);
     const narrowing = self.narrow.items.len > 0;
+    if (self.style == .given and !narrowing) {
+        // The source's own order: it matched, it ranked.
+        for (0..self.items.items.len) |i| try self.filtered.append(gpa, @intCast(i));
+        if (self.selected >= self.filtered.items.len) self.selected = 0;
+        return;
+    }
     for (self.items.items, 0..) |it, i| {
         // Narrowing is a sticky pre-filter (orderless over text or doc);
         // the live query then ranks within the narrowed set.
@@ -712,6 +718,9 @@ fn cStyleCycle(ctx: *command.Context, _: struct {}) anyerror!Value {
         .flex => .substring,
         .substring => .prefix,
         .prefix => .orderless,
+        // A source-matched pick's query is the source's; there is no style
+        // of the picker's to cycle.
+        .given => .given,
     };
     try p.refilter(ctx.gpa);
     return .nil;
@@ -919,6 +928,25 @@ pub fn refresh(p: *Pick, gpa: Allocator, entries: []const Entry, infos: []const 
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
+
+test "pick refilter: a source-matched pick shows every row, in the source's order, whatever the query" {
+    const gpa = t.allocator;
+    var p: Pick = .empty;
+    defer p.deinit(gpa);
+    // What ripgrep answered for the regex below: no fuzzy match would pass
+    // these, and the source ranked them already.
+    const items = [_][]const u8{ "b.js:9:const target = 1", "a.js:2:let tarxet = 2" };
+    for (items) |s| {
+        try p.items.append(gpa, try gpa.dupe(u8, s));
+        try p.docs.append(gpa, try gpa.dupe(u8, ""));
+    }
+    p.style = .given;
+    try p.query.appendSlice(gpa, "tar.et =");
+    try p.refilter(gpa);
+    try t.expectEqual(@as(usize, 2), p.filtered.items.len);
+    try t.expectEqualStrings(items[0], p.items.items[p.filtered.items[0]]);
+    try t.expectEqualStrings(items[1], p.items.items[p.filtered.items[1]]);
+}
 
 test "pick refilter: boundary ranking and sticky narrowing" {
     const gpa = t.allocator;

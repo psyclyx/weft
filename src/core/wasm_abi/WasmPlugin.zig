@@ -123,6 +123,42 @@ pub const WasmBoundPick = struct {
     buffer_keys: []const ?Buffers.Ref = &.{},
 };
 
+/// What `wl_pick_live` asked of the pick being accumulated: it is fed by
+/// the plugin as it goes rather than handed its rows at open.
+pub const LiveSpec = struct {
+    /// Asked again (`on_pick_query`) each time the query settles. Without
+    /// it the plugin fills the pick once, and the picker narrows its rows.
+    query_driven: bool,
+    /// The plugin matched the rows itself: shown in its order, unfiltered.
+    given: bool,
+    debounce_ms: u32,
+    min_query: u32,
+};
+
+/// A live pick's feed (`wl_pick_live`): rows the plugin pushed for the
+/// query it was last asked about, waiting for the next frame to take them
+/// into the pick. Owned by the pick's source; freed when the pick closes.
+pub const LiveSource = struct {
+    plugin: *WasmPlugin,
+    pick_id: u32,
+    spec: LiveSpec,
+    /// The query generation the plugin was last asked about (its low word —
+    /// what crosses the membrane). Rows pushed for any other are stale.
+    epoch: u32 = 0,
+    /// The generation whose rows the pick shows.
+    shown: u32 = 0,
+    pending: std.ArrayList(Row) = .empty,
+    /// Rows taken for `epoch`, held to `max_rows`.
+    taken: usize = 0,
+    /// The plugin said `epoch` is complete (an empty answer clears the pick).
+    done: bool = false,
+
+    pub const Row = struct { text: []u8, doc: []u8 };
+    /// A search that matches everything must not flood memory: past this,
+    /// rows for one query are refused (`wl_pick_push` answers 0).
+    pub const max_rows = 2000;
+};
+
 const Phase = enum { describing, active };
 
 /// A live CRDT range the guest holds by opaque handle. The endpoints are
@@ -373,6 +409,14 @@ pick_items: std.ArrayList(PendingItem) = .empty,
 /// Reset by every `wl_pick_begin` — empty means this pick is never annotated,
 /// so opting in is per-pick and never a leftover of the last one.
 pick_category: std.ArrayList(u8) = .empty,
+/// Whether the pick being accumulated is live (`wl_pick_live`). Reset by
+/// every `wl_pick_begin`.
+pick_live: ?LiveSpec = null,
+/// This plugin's open live pick, which `wl_pick_push` feeds. Set at open,
+/// cleared by the pick's source when it closes.
+live_pick: ?*LiveSource = null,
+/// The settled query, valid only during `on_pick_query`.
+cur_live_query: ?[]const u8 = null,
 /// The immutable terminal event, valid only during `on_pick_accept`. The
 /// trampoline saves/restores it, so nested guest dispatch cannot overwrite an
 /// outer callback's acceptance facts.

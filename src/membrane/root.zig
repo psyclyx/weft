@@ -337,6 +337,10 @@ pub const imports = [_]Entry{
     .{ .name = "wl_pick_add_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate carrying the `i`-th buffer's identity as its accept key" },
     .{ .name = "wl_pick_add_keyed", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate (text, detail) whose public KEY is not its text — a command row labelled for people and keyed by its id, which an annotator reads" },
     .{ .name = "wl_pick_end", .params = &.{}, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open the pick built so far" },
+    .{ .name = "wl_pick_live", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "make the pick being built live, fed by this plugin as it goes: flag 1 asks again (on_pick_query) each time the query settles (debounce_ms still, min_query long), flag 2 shows the rows as given (the plugin matched them); without flag 1 the plugin fills it once" },
+    .{ .name = "wl_pick_query", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .pick, .doc = "the settled query, during on_pick_query only; cap=0 reports length, short destinations return -2, -1 outside it" },
+    .{ .name = "wl_pick_push", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .pick, .doc = "push a row (text, detail) into this plugin's live pick for query `epoch` (0 for a fill-once pick): 1 taken, 0 refused (the query moved on, or this one is full), -1 no live pick" },
+    .{ .name = "wl_pick_done", .params = &.{.u32}, .results = &.{}, .group = .pick, .doc = "every row for query `epoch` has been pushed (so an answer of none clears the last query's rows)" },
     .{ .name = "wl_open_file_pick", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open a file-tree pick over the directory of the place this dispatch runs in (core resolves it; a place with none is refused)" },
     .{ .name = "wl_pick_outcome_kind", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "callback-scoped pick outcome: 0 cancelled, 1 input, 2 candidate, -1 outside callback" },
     .{ .name = "wl_pick_outcome_text", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .pick, .doc = "exact callback-scoped accepted text; cap=0 reports length, short destinations return -2" },
@@ -602,6 +606,7 @@ pub const exports = [_]Export{
     .{ .name = "on_complete", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer a completion session (handle); missing/trapped -> the host declines it" },
     .{ .name = "on_resolve", .params = &.{ .i32, .i32 }, .results = &.{}, .required = false, .doc = "fill in item `index` of this provider's answer to completion session `session` (completionItem/resolve) — through wl_caps_item_doc, now or off a later poll" },
     .{ .name = "on_pick_accept", .params = &.{.i32}, .results = &.{}, .required = true, .doc = "a fuzzy pick this plugin opened was accepted, tagged by pick_id" },
+    .{ .name = "on_pick_query", .params = &.{ .i32, .i32 }, .results = &.{}, .required = false, .doc = "the query of a live pick this plugin feeds (pick_id) settled as generation `epoch` (read it with wl_pick_query); push its rows with wl_pick_push, now or off a later callback" },
     .{ .name = "on_menu", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a menu mode this plugin owns was entered (1) or left (0)" },
     .{ .name = "on_activate", .params = &.{}, .results = &.{}, .required = false, .doc = "a buffer took focus (path readable via wl_activate_path during the call)" },
     .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when something this plugin holds is ready — a raw proc stream or a pty with output pending, a pty whose child ended, a grid entry of its the last frame gave a new extent, an entry holding a grid closed, a directory it watches (wl_semantic_fs_watch) changed, or a race it fired (wl_caps_fire) has answers, filled-in answers, or ended" },
@@ -647,9 +652,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 286; // +2 wl_caps_resolve + wl_caps_item_doc (a completion item's docs, resolved lazily), +5 wl_caps_fire/poll/merged/finish + wl_key_layers (the completion UI is a plugin: it races the providers and owns its popup's keys), +1 wl_surface_doc (a caret popup shows a markdown document: hover, docs, signature help), +1 wl_buffer_docked (a buffer switcher lists documents, not chrome), +1 wl_signal_emit_after (debounced signals), +2 wl_semantic_fs_watch + wl_semantic_fs_changed (a listing follows its directory on disk)
-const max_export_count: usize = 23; // +1 on_resolve (a completion item's docs, resolved lazily)
-const max_semantic_operation_count: usize = 307; // +2 the resolve doors + on_resolve, +5 the completion consumer doors, +1 wl_surface_doc, +1 wl_buffer_docked, +2 wl_semantic_fs_watch + wl_semantic_fs_changed
+const max_import_count: usize = 290; // +4 wl_pick_live/query/push/done (a plugin feeds a pick as the query changes: search, a server's symbols, a file list), +2 wl_caps_resolve + wl_caps_item_doc (a completion item's docs, resolved lazily), +5 wl_caps_fire/poll/merged/finish + wl_key_layers (the completion UI is a plugin: it races the providers and owns its popup's keys), +1 wl_surface_doc (a caret popup shows a markdown document: hover, docs, signature help), +1 wl_buffer_docked (a buffer switcher lists documents, not chrome), +1 wl_signal_emit_after (debounced signals), +2 wl_semantic_fs_watch + wl_semantic_fs_changed (a listing follows its directory on disk)
+const max_export_count: usize = 24; // +1 on_pick_query (a live pick hears its query settle), +1 on_resolve (a completion item's docs, resolved lazily)
+const max_semantic_operation_count: usize = 312; // +4 the live pick doors + on_pick_query, +2 the resolve doors + on_resolve, +5 the completion consumer doors, +1 wl_surface_doc, +1 wl_buffer_docked, +2 wl_semantic_fs_watch + wl_semantic_fs_changed
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;

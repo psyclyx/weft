@@ -22,7 +22,7 @@ Edit	history	40	Undo History	undo-tree.open
 Edit	refactor	1	Rename Symbol…	lsp.rename
 Edit	refactor	1	Rename Symbol…	plugin.code.rename
 Edit	refactor	2	Code Actions…	lsp.code-actions
-Edit	search	1	Find in Files…	grep.search
+Edit	search	1	Find in Files	grep.search
 Edit	search	2	Find Word in Files	grep.search-word
 Edit/Insert	insert	1	Insert Snippet…	snippets.expand
 Edit/Insert	insert	2	Insert Command Output…	shell.insert-output
