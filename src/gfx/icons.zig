@@ -878,8 +878,19 @@ fn contactSheet(gpa: Allocator, set: *const Set) !struct { pixels: []u8, w: u32,
                 .scale = side / icon.size,
                 .stroke_width = icon.stroke_width,
                 .color = fg,
-                .cap = .round,
-                .join = .round,
+                .cap = icon.cap,
+                .join = icon.join,
+            } });
+            // Its accent in the theme's accent, as the renderer draws it.
+            if (icon.accent.len > 0) try items.append(gpa, .{ .path = .{
+                .commands = icon.accent,
+                .x = x,
+                .y = cy + 48 - side,
+                .scale = side / icon.size,
+                .stroke_width = icon.stroke_width,
+                .color = view.theme.accent,
+                .cap = icon.cap,
+                .join = icon.join,
             } });
             x += side + 12;
         }

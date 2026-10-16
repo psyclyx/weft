@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <rect x="9" y="3" width="6" height="5" rx="1" />
-  <rect x="3" y="16" width="6" height="5" rx="1" />
-  <rect x="15" y="16" width="6" height="5" rx="1" />
-  <path d="M12 8v4" />
-  <path d="M6 16v-2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v2" />
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="square" stroke-linejoin="round">
+  <path d="M9.75 3L14.25 3C15.3 3 15.75 3.45 15.75 4.5L15.75 6C15.75 7.05 15.3 7.5 14.25 7.5L9.75 7.5C8.7 7.5 8.25 7.05 8.25 6L8.25 4.5C8.25 3.45 8.7 3 9.75 3Z" />
+  <path d="M4.5 16.5L7.5 16.5C8.55 16.5 9 16.95 9 18L9 19.5C9 20.55 8.55 21 7.5 21L4.5 21C3.45 21 3 20.55 3 19.5L3 18C3 16.95 3.45 16.5 4.5 16.5Z" />
+  <path d="M16.5 16.5L19.5 16.5C20.55 16.5 21 16.95 21 18L21 19.5C21 20.55 20.55 21 19.5 21L16.5 21C15.45 21 15 20.55 15 19.5L15 18C15 16.95 15.45 16.5 16.5 16.5Z" />
+  <path d="M12 7.5L12 13.5" />
+  <path d="M6 16.5L6 15C6 13.95 6.45 13.5 7.5 13.5L16.5 13.5C17.55 13.5 18 13.95 18 15L18 16.5" />
 </svg>

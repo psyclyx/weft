@@ -3,95 +3,109 @@
 weft draws chrome icons from a bundled set chosen by `theme/icons`:
 `weft` (this set, the default), `lucide` (Lucide's upstream files), or `none`.
 An icon is stroke-style SVG in a 24-unit box, parsed once into scene path
-commands (`src/gfx/icons.zig`) and drawn as one stroked path tinted by the
-theme. The renderer ignores fill, colour, stroke width and transforms, so
-everything below about the look is a rule for whoever draws, not something
-the code enforces. The tests enforce what they can (§5).
+commands (`src/gfx/icons.zig`). The parser reads the root's `stroke-width`,
+`stroke-linecap` and `stroke-linejoin`. Elements marked `class="accent"`
+become a second path, drawn in the theme's accent colour
+(`palette/accent`). Everything else is drawn in the colour the chrome
+tints it.
 
-This document is the weft set's style guide (§1-§3), the completion-kind
-table (§4), and how the set is checked (§5).
+An icon file never names a colour. The main strokes are `currentColor`,
+and the accent is whatever the user's theme says.
 
-## 1. Style
+This document is the weft set's design language (§1), its vocabulary
+(§2), the completion-kind table (§3), and how the set is checked (§4).
 
-### 1.1 Grid and stroke
+## 1. The language
 
-- **Box.** `viewBox="0 0 24 24"`. The root element always carries
-  `fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-  stroke-linejoin="round"`. The parser ignores these, but an SVG viewer
-  needs them to show the file as weft does.
-- **Stroke.** 2 units, round caps, round joins. No fills: a solid mark (a
-  dot, a bullet) is built from strokes (§1.3).
-- **Live area.** Centrelines lie in **3..21**, so ink lies in 2..22: two
-  units of padding on every side. Round and pointed shapes (a full circle,
-  a triangle's apex, an arrowhead) may overshoot by **one** unit (centreline
-  2..22) to look as big as the square ones. Nothing goes further. The test
-  holds every point, control points included, to 2..22.
-- **Keylines.** Use these unless the subject needs otherwise:
-  - circle: `r=9` about (12, 12), or `r=8` when something hangs off it;
-  - square: 16×16 at (4, 4), `rx=2`;
-  - landscape frame (window, panel, keyboard): 18×16 at (3, 4), `rx=2`;
-  - portrait page: x 5..19, y 3..21.
-- **Coordinates.** Use whole units for straight horizontal and vertical
-  strokes. At 24 px and 48 px a whole-unit centreline gives a 2 px stroke
-  exactly on the pixel grid, and at 14-16 px it spreads evenly. Use half
-  units only where a circle or diagonal needs them.
-- **Corners.** Containers 12 units or larger take `rx=2`. Small boxes take
-  `rx=1` to `1.5`. Every other corner is the round join's (radius 1).
+The set is drawn from the brand mark (`assets/brand/weft-mark.svg`): a
+line of text that runs, wraps twice and ends at an insertion caret. Every
+rule below is read off that mark.
 
-### 1.2 Optical sizing: what reads at 14 px
+### 1.1 Box and stroke
 
-At the default UI size an icon is about 14 px, so one unit is 0.58 px and
-the stroke is about 1.2 px. The rules that follow from that:
+- **Box.** `viewBox="0 0 24 24"`. Centrelines live in **3..21**. The root
+  carries `fill="none" stroke="currentColor" stroke-width="1.75"
+  stroke-linecap="square" stroke-linejoin="round"`.
+- **Stroke.** 1.75 units: a little lighter than Lucide's 2, close to the
+  UI face's stem, because an icon sits beside a label.
+- **Caps square, joins round.** These are the mark's own: a stroke ends
+  like a cut thread, and bends inside a stroke are soft.
+- **No fills.** Solid marks are built from strokes (§1.4).
 
-- **Clear space.** Two parallel strokes have at least **2 units** of clear
-  space between their ink (centrelines 4 apart). Where the two must read as
-  separate things, such as rows of a list or the panes of a layout, give them
-  3 (centrelines 5-6 apart). Less than that merges into one grey bar at 14 px.
-- **Counters.** An enclosed hole is at least 2 units across inside its ink
-  (a circle of `r=2.5` or more), or it fills in.
-- **Detail budget.** At most about five distinct strokes in one glyph.
-  Anything that only reads at 48 px (ticks on a dial, the teeth of a key
-  beyond two) is left out.
-- **Sizes of a thing.** A glyph's main body fills the live area in at least
-  one direction. A small glyph does not look "lighter", only lost.
-- **Badges.** A modifier (plus, check, lens) sits in the lower-right
-  quadrant. The base shape keeps 2 units of clear space around it, cut back
-  where it has to be, so the badge never sits on another stroke.
+### 1.2 One curve: the wrap turn
 
-### 1.3 Marks built from strokes
+The mark turns with `c23 0 34 11 34 33`: a quarter turn of radius r whose
+handles sit at **0.7 r**. A circular arc's handles sit at 0.552 r, so the
+wrap turn is squarer than an arc. **It is the set's only curve.**
 
-- **Stroke dot.** A zero-length stroke, `M x y h.01`: a round dot as wide as
-  the stroke (2 units). Use it for bullets and the dots of `!` and `i`.
-- **Small dot.** `circle r=.5`: a disc 3 units across, for several dots
-  close together (`palette`).
-- **Solid dot.** `circle r=1`: a disc 4 units across.
-- **Large dot.** `circle r=1` plus `circle r=2` about the same centre: a
-  disc 6 units across (`dot`, the middle of `circle-dot`).
+- A quarter turn from heading h1 to heading h2 with radius r, starting at
+  p, ends at e = p + r·h1 + r·h2. Its handles are p + 0.7r·h1 and
+  e − 0.7r·h2.
+- **No circular arcs, ever.** Round things are squircles: four wrap turns
+  around a square. The lens, the nodes, the rings and the dome are all
+  squircles. A squircle's 45° point lies 0.7625 r out on each axis, which
+  is where a lens's handle starts.
+- A turn joins two strokes at a right angle. A bend at any other angle
+  (a chevron's tip, a triangle's corner) is a round join, not a curve.
 
-### 1.4 The weft character
+### 1.3 Ratios
 
-weft is weaving: threads, warp and weft, a line of text that wraps. The set
-carries this only where it also helps the meaning, and plainly beats
-ornamental every time.
+- **Radii come from one scale**, multiples of 0.75:
 
-- **The wrap.** The brand mark is a line that runs, turns and runs back.
-  `format` is that line.
-- **Threads and beads.** `settings` is three threads, each with a bead
-  (sliders) instead of a gear. It reads at 14 px where a toothed gear turns
-  into a smudge.
-- **The crossing.** Where two strokes pass each other rather than join
-  (the blades of `scissors`), the under stroke breaks. Its cap ends at
-  least 3 units from the over stroke's centreline, which leaves one unit of
-  clear space on each side. Use a crossing only where the strokes meet at
-  45° or more; a shallow crossing needs a gap so long the shape falls
-  apart. An interlaced `link` (two chain links over and under) was tried
-  and dropped for that reason: at a link radius that fits the box, the two
-  gaps eat most of each link's end.
-- **The gap.** Two things that belong together but are apart keep a clear
-  gap rather than a slash: `unplug` is the plug and its socket pulled
-  apart on the diagonal.
-- **Open ends.** Lines end in round caps, never in arrows or blobs that
-  aren't part of the meaning.
+  | name | r | used for |
+  | --- | --: | --- |
+  | corner | 1.5 | the corners of boxes, pages, frames, slots |
+  | node | 2.25 | git nodes, loops, small lenses, the eye's pupil |
+  | turn | 3 | the wrap at row pitch 6, brackets, small squircles |
+  | wide | 4.5 | the page's curled corner, undo/redo's turn, the plug |
+  | lens | 6 | the search lens, the bell's dome, the bulb |
+  | ring | 7.5 | status rings (`circle`, `error`, `info`), `history` |
+  | globe | 9 | `globe` |
+
+- **Rows are 2r apart**, so one U-turn of radius r joins two rows exactly,
+  as in the mark. Text rows use pitch 3, 4.5 or 6.
+- **The page is 3:4** (x 5.25..18.75, y 3..21), with its top-right corner
+  a wide wrap turn rather than a dog-ear.
+- **Arrowheads** are open chevrons with 45° arms. The arm is 4.5 units on
+  a full arrow, and 2.25 to 3 units on a badge or a turn's end.
+
+### 1.4 Marks built from strokes
+
+- **Dot.** A zero-length stroke, `M x y h0`. With square caps it is a
+  square as wide as the stroke: the dots of `!`, `i` and the keyboard's
+  keys.
+- **Bead.** A squircle of radius corner or node (`more`, `dot`, the centre
+  of `circle-dot`).
+
+### 1.5 The thread and the accent
+
+- **The thread.** Where a line changes direction, it stays one stroke
+  through wrap turns. `undo` and `redo` are the thread doubling back;
+  `list-tree` and `folder-tree` branch by turning.
+- **The accent.** At most **one** element per icon is `class="accent"`.
+  It marks where the action lands:
+  - the caret in `terminal`, `rename`, `text-cursor-input`,
+    `clipboard-paste` and `notebook-pen`;
+  - the plus in `file-plus` and `folder-plus`;
+  - the new divider in `split-right`, `split-down`, `sidebar` and
+    `panel-bottom`;
+  - the replacement row in `replace`;
+  - the centre of `circle-dot` and `crosshair`;
+  - the third swatch in `palette`.
+
+  The caret is the mark's: an I-beam, a stroke with a serif at each end.
+  **Completion kinds carry no accent.** A list of them stays calm.
+
+### 1.6 Optical sizing
+
+Chrome draws an icon at `round(min(ui line − 2, 0.95 × ui em))`, about
+13 px at the default size. There one unit is about 0.54 px and the stroke
+is about 0.95 px. So:
+
+- two parallel strokes keep centrelines **at least 3 apart**;
+- an enclosed counter is at least 2 units across inside its ink;
+- about five distinct strokes at most in one glyph;
+- a glyph's main body fills the live area in at least one direction.
 
 ## 2. Vocabulary
 
@@ -99,67 +113,53 @@ The same thing is drawn the same way in every glyph that has it:
 
 | Element | Geometry | In |
 | --- | --- | --- |
-| page | `M15 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z`: a cut corner, no fold line | `file`, `file-text`, `file-plus`, `file-search`, `kind-file` |
-| folder | `M3 6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z` | `folder`, `folder-plus`, `folder-open` (its back), `kind-folder` |
-| frame | `rect x=3 y=4 width=18 height=16 rx=2` | `split-right`, `split-down`, `sidebar`, `panel-bottom` |
-| circle | `circle cx=12 cy=12 r=9` | `error`, `info`, `circle`, `circle-dot`, `globe` |
-| chevron | arms of 6 at 45°: `m9 6 6 6-6 6` | `chevron-*` |
-| arrow | 14-unit shaft, head arms of 5 to 6 | `arrow-*`, `upload`, `download`, `log-out` |
-| tray | `M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3` | `upload`, `download` |
-| lens | ring `r=6` to `r=7` with a 45° handle to (20, 20) | `search`, `zoom-*`; smaller as the badge in `text-search`, `file-search` |
-| plus badge | `M12 10.5v7`, `M8.5 14h7` (arms of 3.5) inside a container | `file-plus`, `folder-plus` |
-| node | `circle r=3` on a branch line | `git-*`, `share-2` |
-| bracket | open sides of a box: `[ ]`, `{ }`, `< >` | `kind-variable`, `kind-module`, `kind-type-parameter` |
-| text line | a horizontal stroke; ragged right means prose | `file-text`, `kind-text`, `text-search`, `list*` |
+| page | 3:4, corners r 1.5, top-right a wide turn | `file`, `file-text`, `file-plus`, `file-search`, `kind-file` |
+| folder | a tab stepping down through two corner turns | `folder`, `folder-plus`, `folder-open` (its back), `kind-folder` |
+| frame | 18×16.5 at (3, 3.75), corners r 1.5 | `split-*`, `sidebar`, `panel-bottom`, `layout-dashboard`, `kind-class`, `kind-struct`, `kind-enum` |
+| slot | 18×7.5 at (3, 8.25), corners r 1.5 | `kind-variable`, `kind-field`, `kind-property`, `kind-enum-member` |
+| lens | squircle r 6 at (10.5, 10.5), handle from its 45° point to (20.25, 20.25) | `search`, `zoom-*`; smaller in `text-search`, `file-search` |
+| ring | squircle r 7.5 at (12, 12) | `circle`, `circle-dot`, `error`, `info` |
+| node | squircle r 2.25 | `git-*`, `share-2`, `scissors`, `command` |
+| brackets | `( )` of two turn-radius turns | `kind-function` (a dot), `kind-method` (a row), `kind-constructor` (a plus) |
+| tray | a U of corner turns | `upload`, `download` |
+| caret | the I-beam (accent) | see §1.5 |
+| text row | a horizontal stroke; ragged right means prose | `file`, `file-text`, `kind-text`, `format`, `list*`, `text-search` |
 
-## 3. Drawing a new icon
-
-1. Start from the vocabulary. If the subject has a page, a folder or a
-   frame, use that geometry unchanged.
-2. Author with the elements the parser supports: `path` (all commands),
-   `circle`, `ellipse`, `rect` (`rx`/`ry`), `line`, `polyline`, `polygon`.
-   No `<g transform>`, no `<use>`, no comments with `>` in them.
-3. Save it as `src/gfx/icons/weft/<chrome-name>.svg` and add
-   `weftIcon("<chrome-name>")` to `icons.weft`.
-4. Look at it at 14 px on the contact sheet (§5). If two strokes merge or a
-   counter fills in, the drawing is wrong, not the size.
-
-## 4. Completion kinds
+## 3. Completion kinds
 
 LSP's `CompletionItemKind` is a number from 1 to 25. `icons.kind_names` maps
 kind `k` to `kind_names[k - 1]`, and `icons.kindIcon(k)` does the lookup.
-Kinds are told apart by silhouette first and by interior second, because at
-14 px the interior is about four pixels across.
+Kinds are told apart by silhouette first and by interior second.
 
 | # | LSP kind | Icon | Drawing |
 | --: | --- | --- | --- |
-| 1 | Text | `kind-text` | three ragged text lines |
-| 2 | Method | `kind-method` | a cube (hexagon with its three edges) |
-| 3 | Function | `kind-function` | an `ƒ` |
-| 4 | Constructor | `kind-constructor` | the method's hexagon with a plus in place of its edges |
-| 5 | Field | `kind-field` | a tag |
-| 6 | Variable | `kind-variable` | `[x]` |
-| 7 | Class | `kind-class` | a hierarchy: one box feeding two (sideways, so it is not `network`) |
-| 8 | Interface | `kind-interface` | a lollipop: a ring on a stem (UML's provided interface) |
+| 1 | Text | `kind-text` | three ragged rows |
+| 2 | Method | `kind-method` | `( )` with a row inside |
+| 3 | Function | `kind-function` | `( )` with a dot inside |
+| 4 | Constructor | `kind-constructor` | `( )` with a plus inside |
+| 5 | Field | `kind-field` | a slot with a dot |
+| 6 | Variable | `kind-variable` | a slot holding a row |
+| 7 | Class | `kind-class` | a frame with a header and one member row |
+| 8 | Interface | `kind-interface` | a lollipop |
 | 9 | Module | `kind-module` | braces `{ }` |
-| 10 | Property | `kind-property` | an open-end spanner |
+| 10 | Property | `kind-property` | a slot split key \| value |
 | 11 | Unit | `kind-unit` | a ruler |
-| 12 | Value | `kind-value` | a diamond |
-| 13 | Enum | `kind-enum` | a bulleted list |
-| 14 | Keyword | `kind-keyword` | a key |
-| 15 | Snippet | `kind-snippet` | a puzzle piece |
-| 16 | Color | `kind-color` | a drop |
+| 12 | Value | `kind-value` | `=` |
+| 13 | Enum | `kind-enum` | a frame holding two rows |
+| 14 | Keyword | `kind-keyword` | brackets `[ ]` |
+| 15 | Snippet | `kind-snippet` | text around a placeholder box |
+| 16 | Color | `kind-color` | three overlapping squircles |
 | 17 | File | `kind-file` | the page |
-| 18 | Reference | `kind-reference` | a hooked arrow pointing on |
+| 18 | Reference | `kind-reference` | an arrow onto a node |
 | 19 | Folder | `kind-folder` | the folder |
-| 20 | EnumMember | `kind-enum-member` | one bullet in a pill |
+| 20 | EnumMember | `kind-enum-member` | a slot with a dot and a row |
 | 21 | Constant | `kind-constant` | `=` in a box |
-| 22 | Struct | `kind-struct` | three blocks, two over one wide |
+| 22 | Struct | `kind-struct` | a frame in three compartments |
 | 23 | Event | `kind-event` | a lightning bolt |
 | 24 | Operator | `kind-operator` | `±` |
 | 25 | TypeParameter | `kind-type-parameter` | `<T>` |
 
-## 5. Checks
+## 4. Checks
 
 `zig build test-gfx-only -Dtest-filter=icons` runs:
 
@@ -167,19 +167,20 @@ Kinds are told apart by silhouette first and by interior second, because at
 - the weft set has every chrome name the Lucide table has, every `kind-*`
   name, and no name twice;
 - every weft icon's points, stroke included, keep at least one unit inside
-  the 24-unit box (§1.1);
+  the 24-unit box;
 - `kindIcon` maps 1 to 25 and nothing else;
 - every icon in both sets leaves ink at 14 px when drawn through the raster
-  harness. This test also writes the contact sheets to
+  harness, each stroked as its root says, with its accent in the theme's
+  accent. This test also writes the contact sheets to
   `.zig-cache/tmp/weft-icons-<set>.ppm`.
 
-The View's test `theme/icons: ...` covers the switch: unbound gives Lucide,
+The View's test `theme/icons: ...` covers the switch: unbound gives weft,
 `weft` and `lucide` pick their set, `none` turns icons off, and a misspelt
 name changes nothing.
 
 The reviewed sheet is `assets/icon-sets/weft-contact-sheet.png`, and
 `lucide-contact-sheet.png` beside it is the same layout for Lucide, for
-comparison. It shows
-every icon at 14, 16, 24 and 48 px, light on the editor's background, drawn
-by weft's own renderer. To regenerate it, run the test, then
+comparison. It shows every icon at 14, 16, 24 and 48 px, light on the
+editor's background, drawn by weft's own renderer. To regenerate it, run
+the test, then
 `magick .zig-cache/tmp/weft-icons-weft.ppm assets/icon-sets/weft-contact-sheet.png`.
