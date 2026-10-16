@@ -28,13 +28,20 @@ const scene = @import("weft_scene");
 
 const PathCommand = scene.PathCommand;
 
-/// One parsed icon: its path, in a `size`-unit box.
+/// One parsed icon: its path, in a `size`-unit box, stroked as its SVG
+/// root says (`stroke-width`, `stroke-linecap`, `stroke-linejoin`; Lucide's
+/// 2-unit round strokes when it says nothing), and its ACCENT — the
+/// elements marked `class="accent"`, drawn in the theme's accent colour
+/// (weft's set: the brand mark's caret).
 pub const Icon = struct {
     commands: []const PathCommand,
+    accent: []const PathCommand = &.{},
     /// The side of the source viewBox the commands are drawn in.
     size: f32 = 24,
     /// The set's stroke width, in the same units.
     stroke_width: f32 = 2,
+    cap: scene.StrokeCap = .round,
+    join: scene.StrokeJoin = .round,
 };
 
 /// One named icon's source: a chrome name and the SVG text drawing it.
@@ -58,7 +65,7 @@ pub const Set = struct {
         const parsed = try arena.alloc(Icon, sources.len);
         for (sources, names, parsed) |src, *n, *icon| {
             n.* = src.name;
-            icon.* = .{ .commands = try parseSvg(arena, src.svg) };
+            icon.* = try parseIcon(arena, src.svg);
         }
         set.names = names;
         set.icons = parsed;
@@ -356,6 +363,24 @@ pub const ParseError = error{ InvalidSvg, OutOfMemory };
 /// Every drawable element of `svg`, as one path (one subpath per shape).
 pub fn parseSvg(arena: Allocator, svg: []const u8) ParseError![]const PathCommand {
     var out: Builder = .{ .arena = arena };
+    var icon: Icon = .{ .commands = &.{} };
+    try parseInto(svg, &out, &out, &icon);
+    return out.list.toOwnedSlice(arena);
+}
+
+/// `svg` as an `Icon`: its stroke as the root element declares it, and its
+/// `class="accent"` elements apart from the rest.
+pub fn parseIcon(arena: Allocator, svg: []const u8) ParseError!Icon {
+    var main: Builder = .{ .arena = arena };
+    var accent: Builder = .{ .arena = arena };
+    var icon: Icon = .{ .commands = &.{} };
+    try parseInto(svg, &main, &accent, &icon);
+    icon.commands = try main.list.toOwnedSlice(arena);
+    icon.accent = try accent.list.toOwnedSlice(arena);
+    return icon;
+}
+
+fn parseInto(svg: []const u8, main: *Builder, accent: *Builder, icon: *Icon) ParseError!void {
     var at: usize = 0;
     while (std.mem.indexOfScalarPos(u8, svg, at, '<')) |open| {
         const close = std.mem.indexOfScalarPos(u8, svg, open, '>') orelse return error.InvalidSvg;
@@ -364,8 +389,15 @@ pub fn parseSvg(arena: Allocator, svg: []const u8) ParseError![]const PathComman
         const name_end = std.mem.indexOfAny(u8, tag, " \t\r\n/") orelse tag.len;
         const name = tag[0..name_end];
         const attrs = tag[name_end..];
+        if (std.mem.eql(u8, name, "svg")) {
+            if (attr(attrs, "stroke-width")) |w| icon.stroke_width = parseNum(w);
+            if (attr(attrs, "stroke-linecap")) |c| icon.cap = if (std.mem.eql(u8, c, "square")) .square else if (std.mem.eql(u8, c, "butt")) .butt else .round;
+            if (attr(attrs, "stroke-linejoin")) |j| icon.join = if (std.mem.eql(u8, j, "miter")) .miter else if (std.mem.eql(u8, j, "bevel")) .bevel else .round;
+            continue;
+        }
+        const out = if (attr(attrs, "class")) |c| (if (std.mem.eql(u8, c, "accent")) accent else main) else main;
         if (std.mem.eql(u8, name, "path")) {
-            try parsePathData(&out, attr(attrs, "d") orelse return error.InvalidSvg);
+            try parsePathData(out, attr(attrs, "d") orelse return error.InvalidSvg);
         } else if (std.mem.eql(u8, name, "circle")) {
             const r = num(attrs, "r");
             try out.ellipse(num(attrs, "cx"), num(attrs, "cy"), r, r);
@@ -391,7 +423,6 @@ pub fn parseSvg(arena: Allocator, svg: []const u8) ParseError![]const PathComman
             if (std.mem.eql(u8, name, "polygon")) try out.close();
         }
     }
-    return out.list.toOwnedSlice(arena);
 }
 
 fn attr(attrs: []const u8, name: []const u8) ?[]const u8 {
@@ -945,4 +976,26 @@ test "icons: malformed path data is refused rather than guessed" {
     try t.expectError(error.InvalidSvg, parseSvg(arena.allocator(), "<path d=\"3 4\" />"));
     try t.expectError(error.InvalidSvg, parseSvg(arena.allocator(), "<path d=\"M1\" />"));
     try t.expectError(error.InvalidSvg, parseSvg(arena.allocator(), "<path />"));
+}
+
+test "icons: an icon is stroked as its root says, and its accent elements are a path of their own" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const icon = try parseIcon(arena.allocator(),
+        \\<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="square" stroke-linejoin="miter">
+        \\  <path d="M4 6h16M4 12h10" />
+        \\  <path class="accent" d="M18 10v8" />
+        \\</svg>
+    );
+    try std.testing.expectEqual(@as(f32, 1.75), icon.stroke_width);
+    try std.testing.expectEqual(scene.StrokeCap.square, icon.cap);
+    try std.testing.expectEqual(scene.StrokeJoin.miter, icon.join);
+    try std.testing.expectEqual(@as(usize, 4), icon.commands.len); // two lines
+    try std.testing.expectEqual(@as(usize, 2), icon.accent.len); // one line
+    // Lucide's root declares its 2-unit round strokes; nothing is accent.
+    const plain = try parseIcon(arena.allocator(),
+        \\<svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16" /></svg>
+    );
+    try std.testing.expectEqual(scene.StrokeCap.round, plain.cap);
+    try std.testing.expectEqual(@as(usize, 0), plain.accent.len);
 }

@@ -138,7 +138,7 @@ chrome: chrome_mod.Style = .text,
 /// Every bundled icon set (`icons.Bundled`), parsed once at init.
 icon_sets: std.EnumArray(icons.Bundled, icons.Set),
 /// The set `theme/icons` names (`lucide`, `weft`); what `icon()` reads.
-icon_choice: icons.Bundled = .lucide,
+icon_choice: icons.Bundled = .weft,
 /// False when `theme/icons` is `none`: every icon off, whatever the
 /// chrome style. The choice of set is kept, so turning icons back on by
 /// name restores the set it names.
@@ -1217,15 +1217,16 @@ test "theme/icons: names the bundled set, `none` turns icons off, and a typo cha
     const weft_save = view.icon_sets.getPtrConst(.weft).get("save").?;
     try testing.expect(lucide_save != weft_save);
 
-    // Unbound: the default, Lucide, as before there was a choice.
+    // Unbound: the default, weft's own.
     view.resolveChrome(&container, facts);
-    try testing.expectEqual(lucide_save, view.icon("save").?);
+    try testing.expectEqual(weft_save, view.icon("save").?);
 
     const Step = struct { bind: []const u8, save: ?*const icons.Icon };
     const steps = [_]Step{
-        .{ .bind = "weft", .save = weft_save },
+        .{ .bind = "lucide", .save = lucide_save },
         .{ .bind = "none", .save = null },
         // Back on by name: the set it names.
+        .{ .bind = "weft", .save = weft_save },
         .{ .bind = "lucide", .save = lucide_save },
         .{ .bind = "weft", .save = weft_save },
         // A misspelt set leaves the choice as it was.

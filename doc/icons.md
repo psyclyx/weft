@@ -1,7 +1,7 @@
 # weft's icons
 
 weft draws chrome icons from a bundled set chosen by `theme/icons`:
-`lucide` (the default, Lucide's upstream files), `weft` (this set), or `none`.
+`weft` (this set, the default), `lucide` (Lucide's upstream files), or `none`.
 An icon is stroke-style SVG in a 24-unit box, parsed once into scene path
 commands (`src/gfx/icons.zig`) and drawn as one stroked path tinted by the
 theme. The renderer ignores fill, colour, stroke width and transforms, so

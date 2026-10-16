@@ -27,6 +27,10 @@ pub fn render(v: *View, world_to_pixel: scene.Transform2D, runs: []Run, rects: [
     // At most: every rect, every glyph, a clip before each run and one lift
     // after each layer.
     var count = rects.len + runs.len + starts.len + 1;
+    // An icon with an accent is two paths.
+    for (rects) |r| if (r.shape == .icon and r.shape.icon.accent.len > 0) {
+        count += 1;
+    };
     for (runs) |run| count += run.shaped.glyphs.len;
     var items = try v.gpa.alloc(scene.DrawItem, count);
     errdefer v.gpa.free(items);
@@ -73,11 +77,29 @@ fn place(v: *View, world_to_pixel: scene.Transform2D, items: []scene.DrawItem, r
                 .scale = rect.w / icon.size,
                 .stroke_width = icon.stroke_width,
                 .color = rect.color,
-                .cap = .round,
-                .join = .round,
+                .cap = icon.cap,
+                .join = icon.join,
             } },
         };
         at += 1;
+        // Its accent, over it, in the theme's accent colour (a dimmed icon's
+        // accent dims with it: the tint's alpha carries over).
+        if (rect.shape == .icon and rect.shape.icon.accent.len > 0) {
+            const icon = rect.shape.icon;
+            var color = v.theme.accent;
+            color[3] *= rect.color[3];
+            items[at] = .{ .path = .{
+                .commands = icon.accent,
+                .x = rect.x,
+                .y = rect.y,
+                .scale = rect.w / icon.size,
+                .stroke_width = icon.stroke_width,
+                .color = color,
+                .cap = icon.cap,
+                .join = icon.join,
+            } };
+            at += 1;
+        }
     }
     var clip: ?region.Rect = null;
     for (runs) |*run| {
