@@ -981,6 +981,7 @@ pub fn signature(buf: []u8, name: []const u8, args: []const ArgSpec) []const u8 
 /// user informed, not the value. Use `run` when you want the value.
 pub fn invoke(commands: *const Commands, ctx: *Context, name: []const u8, args: []const Value) void {
     const result = run(commands, ctx, name, args) catch |err| {
+        if (err == error.ArityMismatch and completeCall(commands, ctx, name, args)) return;
         var buf: [256]u8 = undefined;
         echo(ctx, refusal(&buf, commands, name, args, err));
         std.log.warn("command {s} failed: {t}", .{ name, err });
@@ -994,6 +995,44 @@ pub fn invoke(commands: *const Commands, ctx: *Context, name: []const u8, args: 
 
 fn echo(ctx: *Context, msg: []const u8) void {
     ctx.head.echo.say(ctx.gpa, msg) catch {};
+}
+
+/// The action a call short of its arguments is offered to before it is
+/// refused: whoever provides it is handed the call so far — the command's
+/// name, then each argument given, spelled as typed — and asks for the rest.
+/// Asking is policy, so core only offers; with no provider the refusal says
+/// what the command takes.
+pub const complete_action = "command.complete";
+
+/// Offer a short call to `complete_action`'s provider here. True when one
+/// took it.
+fn completeCall(commands: *const Commands, ctx: *Context, name: []const u8, args: []const Value) bool {
+    const cmd = commands.resolve(name) orelse return false;
+    if (args.len >= requiredArity(cmd.args)) return false; // mismatched some other way
+    const b = ctx.actions.container.resolveOne(complete_action, ctx.capturedCtx().mergedFacts()) orelse return false;
+    var buf: [1024]u8 = undefined;
+    var w: usize = 0;
+    const put = struct {
+        fn f(out: []u8, at: *usize, s: []const u8) bool {
+            if (at.* + s.len > out.len) return false;
+            @memcpy(out[at.* .. at.* + s.len], s);
+            at.* += s.len;
+            return true;
+        }
+    }.f;
+    if (!put(&buf, &w, name)) return false;
+    for (args) |a| {
+        var num: [32]u8 = undefined;
+        const spelled = switch (a) {
+            .string => |s| s,
+            .integer => |n| std.fmt.bufPrint(&num, "{d}", .{n}) catch return false,
+            // An anchor or a range has no spelling to hand on.
+            else => return false,
+        };
+        if (!put(&buf, &w, " ") or !put(&buf, &w, spelled)) return false;
+    }
+    _ = run(commands, ctx, b.provider.command, &.{.{ .string = buf[0..w] }}) catch return false;
+    return true;
 }
 
 /// Turn a failed invocation into a line worth reading. An argument mismatch
@@ -1250,6 +1289,53 @@ test "command: invoking on a user's behalf reports — the answer AND the refusa
     _ = try env.commands.bind(gpa, "quiet", comptime define("quiet", "Say nothing.", saysNothing));
     invoke(&env.commands, ctx, "quiet", &.{});
     try t.expectEqualStrings("listening…", ctx.head.echo.text());
+}
+
+/// A handler that reads its own arguments, as a plugin's does: it would do
+/// nothing, silently, if entered short — so entering it short is the bug.
+var entered_short: bool = false;
+fn readsItsOwn(ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value {
+    _ = ctx;
+    _ = data;
+    if (args.len == 0) entered_short = true;
+    return .nil;
+}
+
+/// What a `command.complete` provider was handed.
+var completed_call: [64]u8 = undefined;
+var completed_len: usize = 0;
+fn completes(ctx: *Context, args: struct { call: []const u8 }) anyerror!Value {
+    _ = ctx;
+    @memcpy(completed_call[0..args.call.len], args.call);
+    completed_len = args.call.len;
+    return .nil;
+}
+
+test "command: a call short of its declared arguments never enters the handler — it is offered to command.complete, else refused" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+    const args = [_]ArgSpec{ .{ .name = "pattern", .type = .string }, .{ .name = "glob", .type = .string, .optional = true } };
+    _ = try env.commands.bind(gpa, "search", .{ .name = "search", .summary = "Search.", .args = &args, .handler = readsItsOwn });
+
+    // Nobody completes calls here: refused, and the handler is not entered.
+    entered_short = false;
+    invoke(&env.commands, ctx, "search", &.{});
+    try t.expect(!entered_short);
+    try t.expect(std.mem.indexOf(u8, ctx.head.echo.text(), "search <pattern> [glob]") != null);
+
+    // A provider of `command.complete` is handed the call so far instead.
+    _ = try env.commands.bind(gpa, "ask-rest", comptime define("ask-rest", "Ask.", completes));
+    try env.actions.provide(.{ .action = complete_action, .command = "ask-rest" });
+    completed_len = 0;
+    invoke(&env.commands, ctx, "search", &.{});
+    try t.expect(!entered_short);
+    try t.expectEqualStrings("search", completed_call[0..completed_len]);
+
+    // The optional argument is not what makes a call short.
+    invoke(&env.commands, ctx, "search", &.{.{ .string = "needle" }});
+    try t.expect(!entered_short);
 }
 
 test "command Value: a borrowed live range follows edits and rejects another document" {

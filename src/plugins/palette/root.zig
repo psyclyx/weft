@@ -81,6 +81,14 @@ const own_cmds = [_]weft.CommandEntry{
         .icon = "command",
     },
     .{
+        .name = "palette.complete",
+        .arity = .whole,
+        .call = complete,
+        .params = "call",
+        .summary = "Ask for the arguments a command call still needs, then run it.",
+        .internal = true,
+    },
+    .{
         .name = "palette.show-status",
         .arity = .whole,
         .call = status,
@@ -100,11 +108,23 @@ const cmds = own_cmds ++ arg_cmds;
 
 fn initExtra() void {
     asker.install();
-    asker.setAsk(!std.mem.eql(u8, weft.config("arguments"), "off"));
+    const asks = !std.mem.eql(u8, weft.config("arguments"), "off");
+    asker.setAsk(asks);
+    // A call that reaches a command short — a key bound to it bare, a plugin
+    // running it — is offered here before it is refused (core's
+    // `command.complete`), and asked about the way a palette row is.
+    if (asks) weft.provide("command.complete", .{ .all = &.{} }, "palette.complete", 0);
     show_signature = !std.mem.eql(u8, weft.config("signature"), "off");
     list_all = std.mem.eql(u8, weft.config("commands"), "all");
     brief = std.mem.eql(u8, weft.config("detail"), "brief");
     recent_first = std.mem.eql(u8, weft.config("recent"), "on");
+}
+
+/// `palette.complete <call>`: the call core was handed short (its name, then
+/// what it was given), finished by asking for the rest.
+fn complete() void {
+    const call = weft.argStr(0) orelse return; // declared required: never short
+    asker.invokeLine(call);
 }
 
 /// What each row of the open palette runs, in the order the rows were added

@@ -333,6 +333,17 @@ pub const Stage = struct {
 /// Run `cmd` for `args` against the selection of the entry `ctx` is about:
 /// once, or once per extent/target, or not at all (a refusal). The body of
 /// `command.run` past name resolution.
+/// The one place a command's handler is entered, with the arguments it will
+/// actually get — a mapping's target included. A call short of what the
+/// command declares it needs is refused here, in every plane: a plugin's
+/// handler reads its own arguments, and a missing one used to be its `orelse
+/// return` — nothing done, nothing said. Refused, `command.invoke` says what
+/// the command takes.
+fn call(ctx: *command.Context, cmd: *const command.Command, args: []const command.Value) anyerror!command.Value {
+    if (args.len < command.requiredArity(cmd.args)) return error.ArityMismatch;
+    return cmd.handler(ctx, cmd.data, args);
+}
+
 pub fn run(ctx: *command.Context, cmd: *const command.Command, args: []const command.Value) anyerror!command.Value {
     if (explicitSubject(args)) {
         // A range names its subject — but on several extents, only a run
@@ -341,7 +352,7 @@ pub fn run(ctx: *command.Context, cmd: *const command.Command, args: []const com
         // dispatch) the range is one extent's among several, chosen by no
         // declaration: the silent act-on-the-primary bug, refused.
         if (ctx.visit == null and !ctx.reading_set and shapeOf(ctx).count > 1) return error.UndeclaredMapping;
-        return cmd.handler(ctx, cmd.data, args);
+        return call(ctx, cmd, args);
     }
     const over = if (cmd.arity) |a| switch (a) {
         .each => |e| e.over,
@@ -350,7 +361,7 @@ pub fn run(ctx: *command.Context, cmd: *const command.Command, args: []const com
     if (ctx.visit) |v| {
         // Nested in a run: the visited extent is the selection. A command
         // that maps over targets still finds this one's first.
-        const target = over orelse return cmd.handler(ctx, cmd.data, args);
+        const target = over orelse return call(ctx, cmd, args);
         return runOnTarget(ctx, cmd, args, target, v);
     }
     const shape = shapeOf(ctx);
@@ -361,14 +372,14 @@ pub fn run(ctx: *command.Context, cmd: *const command.Command, args: []const com
             const was = ctx.reading_set;
             ctx.reading_set = true;
             defer ctx.reading_set = was;
-            return cmd.handler(ctx, cmd.data, args);
+            return call(ctx, cmd, args);
         },
         .each => |e| e,
-    } else return cmd.handler(ctx, cmd.data, args); // undeclared, admitted: one extent
+    } else return call(ctx, cmd, args); // undeclared, admitted: one extent
     // One extent is the degenerate case; one ROW with a target to find is
     // too — there is no text to find it in, and nothing to map.
-    if (shape.count <= 1 and (over == null or !shape.text)) return cmd.handler(ctx, cmd.data, args);
-    const entry = ctx.entry() orelse return cmd.handler(ctx, cmd.data, args);
+    if (shape.count <= 1 and (over == null or !shape.text)) return call(ctx, cmd, args);
+    const entry = ctx.entry() orelse return call(ctx, cmd, args);
     const ed = entry.textEditor() orelse return mapRows(ctx, cmd, args, each);
     return mapText(ctx, cmd, args, entry.ref(), ed, each);
 }
@@ -389,7 +400,7 @@ fn runOnTarget(ctx: *command.Context, cmd: *const command.Command, args: []const
     defer ctx.gpa.free(full);
     full[0] = rv;
     @memcpy(full[1..], args);
-    return cmd.handler(ctx, cmd.data, full);
+    return call(ctx, cmd, full);
 }
 
 fn explicitSubject(args: []const command.Value) bool {
@@ -478,7 +489,7 @@ fn mapExtents(
         ed.clearGoal(); // a vertical aim is one caret's, never shared
         var v: Visit = .{ .index = i, .count = heads.len, .remaining = i, .stage = stage };
         ctx.visit = &v;
-        result = try cmd.handler(ctx, cmd.data, args);
+        result = try call(ctx, cmd, args);
     }
     return result;
 }
@@ -601,7 +612,7 @@ fn mapTargets(
         full[0] = .{ .range = .{ .document = doc, .start = t.anchors.?.start, .end = t.anchors.?.end } };
         var v: Visit = .{ .index = t.producer, .count = heads.len, .remaining = k, .stage = stage };
         ctx.visit = &v;
-        result = try cmd.handler(ctx, cmd.data, full);
+        result = try call(ctx, cmd, full);
     }
     return result;
 }
@@ -643,10 +654,10 @@ fn mapRows(ctx: *command.Context, cmd: *const command.Command, args: []const com
     std.debug.assert(each.over == null);
     const gpa = ctx.gpa;
     const focus = &ctx.head.scene_selection;
-    const services = ctx.semantic orelse return cmd.handler(ctx, cmd.data, args);
-    const view = focus.view orelse return cmd.handler(ctx, cmd.data, args);
-    const instance = services.views.get(view) orelse return cmd.handler(ctx, cmd.data, args);
-    const primary = focus.primaryRows() orelse return cmd.handler(ctx, cmd.data, args);
+    const services = ctx.semantic orelse return call(ctx, cmd, args);
+    const view = focus.view orelse return call(ctx, cmd, args);
+    const instance = services.views.get(view) orelse return call(ctx, cmd, args);
+    const primary = focus.primaryRows() orelse return call(ctx, cmd, args);
 
     const others = try gpa.dupe(Rows, focus.others.items);
     defer gpa.free(others);
@@ -691,7 +702,7 @@ fn mapRows(ctx: *command.Context, cmd: *const command.Command, args: []const com
         if (!focusRows(ctx, now, extents[i])) continue;
         var v: Visit = .{ .index = i, .count = extents.len, .remaining = i, .stage = &stage };
         ctx.visit = &v;
-        result = try cmd.handler(ctx, cmd.data, args);
+        result = try call(ctx, cmd, args);
         // What the run left its extent as (a mark set, a move made).
         if (focus.view) |still| if (still.eql(view)) {
             extents[i] = focus.primaryRows() orelse extents[i];

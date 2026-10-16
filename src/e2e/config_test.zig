@@ -2144,3 +2144,31 @@ test "e2e/config: under helix.js, a git status buffer and its commit draft work 
     ed.chord("SPC O s");
     try t.expect(drainUntilOracle(&proj, &ed, "git log --oneline", "helix: commit by key"));
 }
+
+// A command reached SHORT of its arguments — a key bound to it bare — is
+// never entered short (it used to be: a plugin's `orelse return` did nothing
+// and said nothing). Core offers the call to whoever provides
+// `command.complete`; the palette does, and asks for the rest the way a
+// palette row does, then runs it.
+test "e2e/config: a key bound to a command that needs an argument asks for it, then runs it" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader_state: ConfigLoader = .{ .ed = &ed };
+    defer loader_state.deinit();
+    try bootShowcase(gpa, &proj, &ed, &loader_state);
+
+    try ed.keymap.bind(gpa, "normal", "F9", "buffer.create", core.Keymap.prio_config, "test");
+    ed.press("F9", "");
+    ed.settle(2);
+    try t.expectEqualStrings("palette-arg", ed.mode());
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "<name>") != null);
+    ed.typeText("scratchpad");
+    ed.press("Return", "");
+    ed.settle(2);
+    try t.expectEqualStrings("scratchpad", ed.bufferName());
+}
