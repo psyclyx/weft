@@ -132,6 +132,29 @@ When a cap remains, it is shown: "2000 of more…". A live source runs on
 door 1: it streams its rows as the process finds them, and kills the
 previous query's process when the query moves on.
 
+*Landed (4):*
+- The picker keeps the ranking it made. A batch a source streams in is
+  scored alone and merged in, and a test holds the merge to a full
+  re-rank.
+- A live source's cap is 50,000 rows a generation, and hitting it shows
+  in the header (`[1/50000+]`).
+- REPL and net sessions wake the loop when bytes land (`Pool.wakeLoop`),
+  as process streams do, and the 8 ms stream poll is deleted.
+
+## Left
+
+- **Scratch borrowing.** An SDK read that returns a slice into the
+  shared read scratch (`weft.path()`, `slice`, `argStr`, …) is
+  overwritten by the next host call that reads. modes' runner carried
+  such a path into an argv. The fix belongs in the SDK, not in each
+  caller.
+- **The argument asker's prompt** is the status-line minibuffer, which
+  is easy to miss in the IDE layout.
+- **The file finder** (`fs_source.LocalFinder` behind
+  `wl_open_file_pick`) and Browse Remote Files' `RemoteDir` move to
+  plugins over the live pick. They need either an async directory-walk
+  door or the files plugin holding `proc`.
+
 ## Order
 
 1. The process door, with streaming and argv. The live search moves onto
