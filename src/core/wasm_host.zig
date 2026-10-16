@@ -61,6 +61,8 @@ pub const notifyPollIfReady = activation.notifyPollIfReady;
 pub const notifyExtents = activation.notifyExtents;
 pub const deliverSignals = activation.deliverSignals;
 pub const typed_signal = activation.typed_signal;
+pub const caret_signal = activation.caret_signal;
+pub const mode_signal = activation.mode_signal;
 
 /// The context doors, whose set and get bodies both membranes run.
 /// Re-exported for the same function-pointer proof as `edit_doors`, and for

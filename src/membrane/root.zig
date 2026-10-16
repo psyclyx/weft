@@ -357,6 +357,7 @@ pub const imports = [_]Entry{
     // ── surface.zig — the retained overlay (which-key/files/git) ─────
     .{ .name = "wl_surface_begin", .params = &.{.u32}, .results = &.{}, .group = .surface, .doc = "open a retained overlay surface at `placement`" },
     .{ .name = "wl_surface_caret", .params = &.{.u32}, .results = &.{}, .group = .surface, .doc = "open a retained overlay surface anchored at document offset `offset` (rendering P2)" },
+    .{ .name = "wl_surface_doc", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .surface, .doc = "give the caret surface being built a markdown document body (shown beside its rows, or as the popup when it has none); flags bit 0: rather above the caret" },
     .{ .name = "wl_surface_row", .params = &.{}, .results = &.{}, .group = .surface, .doc = "start a new row in the open surface" },
     .{ .name = "wl_surface_span", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .surface, .doc = "append a styled text span to the current surface row" },
     .{ .name = "wl_surface_end", .params = &.{.i32}, .results = &.{}, .group = .surface, .doc = "close the open surface, marking a row selected or not" },
@@ -638,9 +639,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 278; // +1 wl_buffer_docked (a buffer switcher lists documents, not chrome), +1 wl_signal_emit_after (debounced signals), +2 wl_semantic_fs_watch + wl_semantic_fs_changed (a listing follows its directory on disk)
+const max_import_count: usize = 279; // +1 wl_surface_doc (a caret popup shows a markdown document: hover, docs, signature help), +1 wl_buffer_docked (a buffer switcher lists documents, not chrome), +1 wl_signal_emit_after (debounced signals), +2 wl_semantic_fs_watch + wl_semantic_fs_changed (a listing follows its directory on disk)
 const max_export_count: usize = 22;
-const max_semantic_operation_count: usize = 298; // +1 wl_buffer_docked, +2 wl_semantic_fs_watch + wl_semantic_fs_changed
+const max_semantic_operation_count: usize = 299; // +1 wl_surface_doc, +1 wl_buffer_docked, +2 wl_semantic_fs_watch + wl_semantic_fs_changed
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;

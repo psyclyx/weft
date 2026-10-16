@@ -99,6 +99,14 @@ pub const Pane = struct {
     /// every relocation and is freed when the pane goes. Kept by
     /// `app/window_cmds.holdShown`, never by a renderer.
     held: std.ArrayList(core.Buffers.Id) = .empty,
+    /// Whether this pane wraps its rows, when the person said
+    /// (`window.toggle-wrap`); null follows what the entry it shows asks for
+    /// (`view.wrap`, else a prose entry wraps). A pane's, not the editor's:
+    /// two panes on one document may differ.
+    wrap: ?bool = null,
+    /// Whether the last frame wrapped it — what a toggle flips from. Kept by
+    /// the frame builder, as `top_row` is.
+    wrapped: bool = false,
 
     /// Whether the pane holds `id`.
     pub fn holds(self: *const Pane, id: core.Buffers.Id) bool {
@@ -504,8 +512,8 @@ pub const Layout = struct {
         var second_held: std.ArrayList(core.Buffers.Id) = .empty;
         errdefer second_held.deinit(self.gpa);
         try second_held.append(self.gpa, old.buffer_id);
-        first.* = .{ .leaf = .{ .id = first_id, .buffer_id = old.buffer_id, .top_row = old.top_row, .attrs = old.attrs, .held = old.held } }; // keeps the focus + scroll
-        second.* = .{ .leaf = .{ .id = second_id, .buffer_id = old.buffer_id, .top_row = old.top_row, .attrs = old.attrs, .held = second_held } };
+        first.* = .{ .leaf = .{ .id = first_id, .buffer_id = old.buffer_id, .top_row = old.top_row, .attrs = old.attrs, .held = old.held, .wrap = old.wrap } }; // keeps the focus + scroll
+        second.* = .{ .leaf = .{ .id = second_id, .buffer_id = old.buffer_id, .top_row = old.top_row, .attrs = old.attrs, .held = second_held, .wrap = old.wrap } };
         self.freeSlot(old.id); // retire the pre-split identity — only now that the new slots are committed
         // Mutate the focused leaf into a split in place — no parent relink,
         // so pointers elsewhere in the tree stay valid.

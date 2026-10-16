@@ -55,4 +55,5 @@ test {
     _ = @import("quit_test.zig");
     _ = @import("indent_test.zig");
     _ = @import("completion_test.zig");
+    _ = @import("docs_popup_test.zig");
 }

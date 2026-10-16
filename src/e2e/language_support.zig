@@ -129,7 +129,11 @@ pub const Peer = struct {
             \\    if ($method eq "textDocument/completion") { open(my $comp, ">>", ".lsp-$tag-completion") or die; print $comp "x"; close $comp; }
             \\    my $result = {};
             \\    if ($method eq "initialize") {
-            \\        $result = { capabilities => { completionProvider => { triggerCharacters => ["."] } } };
+            \\        $result = { capabilities => { completionProvider => { triggerCharacters => ["."] }, hoverProvider => JSON::PP::true, signatureHelpProvider => { triggerCharacters => ["(", ","] } } };
+            \\    } elsif ($method eq "textDocument/hover") {
+            \\        $result = { contents => { kind => "markdown", value => "```zig\nfn hermetic(first: u8, count: usize) void\n```\n\nA hermetic hover whose prose runs on long enough that no popup could hold it on one line,\nso it has to wrap rather than run off the window.\n\nSecond paragraph." } };
+            \\    } elsif ($method eq "textDocument/signatureHelp") {
+            \\        $result = { signatures => [{ label => "hermetic(first: u8, count: usize) void", parameters => [{ label => "first: u8", documentation => "The first." }, { label => "count: usize", documentation => "How many times." }], documentation => "Hermetic signature docs." }], activeSignature => 0, activeParameter => 1 };
             \\    } elsif ($method eq "textDocument/completion") {
             \\        my $item = "hermetic_${tag}${where}_completion";
             \\        $result = { items => [{ label => $item, insertText => $item }] };

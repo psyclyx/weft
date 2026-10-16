@@ -1120,7 +1120,7 @@ test "lsp: signature help + inlay hints via the lsp plugin — real zls" {
     ed.press("j", ""); // line 5
     ed.press("f", "");
     ed.typeText("2"); // onto the first argument, inside the parens
-    try t.expect(h.drainEcho(ed, "lsp.signature-help", "i32"));
+    try t.expect(h.drainSurfaceText(ed, "lsp.signature-help", "i32"));
 
     // inlay hints over the document → the plugin echoes the count (round-trip).
     try t.expect(h.drainEcho(ed, "lsp.toggle-inlay-hints", "inlay hints"));

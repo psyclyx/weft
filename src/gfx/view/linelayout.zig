@@ -191,6 +191,19 @@ fn flipped(flips: []const usize, off: usize) bool {
     }.order) != null;
 }
 
+/// Soft wrap for one row: break where the room ends — at a word boundary
+/// where one is in reach, else mid-word — and stop emitting segments that
+/// would start below `y_limit` (the body's bottom).
+pub const Wrap = struct {
+    /// The room for text, in pixels, from the content's origin (proportional
+    /// lines; a mono line reads its room in cells).
+    width: f32,
+    /// No segment after a row's first starts at or past this y.
+    y_limit: f32 = std.math.inf(f32),
+};
+
+/// Lay `row` out as one visual line — no wrap. Kept for callers and tests
+/// that measure a single row.
 pub fn layoutLine(
     v: *View,
     scratch: Allocator,
@@ -204,15 +217,84 @@ pub fn layoutLine(
     styles: StyleInputs,
     flips: []const usize,
 ) !layout.VisualLine {
-    return if (md) |m|
-        layoutMarkdownLine(v, scratch, la, runs, rope, row, y_top, m, flips)
+    var out: std.ArrayList(layout.VisualLine) = .empty;
+    try layoutRow(v, scratch, la, runs, rope, row, y_top, cols_visible, md, styles, flips, null, &out);
+    return out.items[0];
+}
+
+/// Lay `row` out into `out`: one visual line, or — under `wrap` — as many
+/// segments as its text needs, each the next one down (`VisualLine.wraps`
+/// on all but the last). Every segment's stops are the caret's, so the
+/// geometry map, selections and clicks read a wrapped row as they read any.
+pub fn layoutRow(
+    v: *View,
+    scratch: Allocator,
+    la: Allocator,
+    runs: *std.ArrayList(Run),
+    rope: *const stemma.Rope,
+    row: usize,
+    y_top: f32,
+    cols_visible: usize,
+    md: ?MdInline,
+    styles: StyleInputs,
+    flips: []const usize,
+    wrap: ?Wrap,
+    out: *std.ArrayList(layout.VisualLine),
+) !void {
+    if (md) |m|
+        try layoutMarkdownLine(v, scratch, la, runs, rope, row, y_top, m, flips, wrap, out)
     else
-        layoutMonoLine(v, scratch, la, runs, rope, row, y_top, cols_visible, styles, flips);
+        try layoutMonoLine(v, scratch, la, runs, rope, row, y_top, cols_visible, styles, flips, wrap, out);
+}
+
+/// Where a line of `text` breaks to fit `room` units, measuring each scalar
+/// with `width(byte_index, scalar, x)`: the byte index each segment after
+/// the first starts at. A break goes after the last space in reach; with
+/// none, mid-word. Scratch-owned.
+fn breaksOf(
+    scratch: Allocator,
+    text: []const u8,
+    room: f32,
+    ctx: anytype,
+    comptime width: fn (@TypeOf(ctx), usize, []const u8, f32) f32,
+) ![]usize {
+    var breaks: std.ArrayList(usize) = .empty;
+    if (room <= 0) return breaks.items;
+    var seg_start: usize = 0;
+    var x: f32 = 0;
+    // The byte after the last space in this segment, and the x there.
+    var soft: ?struct { at: usize, x: f32 } = null;
+    var byte: usize = 0;
+    while (byte < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[byte]) catch 1;
+        const s = text[byte..@min(text.len, byte + len)];
+        const w = width(ctx, byte, s, x);
+        if (x + w > room + 0.01 and byte > seg_start) {
+            if (soft) |sp| if (sp.at > seg_start and sp.at <= byte) {
+                try breaks.append(scratch, sp.at);
+                seg_start = sp.at;
+                x -= sp.x;
+                soft = null;
+                continue; // re-measure this scalar against the new segment
+            };
+            try breaks.append(scratch, byte);
+            seg_start = byte;
+            x = 0;
+            soft = null;
+            continue;
+        }
+        x += w;
+        byte += s.len;
+        if (s.len == 1 and (s[0] == ' ' or s[0] == '\t')) soft = .{ .at = byte, .x = x };
+    }
+    return breaks.items;
 }
 
 /// Plain buffers: one mono cell per scalar on the pixel grid (uniform
 /// advances). Per-cell color from the caret flip, diagnostics, then
-/// highlight. Stops fall on integer columns — the degenerate case.
+/// highlight. Stops fall on integer columns — the degenerate case. Under
+/// `wrap` a row longer than the pane goes on in segments beneath, indented
+/// past the gutter; without it, it is cut at the pane's edge.
 fn layoutMonoLine(
     v: *View,
     scratch: Allocator,
@@ -224,10 +306,11 @@ fn layoutMonoLine(
     cols_visible: usize,
     styles: StyleInputs,
     flips: []const usize,
-) !layout.VisualLine {
+    wrap: ?Wrap,
+    out: *std.ArrayList(layout.VisualLine),
+) !void {
     const line = rope.lineRange(row);
-    const baseline_y = y_top + v.ascent;
-    const text = try readLine(scratch, rope, line, cols_visible * 4 + 4);
+    const text = try readLine(scratch, rope, line, if (wrap != null) max_wrapped_line else cols_visible * 4 + 4);
 
     var cells: std.ArrayList(text_engine.Cell) = .empty;
     var stops: std.ArrayList(layout.Stop) = .empty;
@@ -245,6 +328,25 @@ fn layoutMonoLine(
     // Third-party feeds compose onto the same prefix, after the entry's own
     // decorations: one more producer of leading cells, not a new mechanism.
     for (styles.anno_layers) |*al| col = try layoutRowPrefix(v, scratch, al, line, cols_visible, &pfx_bytes, &cells, col);
+    // Where a continuation segment's text starts: under the first's.
+    const text_col = col;
+
+    // Where the row breaks, in cells of the room past the prefix.
+    // A tab reaches the next stop of the row's absolute columns, as drawn.
+    const Cols = struct {
+        fn width(start: usize, _: usize, s: []const u8, x: f32) f32 {
+            if (s.len == 1 and s[0] == '\t') {
+                const c = start + @as(usize, @intFromFloat(x));
+                return @floatFromInt(layout.tabStopAfter(c) - c);
+            }
+            return 1;
+        }
+    };
+    const breaks: []const usize = if (wrap != null and cols_visible > text_col + 1)
+        try breaksOf(scratch, text, @floatFromInt(cols_visible - text_col), text_col, Cols.width)
+    else
+        &.{};
+    var next_break: usize = 0;
 
     // Overlays draw OVER real cells: a covered cell sources its glyph from
     // the overlay's text instead of the document's. The text, its stops, and
@@ -252,12 +354,25 @@ fn layoutMonoLine(
     var overlays: Overlays = .{};
     overlays.collect(styles, line);
 
+    var seg_start = line.start;
+    var seg_top = y_top;
     // The shaped buffer is built cell by cell after the prefix: each cell
     // appends exactly the bytes its glyph comes from (a real scalar, a tab's
     // space, or an overlay's scalar), so every shaped glyph has its cell.
     var it = (std.unicode.Utf8View.init(text) catch return error.InvalidUtf8).iterator();
     var byte: usize = 0;
     while (it.nextCodepointSlice()) |s| : (col += 1) {
+        if (next_break < breaks.len and byte == breaks[next_break]) {
+            // The room is used: finish this segment, go on beneath it.
+            next_break += 1;
+            const abs_here = line.start + byte;
+            try stops.append(la, .{ .off = @intCast(abs_here), .x = v.origin_x + @as(f32, @floatFromInt(col)) * v.cell_w });
+            try emitMono(v, scratch, la, runs, out, &cells, &pfx_bytes, &stops, .{ .start = seg_start, .end = abs_here }, row, seg_top, true);
+            seg_top += v.line_h;
+            seg_start = abs_here;
+            col = text_col;
+            if (seg_top >= wrap.?.y_limit) return;
+        }
         if (col >= cols_visible) break;
         const abs = line.start + byte;
         const b0 = pfx_bytes.items.len;
@@ -304,13 +419,36 @@ fn layoutMonoLine(
             .color = ov.color(v),
         });
     }
+    try emitMono(v, scratch, la, runs, out, &cells, &pfx_bytes, &stops, .{ .start = seg_start, .end = line.end }, row, seg_top, false);
+}
 
+/// The longest line a wrapped pane reads whole (bytes); past it the rest is
+/// cut, as an unwrapped pane cuts at its edge.
+const max_wrapped_line = 64 * 1024;
+
+/// Shape a mono segment's cells into a run and file its visual line; the
+/// buffers start over for the next segment.
+fn emitMono(
+    v: *View,
+    scratch: Allocator,
+    la: Allocator,
+    runs: *std.ArrayList(Run),
+    out: *std.ArrayList(layout.VisualLine),
+    cells: *std.ArrayList(text_engine.Cell),
+    pfx_bytes: *std.ArrayList(u8),
+    stops: *std.ArrayList(layout.Stop),
+    src: stemma.Range,
+    row: usize,
+    top: f32,
+    wraps: bool,
+) !void {
+    const baseline_y = top + v.ascent;
     if (cells.items.len > 0) {
         const shaped = try text_engine.shape(scratch, &v.face_set.mono, pfx_bytes.items, .{});
         try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .cell = cells.items } });
     }
-    return .{
-        .src = line,
+    try out.append(la, .{
+        .src = src,
         .row = row,
         .baseline_y = baseline_y,
         .ascent = v.ascent,
@@ -318,7 +456,11 @@ fn layoutMonoLine(
         .height = v.line_h,
         .x0 = v.origin_x,
         .stops = stops.items,
-    };
+        .wraps = wraps,
+    });
+    cells.* = .empty;
+    pfx_bytes.* = .empty;
+    stops.* = .empty;
 }
 
 /// Lay out a row's `virtual_before` decorations as leading dimmed cells at the
@@ -602,11 +744,29 @@ fn layoutMarkdownLine(
     y_top: f32,
     md: MdInline,
     flips: []const usize,
-) !layout.VisualLine {
+    wrap: ?Wrap,
+    out: *std.ArrayList(layout.VisualLine),
+) !void {
     const line = rope.lineRange(row);
-    const text = try readLine(scratch, rope, line, 4096);
+    const text = try readLine(scratch, rope, line, if (wrap != null) max_wrapped_line else 4096);
     for (text) |*b| {
         if (b.* == '\t') b.* = ' ';
+    }
+    // Read, not edited (a popup's document): the syntax markers go, and a
+    // line that is nothing but markers (a code fence) goes with them.
+    if (md.rendered) {
+        var all_markers = text.len > 0;
+        for (0..text.len) |k| if (!md.at(line.start + k).marker or md.at(line.start + k).block) {
+            all_markers = false;
+            break;
+        };
+        if (all_markers) return;
+        // A blank line between blocks is spacing, not a line of nothing.
+        if (text.len == 0) {
+            const h = @round(v.line_h * 0.5);
+            try out.append(la, .{ .src = line, .row = row, .baseline_y = y_top + h, .ascent = h, .descent = 0, .height = h, .x0 = v.origin_x, .stops = try la.dupe(layout.Stop, &.{.{ .off = @intCast(line.end), .x = v.origin_x }}) });
+            return;
+        }
     }
 
     // The caret cluster [lo, hi) whose glyph flips to cursor_text: the first
@@ -624,40 +784,100 @@ fn layoutMarkdownLine(
     // Line height follows the tallest role on the line (headings).
     var max_scale: f32 = 1;
     for (0..text.len) |k| max_scale = @max(max_scale, inlineStyle(v, md.at(line.start + k)).em / v.em);
-    const ascent = v.ascent * max_scale;
-    const baseline_y = y_top + ascent;
 
-    var stops: std.ArrayList(layout.Stop) = .empty;
-    var pen: f32 = v.origin_x;
-    var i: usize = 0;
-    while (i < text.len) {
-        const st = effStyle(v, md, line.start + i, caret_lo, caret_hi);
-        var j = i + 1;
-        while (j < text.len and effStyle(v, md, line.start + j, caret_lo, caret_hi).eql(st)) j += 1;
-        const shaped = try text_engine.shape(scratch, st.faces, text[i..j], .{ .style = st.style });
-        for (shaped.glyphs) |g| {
-            try stops.append(la, .{ .off = @intCast(line.start + i + g.source_start), .x = pen + st.em * g.x_offset });
+    const Shape = struct {
+        v: *View,
+        md: MdInline,
+        text: []const u8,
+        base: usize,
+        lo: usize,
+        hi: usize,
+
+        fn style(self: @This(), k: usize) InlineStyle {
+            return effStyle(self.v, self.md, self.base + k, self.lo, self.hi);
         }
-        try runs.append(scratch, .{
-            .shaped = shaped,
-            .baseline_y = baseline_y,
-            .place = .{ .prop = .{ .x = pen, .em = st.em, .color = st.color } },
-        });
-        pen += shaped.advanceX() * st.em;
-        i = j;
-    }
-    try stops.append(la, .{ .off = @intCast(line.end), .x = pen });
-
-    return .{
-        .src = line,
-        .row = row,
-        .baseline_y = baseline_y,
-        .ascent = ascent,
-        .descent = v.line_h * max_scale - ascent,
-        .height = v.line_h * max_scale,
-        .x0 = v.origin_x,
-        .stops = stops.items,
+        fn hidden(self: @This(), k: usize) bool {
+            const a = self.md.at(self.base + k);
+            return self.md.rendered and a.marker and !a.block;
+        }
     };
+    const sh: Shape = .{ .v = v, .md = md, .text = text, .base = line.start, .lo = caret_lo, .hi = caret_hi };
+
+    // Under wrap, measure the whole line first: each scalar's advance, from
+    // the same styled shaping the segments draw with.
+    const breaks: []const usize = if (wrap) |w| blk: {
+        const adv = try scratch.alloc(f32, text.len);
+        @memset(adv, 0);
+        var i: usize = 0;
+        while (i < text.len) {
+            if (sh.hidden(i)) {
+                i += 1;
+                continue;
+            }
+            const st = sh.style(i);
+            var j = i + 1;
+            while (j < text.len and !sh.hidden(j) and sh.style(j).eql(st)) j += 1;
+            const shaped = try text_engine.shape(scratch, st.faces, text[i..j], .{ .style = st.style });
+            for (shaped.glyphs) |g| adv[i + g.source_start] += st.em * g.x_advance;
+            i = j;
+        }
+        const Adv = struct {
+            fn width(a: []const f32, byte: usize, s: []const u8, _: f32) f32 {
+                var sum: f32 = 0;
+                for (a[byte .. byte + s.len]) |x| sum += x;
+                return sum;
+            }
+        };
+        break :blk try breaksOf(scratch, text, w.width, @as([]const f32, adv), Adv.width);
+    } else &.{};
+
+    var seg_from: usize = 0;
+    var top = y_top;
+    for (0..breaks.len + 1) |k| {
+        const seg_to = if (k < breaks.len) breaks[k] else text.len;
+        const wraps = k < breaks.len;
+        const ascent = v.ascent * max_scale;
+        const baseline_y = top + ascent;
+        var stops: std.ArrayList(layout.Stop) = .empty;
+        var pen: f32 = v.origin_x;
+        var i = seg_from;
+        while (i < seg_to) {
+            if (sh.hidden(i)) {
+                try stops.append(la, .{ .off = @intCast(line.start + i), .x = pen });
+                i += 1;
+                continue;
+            }
+            const st = sh.style(i);
+            var j = i + 1;
+            while (j < seg_to and !sh.hidden(j) and sh.style(j).eql(st)) j += 1;
+            const shaped = try text_engine.shape(scratch, st.faces, text[i..j], .{ .style = st.style });
+            for (shaped.glyphs) |g| {
+                try stops.append(la, .{ .off = @intCast(line.start + i + g.source_start), .x = pen + st.em * g.x_offset });
+            }
+            try runs.append(scratch, .{
+                .shaped = shaped,
+                .baseline_y = baseline_y,
+                .place = .{ .prop = .{ .x = pen, .em = st.em, .color = st.color } },
+            });
+            pen += shaped.advanceX() * st.em;
+            i = j;
+        }
+        try stops.append(la, .{ .off = @intCast(line.start + seg_to), .x = pen });
+        try out.append(la, .{
+            .src = .{ .start = line.start + seg_from, .end = if (wraps) line.start + seg_to else line.end },
+            .row = row,
+            .baseline_y = baseline_y,
+            .ascent = ascent,
+            .descent = v.line_h * max_scale - ascent,
+            .height = v.line_h * max_scale,
+            .x0 = v.origin_x,
+            .stops = stops.items,
+            .wraps = wraps,
+        });
+        top += v.line_h * max_scale;
+        seg_from = seg_to;
+        if (wraps) if (wrap) |w| if (top >= w.y_limit) return;
+    }
 }
 
 /// Base style for a markdown attribute: role → size + face family,
@@ -1025,4 +1245,23 @@ test "annotations: the presentation composites third-party feeds it was never to
     var stale_runs: std.ArrayList(Run) = .empty;
     const stale_line = try layoutLine(&v, a, a, &stale_runs, doc.text(), 1, 0, 40, null, stale, &.{});
     try testing.expectApproxEqAbs(v.origin_x, stale_line.stops[0].x, 0.01);
+}
+
+test "soft wrap breaks after the last space in reach, mid-word only when a word is longer than the room" {
+    const Unit = struct {
+        fn width(_: void, _: usize, _: []const u8, _: f32) f32 {
+            return 1;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // "alpha beta gamma" in 11 cells: "alpha beta " | "gamma".
+    try testing.expectEqualSlices(usize, &.{11}, try breaksOf(a, "alpha beta gamma", 11, {}, Unit.width));
+    // In 8: "alpha " | "beta " | "gamma".
+    try testing.expectEqualSlices(usize, &.{ 6, 11 }, try breaksOf(a, "alpha beta gamma", 8, {}, Unit.width));
+    // A word longer than the room breaks inside it.
+    try testing.expectEqualSlices(usize, &.{ 4, 8 }, try breaksOf(a, "abcdefghij", 4, {}, Unit.width));
+    // What fits does not break.
+    try testing.expectEqual(@as(usize, 0), (try breaksOf(a, "short", 40, {}, Unit.width)).len);
 }

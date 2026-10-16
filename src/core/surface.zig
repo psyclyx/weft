@@ -100,6 +100,10 @@ pub const Surface = struct {
     /// membrane surfaces; the per-frame arena for pick/hover scratch builds).
     /// Empty when there's nothing to show.
     info: []u8 = &.{},
+    /// A caret surface that would rather sit ABOVE the caret's line than
+    /// below it (signature help, which a completion list below must not
+    /// cover). It goes below when there is no room above.
+    above: bool = false,
 
     pub fn deinit(self: *Surface, gpa: Allocator) void {
         freeRows(gpa, &self.rows);

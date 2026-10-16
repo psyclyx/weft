@@ -118,7 +118,9 @@ pub const InlineAttr = packed struct(u8) {
     italic: bool = false,
     link: bool = false,
     marker: bool = false,
-    _pad: u1 = 0,
+    /// A marker that is BLOCK structure (a list bullet, a quote's `>`), not an
+    /// inline delimiter: a rendered document keeps it where it drops the rest.
+    block: bool = false,
 };
 pub const Composition = enum { merge_ranked, union_all, first_wins };
 pub const Latency = enum { instant, fast, slow };

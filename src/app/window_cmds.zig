@@ -19,6 +19,7 @@ pub const WindowCtx = struct {
     focus_dir: ?window_layout.Dir = null,
     move_dir: ?window_layout.Dir = null,
     focus_next: bool = false, // cycle focus (`window.focus-next`)
+    toggle_wrap: bool = false, // the focused pane wraps, or stops (`window.toggle-wrap`)
 };
 
 /// Which window operation a bound command requests (mapped to a WindowCtx
@@ -37,6 +38,7 @@ pub const WindowAction = enum {
     move_right,
     move_up,
     move_down,
+    toggle_wrap,
 };
 
 /// A command → intent binding: which WindowCtx to poke and how. Held in a
@@ -59,6 +61,7 @@ pub const cmd_table = [_]struct { name: []const u8, action: WindowAction, summar
     .{ .name = "window.move-up", .action = .move_up, .summary = "Swap the focused window with the one above.", .meta = .{ .label = "Move Window Up" } },
     .{ .name = "window.move-down", .action = .move_down, .summary = "Swap the focused window with the one below.", .meta = .{ .label = "Move Window Down" } },
     .{ .name = "window.focus-next", .action = .focus_next, .summary = "Focus the next window.", .meta = .{ .label = "Focus Next Window" } },
+    .{ .name = "window.toggle-wrap", .action = .toggle_wrap, .summary = "Wrap the focused window's long lines, or stop wrapping them.", .meta = .{ .label = "Toggle Word Wrap" } },
 };
 
 /// Count of window commands; `main()` sizes the stable `WindowActionCtx`
@@ -103,6 +106,7 @@ pub fn windowActionHandler(ctx: *core.command.Context, data: ?*anyopaque, args: 
         .move_right => a.win.move_dir = .right,
         .move_up => a.win.move_dir = .up,
         .move_down => a.win.move_dir = .down,
+        .toggle_wrap => a.win.toggle_wrap = true,
     }
     return ok_echo(ctx, "window");
 }
@@ -165,6 +169,12 @@ pub fn applyIntents(
             applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
             dirty = true;
         }
+    }
+    if (win_ctx.toggle_wrap) {
+        win_ctx.toggle_wrap = false;
+        const p = window_layout.headFocus(win_layout, head).pane();
+        p.wrap = !p.wrapped;
+        dirty = true;
     }
     if (win_ctx.focus_next) {
         win_ctx.focus_next = false;

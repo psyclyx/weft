@@ -618,3 +618,110 @@ test "app/window: each split keeps its own tabs — a new split holds what it wa
     try t.expectEqual(@as(usize, 1), ed.win_layout.primaryCount());
     try expectTabs(&ed, window_layout.headFocus(ed.win_layout, ed.head).pane().id, &.{ first, alpha });
 }
+
+test "app/window: a pane told to wrap — a long row goes on in segments beneath; the caret, visual up/down, a click and a selection read them" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadVim(&ed);
+    // Wrap is the pane's: this one is told to.
+    ed.run("window.toggle-wrap");
+    ed.applyWindow();
+    ed.press("i", "");
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(gpa);
+    for (0..60) |i| try line.print(gpa, "word{d} ", .{i});
+    ed.typeText(line.items);
+    ed.typeText("\nsecond row\n");
+    ed.press("Escape", "");
+    gpa.free(try ed.renderComposite());
+    const v = try ed.ensureView();
+    const lines = v.frame_layout.lines;
+    // Row 0 is several visual lines; each but its last continues, and each
+    // begins where the one before ended — after a space, never mid-word.
+    var segs: usize = 0;
+    for (lines) |l| if (l.row == 0) {
+        segs += 1;
+    };
+    try t.expect(segs >= 3);
+    const text = try ed.textAlloc();
+    defer gpa.free(text);
+    for (lines[0 .. segs - 1], lines[1..segs]) |a, b| {
+        try t.expect(a.wraps);
+        try t.expectEqual(a.src.end, b.src.start);
+        try t.expectEqual(@as(u8, ' '), text[b.src.start - 1]);
+        try t.expect(b.baseline_y > a.baseline_y);
+    }
+    try t.expect(!lines[segs - 1].wraps);
+    // A caret at a wrap point is drawn at the start of the next segment.
+    const boundary = lines[0].src.end;
+    try t.expectEqual(@as(?usize, 1), v.frame_layout.lineForOffset(boundary));
+
+    // A visual step down (an arrow, `cursor.down` — vim's `j` stays
+    // logical, as vim's does) from the first segment lands on the second.
+    ed.buffers.active().textEditor().?.placeCursor(2);
+    ed.run("cursor.down");
+    gpa.free(try ed.renderComposite());
+    const after_j = ed.buffers.active().textEditor().?.cursorOffset();
+    try t.expect(after_j >= lines[1].src.start and after_j < lines[1].src.end);
+    ed.run("cursor.up");
+    try t.expect(ed.buffers.active().textEditor().?.cursorOffset() < lines[0].src.end);
+
+    // A click on the second segment lands in it.
+    const l1 = v.frame_layout.lines[1];
+    const hit = v.frame_layout.offsetAtPoint(l1.x0 + 30, l1.baseline_y - 2);
+    try t.expect(hit >= l1.src.start and hit <= l1.src.end);
+
+    // A selection across a wrap point covers part of both segments — the
+    // geometry its wash is drawn from.
+    const sel_start = lines[0].src.end - 3;
+    const sel_end = lines[1].src.start + 3;
+    var washed: usize = 0;
+    for (v.frame_layout.lines) |l| {
+        if (@max(sel_start, l.src.start) < @min(sel_end, l.src.end)) washed += 1;
+    }
+    try t.expectEqual(@as(usize, 2), washed);
+}
+
+test "app/window: wrap is the pane's — the other half of a split keeps its own, and a prose entry wraps unless its pane says otherwise" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadVim(&ed);
+    ed.press("i", "");
+    for (0..40) |i| {
+        var b: [16]u8 = undefined;
+        ed.typeText(try std.fmt.bufPrint(&b, "word{d} ", .{i}));
+    }
+    ed.press("Escape", "");
+    ed.run("window.split-right");
+    ed.applyWindow();
+    ed.run("window.toggle-wrap");
+    ed.applyWindow();
+    gpa.free(try ed.renderComposite());
+    var slots: [window_layout.max_panes]window_layout.Slot = undefined;
+    const frame: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(app_w), .h = @floatFromInt(app_h) };
+    const n = ed.win_layout.collect(window_layout.headFocus(ed.win_layout, ed.head), frame, &slots);
+    try t.expectEqual(@as(usize, 2), n);
+    var wrapped: usize = 0;
+    for (slots[0..n]) |s| {
+        if (s.pane.wrapped) wrapped += 1;
+    }
+    try t.expectEqual(@as(usize, 1), wrapped);
+
+    // A markdown entry wraps by itself; its pane can still say no.
+    const md_path = try tmpPath(gpa, "wrap-prose", "notes.md");
+    defer gpa.free(md_path);
+    try core.file.writeBytesMakingDirs(gpa, ".zig-cache/tmp/wrap-prose", md_path, "# Notes\n\nA paragraph long enough to need wrapping in any pane narrower than a whole screen of text, which a split pane always is, and then some more words.\n");
+    ed.runStr("file.open", md_path);
+    ed.applyWindow();
+    gpa.free(try ed.renderComposite());
+    const focused = window_layout.headFocus(ed.win_layout, ed.head).pane();
+    try t.expect(focused.wrapped);
+    ed.run("window.toggle-wrap");
+    ed.applyWindow();
+    gpa.free(try ed.renderComposite());
+    try t.expect(!focused.wrapped);
+}

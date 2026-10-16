@@ -393,9 +393,10 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         const info = cl.info orelse return error.NoInfoPanel;
-        try t.expect(!info.flipped_left);
+        try t.expect(!info.flipped_left and !info.stacked);
         try t.expect(info.x > cl.x + cl.w);
-        try t.expectEqual(@as(usize, 2), info.lines.len);
+        // A markdown document: its two lines are one paragraph, read as one.
+        try t.expect(info.lines >= 1);
         try checkOrRecord(gpa, &record_cases, loaded, &any_mismatch, "info_panel_right", cl, 0);
     }
 
@@ -425,8 +426,13 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
+        // No room beside the list on either side: the panel goes below (or
+        // above) it — never over it.
         const info = cl.info orelse return error.NoInfoPanel;
-        try t.expect(info.flipped_left);
+        try t.expect(info.flipped_left or info.stacked);
+        const overlap_x = info.x < cl.x + cl.w and cl.x < info.x + info.w;
+        const overlap_y = info.y < cl.y + cl.h and cl.y < info.y + info.h;
+        try t.expect(!(overlap_x and overlap_y));
         try checkOrRecord(gpa, &record_cases, loaded, &any_mismatch, "info_panel_left_fallback", cl, 0);
     }
 

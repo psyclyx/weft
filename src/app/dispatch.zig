@@ -143,6 +143,12 @@ pub fn visualVertical(ed: *core.Editor, view: *view_mod.View, dir: i32) !void {
     const cur = ed.cursorOffset();
     const gx = ed.goalX() orelse try view.xOfOffsetOnRow(rope, cur);
     ed.setGoalX(gx); // persists even at the doc edges, for the next step
+    // On screen, a step is to the next VISUAL line — a wrapped row's next
+    // segment as much as the next row (folded rows were never laid out).
+    if (view.visualStep(rope, cur, dir, gx)) |target| {
+        ed.moveToVisual(target, gx);
+        return;
+    }
     const pt = rope.offsetToPoint(cur);
     const rows = rope.lineCount();
     // Skip folded rows (shared fold-aware successor — the git status buffer's

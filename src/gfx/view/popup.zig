@@ -28,6 +28,7 @@ const text_engine = @import("weft_text");
 const core = @import("weft_core");
 const status_layout = @import("status_layout.zig");
 const region = @import("../region.zig");
+const doc_popup = @import("doc_popup.zig");
 const view = @import("../view.zig");
 
 const View = view.View;
@@ -111,16 +112,37 @@ pub const RowLayout = struct {
     spans: []const SpanLayout,
 };
 
-/// The linked info panel's box + its line-split text, already placed
-/// (right of the list, or flipped left when that would overflow `body`).
+/// The document panel's box, already placed: beside the list (right, else
+/// `flipped_left`), else `stacked` below or above it — never over it — or,
+/// for a surface with no rows, at the caret on its own. Its text is a
+/// markdown document (`doc_popup`), wrapped to the box; `lines` is how many
+/// visual lines it took.
 pub const InfoLayout = struct {
     x: f32,
     y: f32,
     w: f32,
     h: f32,
     flipped_left: bool,
-    lines: []const []const u8,
+    stacked: bool = false,
+    lines: usize,
 };
+
+/// The widest a document popup grows, and the tallest: wide enough for a
+/// readable measure, never past the body.
+fn docMaxW(v: *const View, body: region.Rect) f32 {
+    return @max(0, @min(body.w - 2 * v.cell_w, 64 * v.cell_w));
+}
+fn docMaxH(v: *const View, body: region.Rect) f32 {
+    return @max(v.line_h, @min(body.h * 0.6, 24 * v.line_h));
+}
+
+/// `surf.info` laid out to fit `max_w` of box: the document and the box.
+fn docBox(v: *View, scratch: Allocator, surf: *const core.surface.Surface, max_w: f32, body: region.Rect) !struct { doc: doc_popup.Doc, w: f32, h: f32 } {
+    const px = doc_popup.padX(v);
+    const py = doc_popup.padY(v);
+    const doc = try doc_popup.layoutDoc(v, scratch, surf.info, @max(v.cell_w, max_w - 2 * px), docMaxH(v, body));
+    return .{ .doc = doc, .w = doc.w + 2 * px, .h = doc.h + 2 * py };
+}
 
 /// A `caret`-placed `Surface`'s full LAYOUT DECISION: the box rect, whether
 /// it flipped above the caret line, every column's x-offset (in cells) and
@@ -162,10 +184,24 @@ pub fn layoutCaretSurface(
     body: region.Rect,
 ) !?CaretLayout {
     const nrows = surf.rows.items.len;
-    if (nrows == 0) return null;
     const off = surf.anchor orelse return null;
     const li = v.frame_layout.lineForOffset(off) orelse return null; // off-screen
     const c = v.frame_layout.lines[li].caretAt(off);
+    // No rows: the surface IS its document (a hover, a signature's help) —
+    // at the caret, below its line or, asked or out of room, above it.
+    if (nrows == 0) {
+        if (surf.info.len == 0) return null;
+        const db = try docBox(v, scratch, surf, docMaxW(v, body), body);
+        const x = std.math.clamp(c.x, body.x, @max(body.x, body.x + body.w - db.w));
+        const below = c.y_top + c.height;
+        const above = c.y_top - db.h;
+        const fits_below = below + db.h <= body.y + body.h;
+        const fits_above = above >= body.y;
+        const go_above = (surf.above and fits_above) or (!fits_below and fits_above);
+        const y = std.math.clamp(if (go_above) above else below, body.y, @max(body.y, body.y + body.h - db.h));
+        const info: InfoLayout = .{ .x = x, .y = y, .w = db.w, .h = db.h, .flipped_left = false, .lines = db.doc.lines };
+        return .{ .x = x, .y = y, .w = db.w, .h = db.h, .flipped_above = go_above, .col_x = &.{}, .col_w = &.{}, .rows = &.{}, .info = info };
+    }
 
     // Column widths in codepoints, across every row. Column 0 floors at 8
     // (matches the old hardcoded `max_item`/`max_cols` floor); other columns
@@ -215,36 +251,42 @@ pub fn layoutCaretSurface(
         rows[i] = .{ .y = row_y, .selected = selected, .spans = spans };
     }
 
-    // The linked side panel (e.g. the selected row's full docs): beside the
-    // box (right, else left if it would overflow the body). Multi-line, capped.
+    // The linked document panel (the selected row's docs): beside the list
+    // where a readable panel fits — right, else left — else stacked below
+    // the list, else above it. It never covers the list it belongs to.
     var info: ?InfoLayout = null;
     if (surf.info.len > 0) {
-        var irows: usize = 0;
-        var icols: usize = 8;
-        var it = std.mem.splitScalar(u8, surf.info, '\n');
-        while (it.next()) |line| : (irows += 1) {
-            if (irows >= Hud.max_hover_rows) break;
-            icols = @max(icols, @min(64, std.unicode.utf8CountCodepoints(line) catch line.len));
+        const gap = @round(v.cell_w / 2);
+        const natural = try docBox(v, scratch, surf, docMaxW(v, body), body);
+        const readable = @min(natural.w, 28 * v.cell_w);
+        const right_room = body.x + body.w - (box_x + box_w + gap);
+        const left_room = box_x - gap - body.x;
+        var ix: f32 = undefined;
+        var iy: f32 = undefined;
+        var iw: f32 = undefined;
+        var flipped_left = false;
+        var stacked = false;
+        if (right_room >= readable) {
+            iw = @min(natural.w, right_room);
+            ix = box_x + box_w + gap;
+        } else if (left_room >= readable) {
+            iw = @min(natural.w, left_room);
+            ix = box_x - gap - iw;
+            flipped_left = true;
+        } else {
+            iw = @min(natural.w, body.w);
+            ix = std.math.clamp(box_x, body.x, @max(body.x, body.x + body.w - iw));
+            stacked = true;
         }
-        if (irows > 0) {
-            const iw = @as(f32, @floatFromInt(icols + 2)) * v.cell_w;
-            const ih = @as(f32, @floatFromInt(irows)) * v.line_h;
-            var ix = box_x + box_w + v.cell_w; // to the right of the list
-            var flipped_left = false;
-            if (ix + iw > body.x + body.w) {
-                ix = @max(body.x, box_x - iw - v.cell_w); // flip left
-                flipped_left = true;
-            }
-            const iy = std.math.clamp(box_y, body.y, @max(body.y, body.y + body.h - ih));
-            const lines = try scratch.alloc([]const u8, irows);
-            var lit = std.mem.splitScalar(u8, surf.info, '\n');
-            var k: usize = 0;
-            while (lit.next()) |line| : (k += 1) {
-                if (k >= irows) break;
-                lines[k] = line;
-            }
-            info = .{ .x = ix, .y = iy, .w = iw, .h = ih, .flipped_left = flipped_left, .lines = lines };
+        const db = if (iw < natural.w) try docBox(v, scratch, surf, iw, body) else natural;
+        const ih = db.h;
+        if (stacked) {
+            const below = box_y + box_h + gap;
+            iy = if (below + ih <= body.y + body.h or box_y - gap - ih < body.y) below else box_y - gap - ih;
+        } else {
+            iy = std.math.clamp(box_y, body.y, @max(body.y, body.y + body.h - ih));
         }
+        info = .{ .x = ix, .y = iy, .w = iw, .h = ih, .flipped_left = flipped_left, .stacked = stacked, .lines = db.doc.lines };
     }
 
     return .{
@@ -279,7 +321,7 @@ pub fn drawCaretSurface(
 ) !void {
     const cl = (try layoutCaretSurface(v, scratch, surf, body)) orelse return;
     const sink: chrome.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
-    try chrome.paintPanel(sink, .{ .x = cl.x, .y = cl.y, .w = cl.w, .h = cl.h }, v.theme.selection, v.theme.accent, .popup);
+    if (cl.rows.len > 0) try chrome.paintPanel(sink, .{ .x = cl.x, .y = cl.y, .w = cl.w, .h = cl.h }, v.theme.selection, v.theme.accent, .popup);
 
     for (cl.rows) |row| {
         if (row.selected) try chrome.paintSelected(sink, .{ .x = cl.x, .y = row.y, .w = cl.w, .h = v.line_h }, v.theme.accent);
@@ -290,11 +332,11 @@ pub fn drawCaretSurface(
     }
 
     if (cl.info) |info| {
-        try chrome.paintPanel(sink, .{ .x = info.x, .y = info.y, .w = info.w, .h = info.h }, v.theme.selection, v.theme.accent, .popup);
-        for (info.lines, 0..) |line, k| {
-            const ly = info.y + @as(f32, @floatFromInt(k)) * v.line_h + v.ascent;
-            try propLine(v, scratch, runs, line, info.x + v.cell_w, ly, v.theme.foreground);
-        }
+        const box: region.Rect = .{ .x = info.x, .y = info.y, .w = info.w, .h = info.h };
+        try chrome.paintPanel(sink, box, v.theme.selection, v.theme.accent, .popup);
+        // The same document, laid out to the width its box was given.
+        const doc = try doc_popup.layoutDoc(v, scratch, surf.info, @max(v.cell_w, info.w - 2 * doc_popup.padX(v)), @max(0, info.h - 2 * doc_popup.padY(v)));
+        try doc_popup.drawDoc(scratch, runs, doc, info.x + doc_popup.padX(v), info.y + doc_popup.padY(v), box);
     }
 }
 
@@ -454,7 +496,8 @@ pub fn drawSurfaces(
     // Cap the row count to what fits, so a popup never extends past its area.
     const max_rows = @max(1, @as(usize, @intFromFloat(@max(0, area.h) / v.line_h)) -| 1);
     for (hud.surfaces) |surf| {
-        if (!surf.active or surf.rows.items.len == 0) continue;
+        // A caret surface may be its document alone (a hover): no rows.
+        if (!surf.active or (surf.rows.items.len == 0 and !(surf.placement == .caret and surf.info.len > 0))) continue;
         if (surf.placement == .caret) {
             try drawCaretSurface(v, scratch, runs, rects, surf, body);
             continue;

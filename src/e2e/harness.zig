@@ -2673,6 +2673,8 @@ pub fn drainEcho(ed: *Editor, cmd: []const u8, needle: []const u8) bool {
 pub fn surfaceHasText(ed: *Editor, needle: []const u8) bool {
     for (ed.plugins.items) |pl| {
         if (!pl.surface.active) continue;
+        if (std.mem.indexOf(u8, pl.surface.info, needle) != null) return true;
+        if (std.mem.indexOf(u8, pl.surface.info, needle) != null) return true;
         for (pl.surface.rows.items) |row| {
             for (row.spans.items) |span| {
                 if (std.mem.indexOf(u8, span.text, needle) != null) return true;

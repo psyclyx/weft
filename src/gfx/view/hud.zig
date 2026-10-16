@@ -36,6 +36,9 @@ pub const CaretPlace = enum { head, inside };
 pub const MdInline = struct {
     base: usize,
     attrs: []const InlineAttr,
+    /// Read, not edited (a popup's document): syntax markers are not drawn,
+    /// and a line of nothing but markers (a code fence) takes no room.
+    rendered: bool = false,
 
     pub fn at(self: MdInline, off: usize) InlineAttr {
         if (off < self.base or off - self.base >= self.attrs.len) return .{};
@@ -115,6 +118,10 @@ pub const Hud = struct {
     tabs: ?[]const Tab = null,
     /// Per-byte markdown styling for the active buffer (null = not md).
     md_inline: ?MdInline = null,
+    /// Soft wrap — the pane's (`Pane.wrap`, else what its entry asks): a
+    /// row longer than the pane goes on in segments beneath, rather than
+    /// being cut at the edge.
+    wrap: bool = false,
     /// vim-goggles: the byte ranges to flash this frame (a yanked region, every
     /// range one operation touched), drawn as a transient highlight. Empty
     /// when nothing is flashing.

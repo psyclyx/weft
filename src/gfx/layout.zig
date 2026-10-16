@@ -44,6 +44,17 @@ pub const VisualLine = struct {
     /// Ascending by `off`. Always non-empty: an empty line still has the
     /// single end-of-line stop at `x0`.
     stops: []const Stop,
+    /// This visual line is a SEGMENT of its source line that the next visual
+    /// line continues (soft wrap): `src.end` is where the next one starts,
+    /// and a caret there is drawn at the start of that next line.
+    wraps: bool = false,
+
+    /// Whether `off` is on this visual line: inside its source range, or at
+    /// its end when the line does not continue on the next.
+    pub fn holds(self: *const VisualLine, off: usize) bool {
+        if (off < self.src.start or off > self.src.end) return false;
+        return off < self.src.end or !self.wraps;
+    }
 
     /// Caret x for a source offset on this line. Exact stop → its x;
     /// between two stops (a multi-byte cluster or ligature interior) →
@@ -137,8 +148,8 @@ pub const Layout = struct {
     /// or null when `off` is outside every visible line's source range
     /// and not adjacent to one.
     pub fn lineForOffset(self: *const Layout, off: usize) ?usize {
-        for (self.lines, 0..) |line, i| {
-            if (off >= line.src.start and off <= line.src.end) return i;
+        for (self.lines, 0..) |*line, i| {
+            if (line.holds(off)) return i;
         }
         return null;
     }

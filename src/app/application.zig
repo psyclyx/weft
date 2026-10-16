@@ -30,6 +30,11 @@ pub const Application = struct {
     /// What the pointer rests on — frame input the pointer keeps and the
     /// frame reads (`pointer.Hover`).
     hover: pointer_mod.Hover = .{},
+    /// Where the caret was, and the mode, at the last wake's boundary — what
+    /// `input.caret` and `input.mode` are raised against.
+    last_caret: struct { entry: u32 = 0, offset: usize = 0 } = .{},
+    last_mode: [64]u8 = undefined,
+    last_mode_len: usize = 0,
     last_frame_rect: region.Rect = .{},
     /// Whether the vim-goggles flash shows — noted at each wake's boundary
     /// (`observe`), read by the frame.
@@ -244,7 +249,32 @@ pub const Application = struct {
         const head = &self.session.head;
         const typed = head.typed;
         head.typed = false;
-        const core_raised: []const []const u8 = if (typed) &.{core.wasm_host.typed_signal} else &.{};
+        var raised: [3][]const u8 = undefined;
+        var n_raised: usize = 0;
+        if (typed) {
+            raised[n_raised] = core.wasm_host.typed_signal;
+            n_raised += 1;
+        }
+        // The caret and the mode, against the last boundary: one signal each
+        // per wake that moved them, however many keys it held.
+        const active = self.driver.ctx.buffers.active();
+        const caret: @TypeOf(self.last_caret) = .{
+            .entry = active.id,
+            .offset = if (active.textEditor()) |ed| ed.cursorOffset() else 0,
+        };
+        if (caret.entry != self.last_caret.entry or caret.offset != self.last_caret.offset) {
+            raised[n_raised] = core.wasm_host.caret_signal;
+            n_raised += 1;
+            self.last_caret = caret;
+        }
+        const mode = head.currentMode();
+        if (!std.mem.eql(u8, mode, self.last_mode[0..self.last_mode_len])) {
+            raised[n_raised] = core.wasm_host.mode_signal;
+            n_raised += 1;
+            self.last_mode_len = @min(mode.len, self.last_mode.len);
+            @memcpy(self.last_mode[0..self.last_mode_len], mode[0..self.last_mode_len]);
+        }
+        const core_raised: []const []const u8 = raised[0..n_raised];
         if (core.wasm_host.deliverSignals(self.driver.ctx.gpa, self.driver.ctx.plugins.items, core_raised)) {
             damaged = true;
             // A provider that accepted a reveal reads there, off the layout

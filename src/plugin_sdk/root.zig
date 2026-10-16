@@ -1808,6 +1808,14 @@ pub fn surfaceBegin(placement: Placement) void {
 pub fn surfaceCaret(offset: usize) void {
     e.wl_surface_caret(@intCast(offset));
 }
+/// Give the caret surface being built (after `surfaceCaret`, before
+/// `surfaceEnd`) a MARKDOWN document: rendered and wrapped by the host the
+/// way a markdown entry is, beside the surface's rows — or, with no rows,
+/// as the popup itself (a hover). `above`: rather above the caret's line
+/// than below it.
+pub fn surfaceDoc(markdown: []const u8, opts: struct { above: bool = false }) void {
+    e.wl_surface_doc(p(markdown.ptr), @intCast(markdown.len), @intFromBool(opts.above));
+}
 /// Start a new row.
 pub fn surfaceRow() void {
     e.wl_surface_row();
@@ -2094,6 +2102,12 @@ pub fn signalCancel(name: []const u8) void {
 /// (`signalSubscribe`) to react to typing; the cursor and the text before it
 /// are what was typed.
 pub const typed_signal = "input.typed";
+/// Raised once per wake in which the active entry, or its primary caret,
+/// moved — what a popup anchored at the caret closes on.
+pub const caret_signal = "input.caret";
+/// Raised once per wake in which the head's mode changed (insert left, a
+/// picker opened).
+pub const mode_signal = "input.mode";
 /// The `i`-th capture of the last `query`/`nodeChildren` (name/kind into
 /// `scratch`), or null.
 pub fn queryCapture(i: usize) ?Capture {

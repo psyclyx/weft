@@ -30,6 +30,21 @@ pub fn hSurfaceCaret(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     p.surface.begin(p.gpa, .caret);
     p.surface.anchor = @intCast(@as(u32, @bitCast(args[0])));
+    // A fresh popup: no document until this build gives it one.
+    p.surface.setInfo(p.gpa, "");
+    p.surface.above = false;
+}
+/// The caret surface's document body: markdown the host renders as a
+/// document (`gfx/view/doc_popup.zig`), beside the surface's rows or, with
+/// none, as the popup itself. Flags bit 0: it would rather sit above the
+/// caret's line.
+pub fn hSurfaceDoc(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const text = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(text);
+    p.surface.setInfo(p.gpa, text);
+    p.surface.above = @as(u32, @bitCast(args[2])) & 1 != 0;
 }
 pub fn hSurfaceRow(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;

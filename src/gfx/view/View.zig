@@ -429,8 +429,8 @@ fn offRowStops(self: *View, la: Allocator, rope: *const stemma.Rope, row: usize)
 /// (markdown-aware) when the row is visible; else re-shapes it as mono.
 /// The goal-x seam for interactive vertical motion.
 pub fn xOfOffsetOnRow(self: *View, rope: *const stemma.Rope, off: usize) !f32 {
+    if (self.frameLineFor(rope, off)) |li| return self.frame_layout.lines[li].xAt(off);
     const row = rope.offsetToPoint(off).row;
-    for (self.frame_layout.lines) |*l| if (l.row == row) return l.xAt(off);
     var arena = std.heap.ArenaAllocator.init(self.gpa);
     defer arena.deinit();
     const line = try self.offRowStops(arena.allocator(), rope, row);
@@ -445,6 +445,31 @@ pub fn xToOffsetOnRow(self: *View, rope: *const stemma.Rope, row: usize, goal_x:
     defer arena.deinit();
     const line = try self.offRowStops(arena.allocator(), rope, row);
     return line.offsetAt(goal_x);
+}
+
+/// The offset one VISUAL line from `off` (`dir` < 0 is up) nearest world-x
+/// `goal_x`, when both lines are on screen — the next segment of a wrapped
+/// row, or the next row's first. Null when the step leaves what the frame
+/// laid out; vertical motion then walks rows.
+pub fn visualStep(self: *const View, rope: *const stemma.Rope, off: usize, dir: i32, goal_x: f32) ?usize {
+    const li = self.frameLineFor(rope, off) orelse return null;
+    const lines = self.frame_layout.lines;
+    const to: usize = if (dir < 0) (if (li == 0) return null else li - 1) else li + 1;
+    if (to >= lines.len) return null;
+    // The line stepped to must still be what the document has there.
+    const target = lines[to].offsetAt(goal_x);
+    if (rope.offsetToPoint(@min(target, rope.byteLen())).row != lines[to].row) return null;
+    return target;
+}
+
+/// The last frame's visual line holding `off` — only while it is still the
+/// document's: an edit since that frame (a line opened, then a step up before
+/// any frame) leaves the map describing offsets that mean something else, so
+/// a line counts only when its row is the one the text has `off` on.
+fn frameLineFor(self: *const View, rope: *const stemma.Rope, off: usize) ?usize {
+    const li = self.frame_layout.lineForOffset(off) orelse return null;
+    if (off > rope.byteLen() or rope.offsetToPoint(off).row != self.frame_layout.lines[li].row) return null;
+    return li;
 }
 
 /// Source offset under a framebuffer-space point (a click). Reads the
@@ -779,7 +804,7 @@ pub fn build(
         const rope = ed.text();
         const total_rows = rope.lineCount();
         settleRows(ed, top_row, rows_visible);
-        const styles = try linelayout.resolveStyleInputs(scratch, hud, rope, top_row.*, rows_visible, total_rows);
+        var styles = try linelayout.resolveStyleInputs(scratch, hud, rope, top_row.*, rows_visible, total_rows);
         // Every block caret flips the glyph it covers, not only the primary's.
         var flips: std.ArrayList(usize) = .empty;
         if (hud.cursor_on and hud.cursor_style == .block and !hud.row_focus) for (0..ed.selectionCount()) |i|
@@ -790,21 +815,43 @@ pub fn build(
         // arena once per frame (resetFrame) so split panes' maps coexist.
         const la = self.layout_arena.allocator();
         var lines: std.ArrayList(layout.VisualLine) = .empty;
-        var y_top: f32 = body_rect.y;
         const body_limit_y = body_rect.y + body_rect.h;
-        var row = top_row.*;
-        var shown: usize = 0;
-        while (row < total_rows and shown < rows_visible and y_top < body_limit_y) : (row += 1) {
-            if (ed.rowHidden(row)) continue;
-            const runs_mark = runs.items.len;
-            const vl = try linelayout.layoutLine(self, scratch, la, &runs, rope, row, y_top, cols_visible, hud.md_inline, styles, flips.items);
-            if (shown != 0 and y_top + vl.height > body_limit_y) {
-                runs.items.len = runs_mark;
-                break;
+        // Under wrap a row may take several visual lines, so the rows that
+        // fit are not known before they are laid out: when the caret's row
+        // would end below the body, the frame starts a row further down and
+        // lays out again (a row taller than the body shows its top).
+        const wrap: ?linelayout.Wrap = if (hud.wrap) .{ .width = @max(0, body_rect.x + body_rect.w - self.origin_x), .y_limit = body_limit_y } else null;
+        const cursor_row = rope.offsetToPoint(cursor_off).row;
+        var attempts: usize = 0;
+        while (true) : (attempts += 1) {
+            lines.clearRetainingCapacity();
+            const runs_start = runs.items.len;
+            var y_top: f32 = body_rect.y;
+            var row = top_row.*;
+            var shown: usize = 0;
+            while (row < total_rows and shown < rows_visible and y_top < body_limit_y) : (row += 1) {
+                if (ed.rowHidden(row)) continue;
+                const runs_mark = runs.items.len;
+                const lines_mark = lines.items.len;
+                try linelayout.layoutRow(self, scratch, la, &runs, rope, row, y_top, cols_visible, hud.md_inline, styles, flips.items, wrap, &lines);
+                const added = lines.items[lines_mark..];
+                if (added.len == 0) continue;
+                const last = added[added.len - 1];
+                if (shown != 0 and last.baseline_y - last.ascent + last.height > body_limit_y) {
+                    runs.items.len = runs_mark;
+                    lines.items.len = lines_mark;
+                    break;
+                }
+                y_top = last.baseline_y - last.ascent + last.height;
+                shown += 1;
             }
-            try lines.append(la, vl);
-            y_top += vl.height;
-            shown += 1;
+            const caret_shown = for (lines.items) |*l| {
+                if (l.holds(cursor_off)) break true;
+            } else false;
+            if (wrap == null or caret_shown or cursor_row <= top_row.* or top_row.* + 1 >= total_rows or attempts >= 64) break;
+            runs.items.len = runs_start;
+            top_row.* += 1;
+            styles = try linelayout.resolveStyleInputs(scratch, hud, rope, top_row.*, rows_visible, total_rows);
         }
         self.frame_layout = .{ .lines = try lines.toOwnedSlice(la) };
 

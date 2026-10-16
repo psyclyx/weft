@@ -107,6 +107,13 @@ pub const core_namespace = "input.";
 /// Raised at the frame boundary after a person's live keystroke typed text
 /// into the active entry's text document (`Head.typed`).
 pub const typed_signal = core_namespace ++ "typed";
+/// Raised at the frame boundary when the active entry, or its primary caret,
+/// is not where it was at the last one: what a popup anchored at the caret
+/// (a hover, a signature's help) is closed or moved on.
+pub const caret_signal = core_namespace ++ "caret";
+/// Raised at the frame boundary when the head's mode is not the one it was
+/// in at the last one (insert left, a picker opened).
+pub const mode_signal = core_namespace ++ "mode";
 
 fn coreOwned(name: []const u8) bool {
     return std.mem.startsWith(u8, name, core_namespace);

@@ -258,6 +258,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     // ── surface.zig — the retained overlay (which-key/files/git) ─────
     .{ .name = "wl_surface_begin", .handler = surface.hSurfaceBegin },
     .{ .name = "wl_surface_caret", .handler = surface.hSurfaceCaret },
+    .{ .name = "wl_surface_doc", .handler = surface.hSurfaceDoc },
     .{ .name = "wl_surface_row", .handler = surface.hSurfaceRow },
     .{ .name = "wl_surface_span", .handler = surface.hSurfaceSpan },
     .{ .name = "wl_surface_end", .handler = surface.hSurfaceEnd },

@@ -164,6 +164,15 @@ pub fn configOn(config: ?*const core.kv.Store, ns: []const u8, key: []const u8) 
 }
 
 /// Whether `weft.set(ns, key, …)` says exactly `value`.
+/// What an entry asks of a pane showing it (`view.wrap`: `on` | `off`), or
+/// null when it says nothing.
+fn entryWrap(facts: core.facts.Facts) ?bool {
+    const v = facts.get("view.wrap") orelse return null;
+    if (std.mem.eql(u8, v, "on")) return true;
+    if (std.mem.eql(u8, v, "off")) return false;
+    return null;
+}
+
 fn configIs(config: ?*const core.kv.Store, ns: []const u8, key: []const u8, value: []const u8) bool {
     const raw = (config orelse return false).get(ns, key) orelse return false;
     return std.mem.eql(u8, core.framed.first(raw) orelse return false, value);
@@ -839,6 +848,9 @@ pub const FrameBuilder = struct {
         rect: region.Rect,
         dock: region.Rect = .{},
         top_row: *usize,
+        /// The pane's wrap: its own choice, and where to note what it drew.
+        wrap: ?bool = null,
+        wrapped: ?*bool = null,
         hud: view_mod.Hud,
         focused: bool,
         facts: core.facts.Facts,
@@ -902,6 +914,11 @@ pub const FrameBuilder = struct {
                 self.view.settleScroll(&text.?, hud, spec.top_row, spec.rect);
                 window = text.?.window(spec.top_row.*, self.view.bodyRowsIn(hud, spec.rect));
                 hud.md_inline = mdInlineFor(arena, e, name, window);
+                // The pane's choice; else what the entry asks (`view.wrap`,
+                // an entry-scoped context key any plugin or config may set);
+                // else an entry read as prose wraps.
+                hud.wrap = spec.wrap orelse entryWrap(spec.facts) orelse (hud.md_inline != null);
+                if (spec.wrapped) |w| w.* = hud.wrap;
                 // A failed publish only costs this pane its colors.
                 publishHighlight(fx, spec.buffer, e, window) catch |err| if (spec.focused) return err;
             }
@@ -1246,6 +1263,8 @@ pub const FrameBuilder = struct {
                 .pane = slot.pane.id,
                 .rect = slot.rect,
                 .top_row = &slot.pane.top_row,
+                .wrap = slot.pane.wrap,
+                .wrapped = &slot.pane.wrapped,
                 .focused = false,
                 .facts = other_facts,
                 .hud = .{
@@ -1276,6 +1295,8 @@ pub const FrameBuilder = struct {
             .rect = foc_rect,
             .dock = pick_dock,
             .top_row = &self.view.top_row,
+            .wrap = focused.pane().wrap,
+            .wrapped = &focused.pane().wrapped,
             .focused = true,
             .facts = paneFacts(fx, abuf, fx.head.focused_pane),
             .hud = fhud,

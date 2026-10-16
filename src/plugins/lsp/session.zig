@@ -149,6 +149,10 @@ pub const Session = struct {
     /// Published as the entry's `lsp.trigger-characters` (`publishTriggers`),
     /// so an auto-trigger asks the server rather than keeping a table. Owned.
     triggers: []u8 = &.{},
+    /// The characters that open — or, while it shows, refresh — signature
+    /// help (`signatureHelpProvider.triggerCharacters` and
+    /// `retriggerCharacters`), one byte each, as `triggers`. Owned.
+    sig_triggers: []u8 = &.{},
 
     /// One slot per kind: concurrency between kinds is structural, and a second
     /// ask of one kind can only ever supersede its own predecessor. It lives
@@ -372,7 +376,7 @@ pub fn mint(key: Key) ?*Session {
 /// are. Caller frees.
 pub fn initializeParams(s: *const Session) ?[]u8 {
     const caps =
-        \\"capabilities":{"textDocument":{"hover":{"contentFormat":["plaintext","markdown"]},"synchronization":{},"publishDiagnostics":{"versionSupport":true}}}
+        \\"capabilities":{"textDocument":{"hover":{"contentFormat":["markdown","plaintext"]},"signatureHelp":{"signatureInformation":{"documentationFormat":["markdown","plaintext"],"parameterInformation":{"labelOffsetSupport":true},"activeParameterSupport":true}},"completion":{"completionItem":{"documentationFormat":["markdown","plaintext"]}},"synchronization":{},"publishDiagnostics":{"versionSupport":true}}}
     ;
     if (s.root.len == 0 or s.root[0] != '/')
         return weft.allocator.dupe(u8, "{\"processId\":null,\"rootUri\":null," ++ caps ++ "}") catch null;

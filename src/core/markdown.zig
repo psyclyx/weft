@@ -110,6 +110,7 @@ fn analyzeLine(line: []const u8, attrs: []InlineAttr, consumed: []bool) void {
     for (attrs) |*a| a.role = role; // base size/family for the whole line
 
     inlineCode(line, attrs, consumed);
+    escapes(line, attrs, consumed);
     inlineLinks(line, attrs, consumed);
     applyDouble(line, attrs, consumed, '*'); // **bold**
     applySingle(line, attrs, consumed, '*'); // *italic*
@@ -134,14 +135,27 @@ fn inlineCode(line: []const u8, attrs: []InlineAttr, consumed: []bool) void {
     }
 }
 
+/// A backslash before ASCII punctuation escapes it (`\*`, `\<`): the
+/// backslash is a marker, and the character is literal — no later pass reads
+/// markup into it. Inside a code span there is nothing to escape.
+fn escapes(line: []const u8, attrs: []InlineAttr, consumed: []bool) void {
+    var i: usize = 0;
+    while (i + 1 < line.len) : (i += 1) {
+        if (consumed[i] or line[i] != '\\' or !std.ascii.isPunctuation(line[i + 1])) continue;
+        mark(attrs, consumed, i);
+        consumed[i + 1] = true;
+        i += 1;
+    }
+}
+
 /// `[text](url)`: the text keeps its role but recolors as a link; the
-/// brackets, parens, and url are dimmed markers.
+/// brackets, parens, and url are dimmed markers. The text may hold code.
 fn inlineLinks(line: []const u8, attrs: []InlineAttr, consumed: []bool) void {
     var i: usize = 0;
     while (i < line.len) : (i += 1) {
         if (consumed[i] or line[i] != '[') continue;
         var j = i + 1;
-        while (j < line.len and line[j] != ']' and !consumed[j]) j += 1;
+        while (j < line.len and !(line[j] == ']' and !consumed[j])) j += 1;
         if (j >= line.len or line[j] != ']') continue;
         if (j + 1 >= line.len or line[j + 1] != '(') continue;
         var k = j + 2;
@@ -229,15 +243,15 @@ fn markBlockPrefix(line: []const u8, attrs: []InlineAttr, consumed: []bool) void
     while (i < line.len and line[i] == ' ') i += 1;
     if (i >= line.len) return;
     if (line[i] == '>') {
-        mark(attrs, consumed, i);
-        if (i + 1 < line.len and line[i + 1] == ' ') mark(attrs, consumed, i + 1);
+        markBlock(attrs, consumed, i);
+        if (i + 1 < line.len and line[i + 1] == ' ') markBlock(attrs, consumed, i + 1);
         return;
     }
     if ((line[i] == '-' or line[i] == '*' or line[i] == '+') and
         i + 1 < line.len and line[i + 1] == ' ')
     {
-        mark(attrs, consumed, i);
-        mark(attrs, consumed, i + 1);
+        markBlock(attrs, consumed, i);
+        markBlock(attrs, consumed, i + 1);
         return;
     }
     var j = i;
@@ -245,9 +259,63 @@ fn markBlockPrefix(line: []const u8, attrs: []InlineAttr, consumed: []bool) void
     if (j > i and j < line.len and (line[j] == '.' or line[j] == ')') and
         j + 1 < line.len and line[j + 1] == ' ')
     {
-        for (i..j + 1) |k| mark(attrs, consumed, k);
-        mark(attrs, consumed, j + 1);
+        for (i..j + 1) |k| markBlock(attrs, consumed, k);
+        markBlock(attrs, consumed, j + 1);
     }
+}
+
+fn markBlock(attrs: []InlineAttr, consumed: []bool, i: usize) void {
+    mark(attrs, consumed, i);
+    attrs[i].block = true;
+}
+
+/// `text` as markdown READS it, for a document that is read rather than
+/// edited (a popup's): the lines of a paragraph — or of a list item —
+/// joined into one, since a single newline inside one is a space. Blank
+/// lines, headings, fences and what is inside them, quotes, rules,
+/// indented code, a new list item and a line ending in a hard break (two
+/// spaces, or `\`) stay where they are. `gpa`-owned.
+pub fn reflow(gpa: Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var in_fence = false;
+    // Whether the last line written may take the next one on its end.
+    var open = false;
+    var prev_blank = true;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var first = true;
+    while (it.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, "\r");
+        const trimmed = std.mem.trimStart(u8, line, " \t");
+        const blank = trimmed.len == 0;
+        const fence = isFence(line);
+        const starts_block = blank or fence or in_fence or isThematicBreak(line) or
+            trimmed[0] == '#' or trimmed[0] == '>' or listItem(trimmed) or
+            (prev_blank and (std.mem.startsWith(u8, line, "    ") or std.mem.startsWith(u8, line, "\t")));
+        if (open and !starts_block) {
+            try out.append(gpa, ' ');
+            try out.appendSlice(gpa, trimmed);
+        } else {
+            if (!first) try out.append(gpa, '\n');
+            try out.appendSlice(gpa, line);
+        }
+        first = false;
+        if (fence) in_fence = !in_fence;
+        const hard = std.mem.endsWith(u8, line, "  ") or std.mem.endsWith(u8, line, "\\");
+        open = !blank and !fence and !in_fence and !hard and trimmed[0] != '#' and !isThematicBreak(line) and
+            !(prev_blank and (std.mem.startsWith(u8, line, "    ") or std.mem.startsWith(u8, line, "\t")));
+        prev_blank = blank;
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// A list item's opening: `-`, `*` or `+` and a space, or `N.`/`N)` and a
+/// space.
+fn listItem(trimmed: []const u8) bool {
+    if (trimmed.len >= 2 and (trimmed[0] == '-' or trimmed[0] == '*' or trimmed[0] == '+') and trimmed[1] == ' ') return true;
+    var j: usize = 0;
+    while (j < trimmed.len and std.ascii.isDigit(trimmed[j])) j += 1;
+    return j > 0 and j + 1 < trimmed.len and (trimmed[j] == '.' or trimmed[j] == ')') and trimmed[j + 1] == ' ';
 }
 
 // ---------------------------------------------------------------------------
@@ -324,4 +392,58 @@ test "unterminated delimiters stay plain" {
         try testing.expect(!a.bold and !a.italic and !a.marker);
         try testing.expectEqual(InlineRole.normal, a.role);
     }
+}
+
+test "reflow joins a paragraph's lines and a list item's, and leaves block structure where it is" {
+    const gpa = testing.allocator;
+    const got = try reflow(gpa,
+        \\TrimSpace returns a slice
+        \\with all leading space removed.
+        \\
+        \\```go
+        \\func A()
+        \\func B()
+        \\```
+        \\- one item
+        \\  goes on
+        \\- two
+        \\# Heading
+        \\hard break  
+        \\next
+    );
+    defer gpa.free(got);
+    try testing.expectEqualStrings(
+        \\TrimSpace returns a slice with all leading space removed.
+        \\
+        \\```go
+        \\func A()
+        \\func B()
+        \\```
+        \\- one item goes on
+        \\- two
+        \\# Heading
+        \\hard break  
+        \\next
+    , got);
+}
+
+test "a list bullet is block structure; a code span's backticks are not" {
+    const gpa = testing.allocator;
+    const attrs = try analyzeSlice(gpa, "- `x`");
+    defer gpa.free(attrs);
+    try testing.expect(attrs[0].marker and attrs[0].block);
+    try testing.expect(attrs[2].marker and !attrs[2].block);
+}
+
+test "a backslash escapes punctuation, and a link's text may hold code" {
+    const gpa = testing.allocator;
+    const esc = try analyzeSlice(gpa, "a \\* b \\< c");
+    defer gpa.free(esc);
+    try testing.expect(esc[2].marker); // the backslash
+    try testing.expect(!esc[3].marker and !esc[3].italic); // `*`, literal
+    const link = try analyzeSlice(gpa, "[`x` doc](https://e)");
+    defer gpa.free(link);
+    try testing.expect(link[0].marker); // `[`
+    try testing.expect(link[2].link and link[2].role == .code); // x
+    try testing.expect(link[11].marker); // inside the url
 }

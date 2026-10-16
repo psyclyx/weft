@@ -177,6 +177,7 @@ pub extern "weft:abi/1" fn wl_pick_outcome_match_start() i32;
 pub extern "weft:abi/1" fn wl_pick_outcome_match_span() i32;
 pub extern "weft:abi/1" fn wl_surface_begin(placement: u32) void;
 pub extern "weft:abi/1" fn wl_surface_caret(offset: u32) void;
+pub extern "weft:abi/1" fn wl_surface_doc(ptr: u32, len: u32, flags: u32) void;
 pub extern "weft:abi/1" fn wl_surface_row() void;
 pub extern "weft:abi/1" fn wl_surface_span(t: u32, tl: u32, role: u32) void;
 pub extern "weft:abi/1" fn wl_surface_end(selected: i32) void;

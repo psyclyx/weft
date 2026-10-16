@@ -92,6 +92,9 @@ const base_cmds = [_]weft.CommandEntry{
     // item 4) — not a user-facing verb, invoked only via `weft.run` from
     // `on_poll` itself. See `on_poll`'s doc.
     .{ .name = "lsp.deliver", .call = lspDeliverInternal, .arity = .whole, .summary = "Deliver the language server's queued messages.", .internal = true },
+    // Internal: what a heard signal does (`on_signal`), run as a dispatch.
+    .{ .name = "lsp.popup-close", .call = closePopup, .arity = .whole, .summary = "Close the hover or signature popup.", .internal = true },
+    .{ .name = "lsp.popup-typed", .call = typed, .arity = .whole, .summary = "Ask for signature help where typing left the caret, if it is due.", .internal = true },
 };
 
 /// The rename prompt's five editing commands (`rename_prompt`, below),
@@ -112,6 +115,9 @@ fn describeExtra() void {
 }
 fn initExtra() void {
     weft.provideCompletion();
+    typed_sig = weft.signalSubscribe(weft.typed_signal);
+    caret_sig = weft.signalSubscribe(weft.caret_signal);
+    mode_sig = weft.signalSubscribe(weft.mode_signal);
     rename_prompt.install();
     // …and annotate the completion rows this plugin's own answers produce.
     // See `on_slot_fire` below for why the tag lives here and not in core.
@@ -301,6 +307,7 @@ fn cmdFormat() void {
     fire(.format);
 }
 fn cmdSignature() void {
+    sig_auto = false;
     fire(.signature);
 }
 fn cmdInlay() void {
@@ -512,6 +519,7 @@ fn dispatch(s: *Session, msg: rpc.Value) void {
             s.ready = true;
             s.conn.notify("initialized", "{}");
             keepTriggers(s, obj.get("result"));
+            keepSignatureTriggers(s, obj.get("result"));
             // Only the session whose document is in front of us may open it —
             // otherwise the handshake would didOpen someone else's buffer.
             if (lookupActive() == s) {
@@ -569,7 +577,7 @@ fn deliver(s: *Session, p: *Pending, kind: Kind, result: rpc.Value) void {
         .symbols => presentSymbols(result),
         .format => weft.echo(if (applyEdits(result) > 0) "lsp: formatted" else "lsp: nothing to format"),
         .rename => weft.echo(if (applyWorkspaceEdit(s, result) > 0) "lsp: renamed" else "lsp: rename made no change"),
-        .signature => presentSignature(result),
+        .signature => presentSignature(p, result),
         .inlay => presentInlay(result),
         .codeaction => presentCodeActions(s, result),
         .completion => presentCompletion(p, result),
@@ -739,12 +747,11 @@ fn strOf(v: ?rpc.Value) []const u8 {
 /// membrane call. Echo is now the fallback ONLY for the no-position case: an
 /// empty result, nothing to anchor.
 fn presentHover(p: *Pending, result: rpc.Value) void {
-    const text: []const u8 = switch (result) {
-        .object => |o| if (o.get("contents")) |c| contentsText(c) else "",
-        else => "",
-    };
-    if (text.len == 0) {
-        weft.surfaceClose(); // drop any popup from a still-live prior hover
+    var md: std.ArrayList(u8) = .empty;
+    defer md.deinit(weft.allocator);
+    if (result == .object) if (result.object.get("contents")) |c| contentsMarkdown(&md, c);
+    if (md.items.len == 0) {
+        closePopup(); // drop any popup from a still-live prior hover
         weft.echo("lsp: no hover");
         return;
     }
@@ -755,15 +762,72 @@ fn presentHover(p: *Pending, result: rpc.Value) void {
         weft.echo("lsp: hover target disappeared");
         return;
     };
+    // The server's markdown, as it sent it: the host renders it as a
+    // document, wrapped to the popup.
     weft.surfaceCaret(offset);
-    var rows: usize = 0;
-    var it = std.mem.splitScalar(u8, text, '\n');
-    while (it.next()) |line| : (rows += 1) {
-        if (rows >= max_hover_rows) break;
-        weft.surfaceRow();
-        weft.surfaceSpan(line, .normal);
-    }
+    weft.surfaceDoc(md.items, .{});
     weft.surfaceEnd(-1);
+    popup = .hover;
+}
+
+// ── The popup: what shows, and when it goes ──────────────────────────
+//
+// One caret popup at a time: a hover, or a signature's help. Which, and when
+// it closes, is this plugin's to decide — core raises `input.caret` and
+// `input.mode` and keeps no rule of its own. A hover goes when the caret
+// moves or the mode changes; a signature's help goes with the mode (insert
+// left), and is asked again as the arguments are typed or the caret moves,
+// so it follows the active parameter and closes itself — on an empty answer
+// — once the caret is out of the call.
+
+const Popup = enum { none, hover, signature };
+var popup: Popup = .none;
+/// The signature ask in flight came from typing, not the command: an empty
+/// answer closes quietly rather than echoing.
+var sig_auto = false;
+var typed_sig: ?u32 = null;
+var caret_sig: ?u32 = null;
+var mode_sig: ?u32 = null;
+
+fn closePopup() void {
+    if (popup != .none) weft.surfaceClose();
+    popup = .none;
+}
+
+/// A signal is heard off any dispatch; what it does runs through the
+/// sanctioned door (`weft.run`, a dispatching entry for its duration), as
+/// `on_poll`'s deliveries do.
+fn on_signal(id: i32) callconv(.c) void {
+    if (id < 0) return;
+    const sig: u32 = @intCast(id);
+    if (mode_sig == sig) {
+        if (popup != .none) weft.run("lsp.popup-close");
+    } else if (typed_sig == sig) {
+        weft.run("lsp.popup-typed");
+    } else if (caret_sig == sig) switch (popup) {
+        // The caret landing past a trigger opens it too: a bracket an
+        // autopair inserted is not typed text, and an arrow into a call is
+        // as good a place to ask.
+        .none, .signature => weft.run("lsp.popup-typed"),
+        .hover => weft.run("lsp.popup-close"),
+    };
+}
+
+/// A person typed, or the caret moved: past one of the server's signature
+/// characters (`(`, `,`), or while its help shows, ask for it.
+fn typed() void {
+    const s = lookupActive() orelse return;
+    if (popup == .signature) return askSignature();
+    if (s.sig_triggers.len == 0) return;
+    const cur = weft.cursor();
+    if (cur == 0) return;
+    const last = weft.slice(cur - 1, cur);
+    if (last.len == 1 and std.mem.indexOfScalar(u8, s.sig_triggers, last[0]) != null) askSignature();
+}
+
+fn askSignature() void {
+    sig_auto = true;
+    fire(.signature);
 }
 
 fn presentDefinition(s: *Session, result: rpc.Value) void {
@@ -933,22 +997,84 @@ fn sameUri(s: *const Session, uri: []const u8) bool {
     return uri.len == 0 or std.mem.eql(u8, uri, s.uri);
 }
 
-fn presentSignature(result: rpc.Value) void {
-    if (result != .object) {
-        weft.echo("lsp: no signature");
+/// A signature's help, as a popup above the caret: the signature as code,
+/// the active parameter and what it is for, then what the function does.
+/// An empty answer to an ask typing made closes it quietly; to the command,
+/// it says so.
+fn presentSignature(p: *Pending, result: rpc.Value) void {
+    const auto = sig_auto;
+    sig_auto = false;
+    var md: std.ArrayList(u8) = .empty;
+    defer md.deinit(weft.allocator);
+    signatureMarkdown(&md, result) catch {};
+    if (md.items.len == 0) {
+        if (popup == .signature) closePopup();
+        if (!auto) weft.echo("lsp: no signature");
         return;
     }
-    const sigs = result.object.get("signatures") orelse {
-        weft.echo("lsp: no signature");
-        return;
+    const offset = (if (p.target) |target| targetOffset(target) else null) orelse return;
+    weft.surfaceCaret(offset);
+    weft.surfaceDoc(md.items, .{ .above = true });
+    weft.surfaceEnd(-1);
+    popup = .signature;
+}
+
+/// `SignatureHelp` as markdown: the active signature's label in a code
+/// block, its active parameter in bold with that parameter's documentation,
+/// and the signature's own documentation. Empty when there is none.
+fn signatureMarkdown(md: *std.ArrayList(u8), result: rpc.Value) !void {
+    const a = weft.allocator;
+    const sigs = field(result, "signatures") orelse return;
+    if (sigs != .array or sigs.array.items.len == 0) return;
+    var which: usize = 0;
+    if (field(result, "activeSignature")) |v| if (asInt(v)) |n| {
+        if (n >= 0 and n < sigs.array.items.len) which = @intCast(n);
     };
-    if (sigs != .array or sigs.array.items.len == 0) {
-        weft.echo("lsp: no signature");
-        return;
+    const sig = sigs.array.items[which];
+    const label = strOf(field(sig, "label"));
+    if (label.len == 0) return;
+    try md.appendSlice(a, "```\n");
+    try md.appendSlice(a, label);
+    try md.appendSlice(a, "\n```\n");
+    // The active parameter: the signature's own, else the help's.
+    var active: ?i64 = null;
+    if (field(result, "activeParameter")) |v| active = asInt(v);
+    if (field(sig, "activeParameter")) |v| active = asInt(v) orelse active;
+    if (field(sig, "parameters")) |params| if (params == .array) if (active) |n| if (n >= 0 and n < params.array.items.len) {
+        const param = params.array.items[@intCast(n)];
+        // A parameter's label is its text, or an offset pair into the
+        // signature's (`labelOffsetSupport`).
+        const name: []const u8 = if (field(param, "label")) |l| switch (l) {
+            .string => |str| str,
+            .array => |pair| if (pair.items.len == 2) blk: {
+                const lo = asInt(pair.items[0]) orelse break :blk "";
+                const hi = asInt(pair.items[1]) orelse break :blk "";
+                if (lo < 0 or hi < lo or hi > label.len) break :blk "";
+                break :blk label[@intCast(lo)..@intCast(hi)];
+            } else "",
+            else => "",
+        } else "";
+        if (name.len > 0) {
+            try md.appendSlice(a, "\n**`");
+            try md.appendSlice(a, name);
+            try md.appendSlice(a, "`**");
+            var doc: std.ArrayList(u8) = .empty;
+            defer doc.deinit(a);
+            if (field(param, "documentation")) |d| contentsMarkdown(&doc, d);
+            if (doc.items.len > 0) {
+                try md.appendSlice(a, " — ");
+                try md.appendSlice(a, doc.items);
+            }
+            try md.append(a, '\n');
+        }
+    };
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(a);
+    if (field(sig, "documentation")) |d| contentsMarkdown(&doc, d);
+    if (doc.items.len > 0) {
+        try md.appendSlice(a, "\n");
+        try md.appendSlice(a, doc.items);
     }
-    const sig = sigs.array.items[0];
-    const label = if (sig == .object) (if (sig.object.get("label")) |l| (if (l == .string) l.string else "") else "") else "";
-    weft.echo(if (label.len == 0) "lsp: no signature" else label);
 }
 
 /// Inlay hints → virtual text after each position. Echoes the count (a screenshot
@@ -984,6 +1110,35 @@ fn inlayLabel(v: ?rpc.Value) []const u8 {
     };
 }
 
+/// Hover contents, a signature's or a parameter's documentation, as
+/// markdown: `MarkupContent` as it came (plaintext is markdown that has no
+/// markup), a `MarkedString` with a language as a code block, a list of them
+/// one after another.
+fn contentsMarkdown(md: *std.ArrayList(u8), c: rpc.Value) void {
+    const a = weft.allocator;
+    switch (c) {
+        .string => |s| md.appendSlice(a, s) catch {},
+        .object => |o| {
+            const value = strOf(o.get("value"));
+            if (value.len == 0) return;
+            if (o.get("language")) |lang| if (lang == .string) {
+                md.appendSlice(a, "```") catch {};
+                md.appendSlice(a, lang.string) catch {};
+                md.append(a, '\n') catch {};
+                md.appendSlice(a, value) catch {};
+                md.appendSlice(a, "\n```") catch {};
+                return;
+            };
+            md.appendSlice(a, value) catch {};
+        },
+        .array => |items| for (items.items) |item| {
+            if (md.items.len > 0) md.appendSlice(a, "\n\n") catch {};
+            contentsMarkdown(md, item);
+        },
+        else => {},
+    }
+}
+
 fn contentsText(c: rpc.Value) []const u8 {
     return switch (c) {
         .string => |s| s,
@@ -1016,6 +1171,31 @@ fn keepTriggers(s: *Session, result: ?rpc.Value) void {
     s.triggers = kept;
 }
 
+/// Keep what `initialize` said opens or refreshes signature help
+/// (`signatureHelpProvider.triggerCharacters`, `retriggerCharacters`), one
+/// byte per trigger as `keepTriggers` keeps completion's.
+fn keepSignatureTriggers(s: *Session, result: ?rpc.Value) void {
+    const caps = field(result orelse return, "capabilities") orelse return;
+    const provider = field(caps, "signatureHelpProvider") orelse return;
+    var bytes: std.ArrayList(u8) = .empty;
+    for ([_][]const u8{ "triggerCharacters", "retriggerCharacters" }) |name| {
+        const list = field(provider, name) orelse continue;
+        if (list != .array) continue;
+        for (list.array.items) |t| {
+            if (t != .string or t.string.len == 0) continue;
+            const b = t.string[t.string.len - 1];
+            if (std.mem.indexOfScalar(u8, bytes.items, b) != null) continue;
+            bytes.append(weft.allocator, b) catch break;
+        }
+    }
+    const kept = bytes.toOwnedSlice(weft.allocator) catch {
+        bytes.deinit(weft.allocator);
+        return;
+    };
+    weft.allocator.free(s.sig_triggers);
+    s.sig_triggers = kept;
+}
+
 fn field(v: rpc.Value, name: []const u8) ?rpc.Value {
     return if (v == .object) v.object.get(name) else null;
 }
@@ -1044,4 +1224,5 @@ comptime {
     weft.exportCallback("on_complete", &on_complete);
     weft.exportCallback("on_poll", &on_poll);
     weft.exportCallback("on_activate", &on_activate);
+    weft.exportCallback("on_signal", &on_signal);
 }
