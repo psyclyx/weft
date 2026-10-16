@@ -281,10 +281,11 @@ fn repaint(p: *WasmPlugin, entry: *Buffers.Buffer, view: *projection.View, kind:
         .commit => view.commit() catch return null,
         .rerender => view.render() catch return null,
     };
-    const end = editor.text().byteLen();
-    command.renderInto(gpa, &p.activeCtx().buffers.notices, doc, .plugin, p.name, &.{
-        .{ .range = .{ .start = 0, .end = end }, .bytes = text },
-    }) catch return null;
+    // Only what changed reaches the document (`Document.becomes`): a stream
+    // that grew writes its new rows, a refresh that moved one row writes
+    // that row, as a producer — never the whole text again.
+    if (!command.mayRender(&p.activeCtx().buffers.notices, doc, .plugin, p.name)) return null;
+    doc.becomes(gpa, text) catch return null;
 
     paintStyles(p, view, doc, text.len);
     paintFolds(p, view, doc);

@@ -690,16 +690,42 @@ pub fn renderInto(
     name: []const u8,
     items: []const Document.Replacement,
 ) RenderError!void {
+    if (!mayRender(notices, doc, role, name)) return error.Unauthorized;
+    const pid = try doc.peerNamed(gpa, name);
+    doc.peerReplaceAll(gpa, pid, items) catch {};
+}
+
+/// Write OUTPUT into `doc` — a REPL's answer, a transcript, a tool's fill, a
+/// projection's rows: text derived from something else, not authored. Same
+/// gate as `renderInto`; written as a PRODUCER (`Document.produce`), which
+/// costs what the text does, keeps none of it in the log, and is never what
+/// an undo takes back. `renderInto` is for AUTHORED edits — an agent's
+/// write, a formatter's result — which keep their author and their undo, and
+/// pay the peer path's cost (a shadow bootstrapped and merged, per scalar:
+/// seconds a megabyte) for it.
+pub fn produceInto(
+    gpa: Allocator,
+    notices: *status_feed.Notices,
+    doc: *Document,
+    role: authority.Role,
+    name: []const u8,
+    items: []const Document.Replacement,
+) RenderError!void {
+    if (!mayRender(notices, doc, role, name)) return error.Unauthorized;
+    doc.produce(gpa, items) catch {};
+    doc.foldProduced(gpa) catch {};
+}
+
+/// Whether `name`, acting as `role`, may write rendered content into `doc`
+/// (its grant must reach edit). A refusal is noted where a person sees it.
+pub fn mayRender(notices: *status_feed.Notices, doc: *const Document, role: authority.Role, name: []const u8) bool {
     const grade = switch (role) {
         .user, .remote => doc.my_grant,
         .plugin, .agent => authority.gradeMin(doc.my_grant, .edit),
     };
-    if (!grade.canEdit()) {
-        noteRenderRefusal(notices, name, "view access");
-        return error.Unauthorized;
-    }
-    const pid = try doc.peerNamed(gpa, name);
-    doc.peerReplaceAll(gpa, pid, items) catch {};
+    if (grade.canEdit()) return true;
+    noteRenderRefusal(notices, name, "view access");
+    return false;
 }
 
 /// Make a background refusal observable: a host log line always, plus a

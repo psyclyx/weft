@@ -717,12 +717,12 @@ fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
         if (end > 0) {
             const sep = std.fmt.allocPrint(gpa, "\n{s}", .{out}) catch return;
             defer gpa.free(sep);
-            command.renderInto(gpa, &job.buffers.notices, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = sep }}) catch {};
+            command.produceInto(gpa, &job.buffers.notices, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = sep }}) catch {};
         } else {
-            command.renderInto(gpa, &job.buffers.notices, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = out }}) catch {};
+            command.produceInto(gpa, &job.buffers.notices, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = out }}) catch {};
         }
     } else {
-        command.renderInto(gpa, &job.buffers.notices, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = out }}) catch {};
+        command.produceInto(gpa, &job.buffers.notices, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = out }}) catch {};
     }
 
     // The text has landed: tell the issuing plugin WHICH fill it was, so it can

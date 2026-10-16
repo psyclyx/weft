@@ -263,10 +263,9 @@ pub fn fill(gpa: Allocator, notices: *@import("status_feed.zig").Notices, tr: *c
         if (i + 1 < n) try text.append(gpa, '\n');
     }
 
-    const old_len = doc.text().byteLen();
-    try command.renderInto(gpa, notices, doc, .plugin, projection_author, &.{
-        .{ .range = .{ .start = 0, .end = old_len }, .bytes = text.items },
-    });
+    // Output, not authored: only what changed is written (`Document.becomes`).
+    if (!command.mayRender(notices, doc, .plugin, projection_author)) return error.Unauthorized;
+    try doc.becomes(gpa, text.items);
 
     subs.dropDoc(gpa, doc);
     for (spans.items) |sp| {

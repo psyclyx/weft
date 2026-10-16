@@ -172,11 +172,9 @@ fn syncTo(gpa: Allocator, b: *Buffers.Buffer, ed: *Editor) !void {
     const end = rope.byteLen();
     try old_tail.resize(gpa, end - tail_from);
     rope.copyRange(old_tail.items, .{ .start = tail_from, .end = end });
-    var pre: usize = 0;
-    const most = @min(old_tail.items.len, tail.items.len);
-    while (pre < most and old_tail.items[pre] == tail.items[pre]) pre += 1;
-    var suf: usize = 0;
-    while (suf < most - pre and old_tail.items[old_tail.items.len - 1 - suf] == tail.items[tail.items.len - 1 - suf]) suf += 1;
+    const ends = Document.commonEnds(old_tail.items, tail.items);
+    const pre = ends.pre;
+    const suf = ends.suf;
     const old_mid = old_tail.items.len - pre - suf;
     const new_mid = tail.items[pre .. tail.items.len - suf];
     if (old_mid > 0 or new_mid.len > 0) {
@@ -193,17 +191,11 @@ fn syncTo(gpa: Allocator, b: *Buffers.Buffer, ed: *Editor) !void {
     map.revision = g.revision;
     if (n > 0) {
         try ed.doc.produce(gpa, reps[0..n]);
-        // The CRDT keeps every scalar that ever passed through as an event,
-        // and what scrolled away as a tombstone: re-found the document on
-        // its text now and then (a bulk load, milliseconds), so a long-lived
-        // terminal's document holds its rows, not everything that went by.
-        if (ed.doc.eventCount() > refound_events and !ed.doc.hasPeers()) try ed.doc.refound(gpa);
+        // What scrolled away must not pile up as history (`foldProduced`).
+        try ed.doc.foldProduced(gpa);
     }
     map.doc_len = ed.text().byteLen();
 }
-
-/// Events a grid's document collects before it is re-founded on its text.
-const refound_events = 1 << 16;
 
 /// The map describes the document as it is: made for the grid as it is,
 /// and nothing edited since.

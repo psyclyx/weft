@@ -839,6 +839,48 @@ pub fn produce(self: *Document, gpa: Allocator, items: []const Replacement) Erro
     try self.commitEdits(gpa, .producer, edits.items, &pre);
 }
 
+/// How much of `old` and `new` is the same at each end: the replacement of
+/// `old[pre .. old.len - suf]` by `new[pre .. new.len - suf]` turns one into
+/// the other. The two never overlap.
+pub fn commonEnds(old: []const u8, new: []const u8) struct { pre: usize, suf: usize } {
+    const most = @min(old.len, new.len);
+    var pre: usize = 0;
+    while (pre < most and old[pre] == new[pre]) pre += 1;
+    var suf: usize = 0;
+    while (suf < most - pre and old[old.len - 1 - suf] == new[new.len - 1 - suf]) suf += 1;
+    return .{ .pre = pre, .suf = suf };
+}
+
+/// The whole text becomes `new`, written as a PRODUCER (`produce`): the
+/// one replacement that differs, and nothing for what did not. What a
+/// derived view writes — a projection's rows, a mirror's screen — whose text
+/// is output, not authored history: an append is an insert at the end, a
+/// changed row is that row, a first fill is one insert. Never the peer path
+/// (a shadow bootstrapped and merged, per scalar: seconds for a megabyte).
+pub fn becomes(self: *Document, gpa: Allocator, new: []const u8) Error!void {
+    const rope = self.text();
+    const old = try gpa.alloc(u8, rope.byteLen());
+    defer gpa.free(old);
+    rope.copyRange(old, .{ .start = 0, .end = old.len });
+    const ends = commonEnds(old, new);
+    const old_mid = old.len - ends.pre - ends.suf;
+    const new_mid = new[ends.pre .. new.len - ends.suf];
+    if (old_mid == 0 and new_mid.len == 0) return;
+    try self.produce(gpa, &.{.{ .range = .{ .start = ends.pre, .end = ends.pre + old_mid }, .bytes = new_mid }});
+    try self.foldProduced(gpa);
+}
+
+/// Events a producer-written document collects before it is re-founded.
+pub const refound_events = 1 << 16;
+
+/// The CRDT keeps every scalar that ever passed through as an event, and
+/// what was replaced as a tombstone: re-found a producer-written document on
+/// its text now and then (a bulk load, milliseconds), so a long-lived one
+/// holds its text, not everything that went by. Only when no peer shadows it.
+pub fn foldProduced(self: *Document, gpa: Allocator) Error!void {
+    if (self.doc.eventCount() > refound_events and !self.hasPeers()) try self.refound(gpa);
+}
+
 // ── Anchors ─────────────────────────────────────────────────────────
 
 /// A cheap local anchor at `offset` (valid at the current head),

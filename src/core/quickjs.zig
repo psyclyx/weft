@@ -934,7 +934,7 @@ fn appendNamed(ctx: *command.Context, gpa: Allocator, name: []const u8, text: []
     const ed = b.textEditor() orelse return;
     const doc = &ed.doc;
     const start = ed.text().byteLen();
-    command.renderInto(gpa, &ctx.buffers.notices, doc, .plugin, transcript_peer, &.{.{ .range = .{ .start = start, .end = start }, .bytes = text }}) catch return;
+    command.produceInto(gpa, &ctx.buffers.notices, doc, .plugin, transcript_peer, &.{.{ .range = .{ .start = start, .end = start }, .bytes = text }}) catch return;
     if (class != 0) paintStyle(ctx, gpa, doc, start, start + text.len, class);
 }
 

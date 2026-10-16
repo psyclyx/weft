@@ -1222,10 +1222,11 @@ test "e2e/grep: Find in Files searches as you type, and the chosen row opens the
 
 // A search with many matches once found NONE: the exec door refused to hand
 // back a window of an output bigger than the reader's buffer, and the empty
-// answer looked like "no matches". About 300 KiB here — past both the live
-// search's read and the 64 KiB the *grep* fill read with. (Sized to stay
-// quick until tool output stops re-rendering whole on every commit.)
-test "e2e/grep: a search with hundreds of kilobytes of matches shows them, live and in *grep*" {
+// answer looked like "no matches". And once it was read, filling *grep* with
+// it took 19 seconds: every commit wrote the whole text through the peer
+// path, per scalar. About 1.5 MB here, as a producer's write: about a second,
+// most of it the shell loop that makes the file.
+test "e2e/grep: a search with a megabyte of matches shows them, live and in *grep*" {
     const gpa = t.allocator;
     var proj: Project = undefined;
     try proj.init(gpa);
@@ -1236,7 +1237,7 @@ test "e2e/grep: a search with hundreds of kilobytes of matches shows them, live 
     defer ed.deinit();
     try loadWebIde(&ed);
     {
-        const r = try proj.oracle("i=1; while [ $i -le 4000 ]; do printf 'const needle_%05d = \"padding the line out to a realistic width\";\\n' $i; i=$((i+1)); done > big.js");
+        const r = try proj.oracle("i=1; while [ $i -le 20000 ]; do printf 'const needle_%05d = \"padding the line out to a realistic width\";\\n' $i; i=$((i+1)); done > big.js");
         gpa.free(r);
     }
 
@@ -1248,7 +1249,7 @@ test "e2e/grep: a search with hundreds of kilobytes of matches shows them, live 
 
     // The kept list holds every match: the last line is the proof.
     ed.runStr("grep.search", "needle");
-    try t.expect(drainToolContains(&ed, "*grep*", "big.js:4000:"));
+    try t.expect(drainToolContains(&ed, "*grep*", "big.js:20000:"));
 }
 
 test "e2e/output: Return on a `file:line` in run output jumps there" {
