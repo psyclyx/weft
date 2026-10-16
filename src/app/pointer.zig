@@ -287,7 +287,7 @@ pub fn hitAt(driver: *frame.Driver, head: *core.Head, x: f32, y: f32) Pointer.Hi
 // ── The Panes door ──────────────────────────────────────────────────
 
 pub fn panesDoor(driver: *frame.Driver) Pointer.Panes {
-    return .{ .context = driver, .focus = focusPane, .scroll = scrollPane, .vertical = verticalMove, .show = showInPane };
+    return .{ .context = driver, .focus = focusPane, .scroll = scrollPane, .vertical = verticalMove, .show = showInPane, .close_tab = closeTab, .tab_beside = tabBeside };
 }
 
 /// Show `id` in `pane` and focus it: the pane's entry is set first, so the
@@ -306,6 +306,60 @@ fn showInPane(raw: *anyopaque, ctx: *core.command.Context, pane: Pointer.PaneRef
     window_cmds.applyWindowFocus(driver.layout, driver.view, ctx.buffers, ctx.gpa, ctx.head, ctx.keymap);
     driver.ctx.view_dirty.* = true;
     return true;
+}
+
+/// Close tab `id` of an editor split (`Pane.held`): where another split
+/// still holds the document it only leaves this one; else the document
+/// closes, through the ordinary close that refuses unsaved edits — and a
+/// refusal leaves the tab where it is. The split then shows its neighbouring
+/// tab, or, with none left and another split to edit in, goes. False for a
+/// docked pane, whose tabs are its declaration's.
+fn closeTab(raw: *anyopaque, ctx: *core.command.Context, pane: Pointer.PaneRef, id: core.Buffers.Id) bool {
+    const driver = driverOf(raw);
+    const node = driver.layout.resolvePane(pane.id, pane.gen) orelse return false;
+    const p = node.pane();
+    if (!p.attrs.isPrimary()) return false;
+    const Elsewhere = struct { id: core.Buffers.Id, self: *const window_layout.Pane, found: *bool };
+    var found = false;
+    driver.layout.eachPane(Elsewhere{ .id = id, .self = p, .found = &found }, struct {
+        fn visit(c: Elsewhere, other: *window_layout.Pane) void {
+            if (other == c.self or !other.attrs.isPrimary()) return;
+            if (other.holds(c.id) or other.buffer_id == c.id) c.found.* = true;
+        }
+    }.visit);
+    if (!found) {
+        _ = core.pointer.closeEntry(ctx, id) catch return true;
+        if (ctx.buffers.get(id) != null) return true; // refused: unsaved edits
+    }
+    const at = p.release(id) orelse p.held.items.len;
+    if (p.held.items.len == 0) {
+        if (driver.layout.primaryCount() > 1)
+            _ = window_cmds.closePane(driver.layout, driver.view, ctx.buffers, ctx.gpa, ctx.head, ctx.keymap, node);
+        driver.ctx.view_dirty.* = true;
+        return true;
+    }
+    if (p.buffer_id == id or ctx.buffers.get(p.buffer_id) == null)
+        _ = showInPane(raw, ctx, pane, p.held.items[@min(at, p.held.items.len - 1)]);
+    driver.ctx.view_dirty.* = true;
+    return true;
+}
+
+/// The focused split's tab beside `id` (`Pointer.TabStep`): its next or
+/// previous, wrapping; or, when `id` closes, the one after it, else before.
+/// Null for a docked pane, a split that does not hold `id`, or one with no
+/// other tab.
+fn tabBeside(raw: *anyopaque, ctx: *core.command.Context, id: core.Buffers.Id, step: Pointer.TabStep) ?core.Buffers.Id {
+    const driver = driverOf(raw);
+    const p = window_layout.headFocus(driver.layout, ctx.head).pane();
+    if (!p.attrs.isPrimary()) return null;
+    const held = p.held.items;
+    const at = std.mem.indexOfScalar(core.Buffers.Id, held, id) orelse return null;
+    if (held.len < 2) return null;
+    return switch (step) {
+        .next => held[(at + 1) % held.len],
+        .prev => held[(at + held.len - 1) % held.len],
+        .successor => if (at + 1 < held.len) held[at + 1] else held[at - 1],
+    };
 }
 
 /// `cursor.up`/`cursor.down` in a text pane: one visual line, goal column

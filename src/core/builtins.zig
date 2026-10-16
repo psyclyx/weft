@@ -19,6 +19,7 @@ const placement = @import("placement.zig");
 const action_here = @import("action_here.zig");
 const designation = @import("designation.zig");
 const scene_edit = @import("scene_edit.zig");
+const pointer = @import("pointer.zig");
 
 const ok: Value = .nil;
 
@@ -736,14 +737,17 @@ fn fieldHere(ctx: *Context) bool {
 
 fn cBufferNext(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    const next = ctx.buffers.cycle(.next, ctx.viewports, isDocument) orelse return ok;
+    // The focused split's own tabs, where it keeps them; else every document.
+    const next = pointer.tabBeside(ctx, ctx.buffers.active_id, .next) orelse
+        ctx.buffers.cycle(.next, ctx.viewports, isDocument) orelse return ok;
     try ctx.buffers.switchTo(ctx.gpa, next, ctx.head, ctx.keymap);
     return ok;
 }
 
 fn cBufferPrevious(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    const prev = ctx.buffers.cycle(.prev, ctx.viewports, isDocument) orelse return ok;
+    const prev = pointer.tabBeside(ctx, ctx.buffers.active_id, .prev) orelse
+        ctx.buffers.cycle(.prev, ctx.viewports, isDocument) orelse return ok;
     try ctx.buffers.switchTo(ctx.gpa, prev, ctx.head, ctx.keymap);
     return ok;
 }
@@ -814,9 +818,10 @@ pub fn holdsUnsavedWork(ctx: *Context, b: *@import("Buffers.zig").Buffer) bool {
 fn retireActive(ctx: *Context) anyerror!Value {
     const b = ctx.buffers.active();
     if (ctx.entry_shell) |shell| shell.retire(shell.context, ctx, b);
-    // The pane gets the next DOCUMENT, or a fresh scratch — never a docked
-    // viewport's chrome, which the next close would then take down.
-    const next = ctx.buffers.cycle(.next, ctx.viewports, isDocument);
+    // The pane gets its own neighbouring tab, else the next DOCUMENT, or a
+    // fresh scratch — never a docked viewport's chrome, which the next close
+    // would then take down.
+    const next = pointer.tabBeside(ctx, b.id, .successor) orelse ctx.buffers.cycle(.next, ctx.viewports, isDocument);
     try ctx.buffers.closeTo(ctx.gpa, b.id, next, ctx.head, ctx.keymap);
     return ok;
 }

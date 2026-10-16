@@ -232,9 +232,9 @@ test "e2e/chrome: the toolbar is one row along the top, the pinned entries plus 
     const editor_entry = ed.buffers.active_id;
     ed.applyWindow();
 
-    // Docked at the top — beneath the menubar — as tall as one text row plus
-    // the pane margins, no status line of its own, and never where the keys
-    // are.
+    // Docked at the top — beneath the menubar — as tall as one row of the
+    // chrome's text plus a bar's margins, no status line of its own, and
+    // never where the keys are.
     const pane = try toolbarPane(ed);
     try t.expect(!pane.pane().attrs.takes_focus);
     try t.expect(!pane.pane().attrs.status_line);
@@ -242,8 +242,9 @@ test "e2e/chrome: the toolbar is one row along the top, the pinned entries plus 
     const rect = for (view.pane_maps[0..view.pane_map_count]) |m| {
         if (m.pane == pane.pane().id) break m.rect;
     } else return error.ToolbarNotDrawn;
-    try t.expectApproxEqAbs(view.line_h + 2 * h.view.View.pane_margin, rect.y, 0.5);
-    try t.expectApproxEqAbs(view.line_h + 2 * h.view.View.pane_margin, rect.h, 0.5);
+    const bar_h = view.ui().line_h + 2 * view.barMargin();
+    try t.expectApproxEqAbs(bar_h, rect.y, 0.5);
+    try t.expectApproxEqAbs(bar_h, rect.h, 0.5);
     try t.expectEqual(@as(f32, @floatFromInt(h.app_w)), rect.w);
     try t.expectEqual(editor_entry, ed.buffers.active_id);
     try t.expectEqual(try primaryPane(ed), window_layout.headFocus(ed.win_layout, ed.head));

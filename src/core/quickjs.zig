@@ -1979,6 +1979,8 @@ const vp_status_line: i32 = 1 << 4;
 const vp_extent_rows: i32 = 1 << 5;
 /// `{shown: false}`: the viewport starts hidden.
 const vp_hidden: i32 = 1 << 6;
+/// With `vp_extent_rows`: rows of the chrome's text (`{chromeRows: n}`).
+const vp_extent_chrome: i32 = 1 << 7;
 
 /// `weft.viewport(name, opts)` — stage a viewport's attributes
 /// (doc/configuration.md §5.2). The edge arrives as a name and is PARSED
@@ -2006,7 +2008,9 @@ fn cViewport(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         .takes_focus = flags & vp_takes_focus != 0,
         .status_line = flags & vp_status_line != 0,
     };
-    const extent: viewport_mod.Extent = if (flags & vp_extent_rows != 0)
+    const extent: viewport_mod.Extent = if (flags & vp_extent_rows != 0 and flags & vp_extent_chrome != 0)
+        .{ .chrome_rows = std.math.cast(u16, args[5]) orelse 1 }
+    else if (flags & vp_extent_rows != 0)
         .{ .rows = std.math.cast(u16, args[5]) orelse 1 }
     else
         .{ .fraction = @as(f32, @floatFromInt(args[5])) / 1000.0 };

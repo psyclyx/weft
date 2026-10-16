@@ -278,6 +278,7 @@ extern void host_present(const char *viewport, int viewport_len,
 #define WEFT_VP_STATUS_LINE (1 << 4)
 #define WEFT_VP_EXTENT_ROWS (1 << 5)
 #define WEFT_VP_HIDDEN (1 << 6)
+#define WEFT_VP_EXTENT_CHROME (1 << 7)
 
 // The result an i32-returning effect import answers when this plugin holds no
 // grant for the capability it needs (core/membrane/qjs_contract.zig's
@@ -820,11 +821,18 @@ static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
         if (JS_IsObject(jextent)) {
             // `{rows: n}`: whole text rows, resolved to pixels by the layout
             // from the view's row height — never a share of the frame.
-            JSValue jrows = JS_GetPropertyStr(ctx, jextent, "rows");
+            // `{chromeRows: n}`: rows of the CHROME's text (a menubar, a
+            // toolbar), which a chrome style may set smaller than the
+            // editor's.
+            JSValue jchrome = JS_GetPropertyStr(ctx, jextent, "chromeRows");
+            int chrome_rows = !JS_IsUndefined(jchrome) && !JS_IsNull(jchrome);
+            JSValue jrows = chrome_rows ? JS_DupValue(ctx, jchrome) : JS_GetPropertyStr(ctx, jextent, "rows");
+            JS_FreeValue(ctx, jchrome);
             int32_t rows = 1;
             if (!JS_IsUndefined(jrows) && !JS_IsNull(jrows)) JS_ToInt32(ctx, &rows, jrows);
             JS_FreeValue(ctx, jrows);
             flags |= WEFT_VP_EXTENT_ROWS;
+            if (chrome_rows) flags |= WEFT_VP_EXTENT_CHROME;
             // 0 is a viewport that is only its status line; the host holds
             // any other viewport to one row.
             extent_arg = rows < 0 ? 0 : rows;

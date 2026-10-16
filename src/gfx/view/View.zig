@@ -41,6 +41,7 @@ const grid_draw = @import("grid.zig");
 const render = @import("render.zig");
 
 const Theme = @import("Theme.zig");
+const ui_font = @import("ui_font.zig");
 const hud_mod = @import("hud.zig");
 const Hud = hud_mod.Hud;
 
@@ -157,6 +158,12 @@ cell_w: f32,
 line_h: f32,
 ascent: f32,
 top_row: usize = 0,
+/// `theme/ui-scale`: the chrome's size against the editor's.
+ui_scale: f32 = ui_font.default_scale,
+ui_face: ui_font.Face = .{ .ascent = 0.8, .height = 1.2 },
+/// Measured label widths (`ui_font.Widths`), owned; behind a pointer so a
+/// measure through a `*const View` can fill it.
+ui_widths: *ui_font.Widths,
 
 /// The most recent frame's source-offset ↔ geometry map, for
 /// hit-testing, caret, selection, and vertical motion. Its `lines`
@@ -214,8 +221,10 @@ pub fn init(gpa: Allocator, font_bytes: []const u8, em: f32) !View {
     const gap: f32 = @floatFromInt(lm.line_gap);
     var icon_set = try icons.Set.parse(gpa, "lucide", &icons.lucide);
     errdefer icon_set.deinit();
+    const widths = try gpa.create(ui_font.Widths);
+    widths.* = .{};
 
-    return .{
+    var v: View = .{
         .gpa = gpa,
         .face_set = face_set,
         .theme = (Theme{}).linearized(),
@@ -225,10 +234,14 @@ pub fn init(gpa: Allocator, font_bytes: []const u8, em: f32) !View {
         .line_h = em * (ascent - descent + gap) / upem,
         .ascent = em * ascent / upem,
         .layout_arena = std.heap.ArenaAllocator.init(gpa),
+        .ui_widths = widths,
     };
+    v.ui_face = ui_font.Face.of(&v.face_set);
+    return v;
 }
 
 pub fn deinit(self: *View) void {
+    self.gpa.destroy(self.ui_widths);
     self.layout_arena.deinit();
     self.icon_set.deinit();
     self.face_set.deinit();
@@ -248,10 +261,14 @@ pub fn icon(self: *const View, name: []const u8) ?*const icons.Icon {
 /// them because the view is what reads them.
 pub const chrome_slot = "theme/chrome";
 pub const icons_slot = "theme/icons";
+/// `theme/ui-scale`: the chrome's text size against the editor's, under
+/// `widget` (`ui_font.zig`) — `0.85` unless a config says otherwise.
+pub const ui_scale_slot = "theme/ui-scale";
 
 pub fn declareChromeSlots(container: *core.container.Container) !void {
     try container.declareSlot(.{ .name = chrome_slot, .shape = .value, .composition = .first_wins });
     try container.declareSlot(.{ .name = icons_slot, .shape = .value, .composition = .first_wins });
+    try container.declareSlot(.{ .name = ui_scale_slot, .shape = .value, .composition = .first_wins });
 }
 
 /// Read the chrome style and icon set from their slots. Called at the top of
@@ -263,6 +280,58 @@ pub fn resolveChrome(self: *View, container: *const core.container.Container, fa
         if (chrome_mod.Style.parse(name)) |style| self.chrome = style;
     }
     if (slotValue(container, facts, icons_slot)) |name| self.icons_on = !std.mem.eql(u8, name, "none");
+    if (slotValue(container, facts, ui_scale_slot)) |spelled| {
+        const scale = std.fmt.parseFloat(f32, spelled) catch self.ui_scale;
+        if (std.math.isFinite(scale) and scale >= 0.5 and scale <= 2) self.ui_scale = scale;
+    }
+}
+
+/// A bar's margin above and below its row of chrome: a pane's under the
+/// text styles; under `widget`, the little a desktop's menubar or toolbar
+/// leaves, so the bar is as tall as its chrome and no more.
+pub fn barMargin(self: *const View) f32 {
+    if (self.chrome != .widget) return margin;
+    return @round(self.ui().em * 0.3);
+}
+
+/// A pane's status line: a line of the chrome's text, with room round it
+/// under `widget`; a text row under the text styles.
+pub fn statusH(self: *const View) f32 {
+    if (self.chrome != .widget) return self.line_h;
+    const m = self.ui();
+    return m.line_h + @round(m.em * 0.5);
+}
+
+/// The tab strip over a pane's body: a text row under the text styles; under
+/// `widget`, a line of the chrome's text with room for a tab's lip and face.
+pub fn tabStripH(self: *const View) f32 {
+    if (self.chrome != .widget) return self.line_h;
+    const m = self.ui();
+    return m.line_h + @round(m.em * 0.75);
+}
+
+/// The chrome's text (`ui_font.zig`): the sans face at `ui_scale` of `em`
+/// under `widget`, the editor's own cells under the text styles — derived
+/// from the editor's size, the style and the scale whenever it is asked.
+pub fn ui(self: *const View) ui_font.Metrics {
+    return ui_font.metrics(self.ui_face, self.chrome == .widget, self.ui_scale, .{ .em = self.em, .line_h = self.line_h, .ascent = self.ascent, .cell_w = self.cell_w });
+}
+
+/// How wide `label` is set as chrome: measured in the UI font under
+/// `widget`, a cell per codepoint under the text styles.
+pub fn uiWidth(self: *const View, label: []const u8) f32 {
+    const m = self.ui();
+    if (!m.sans) return @as(f32, @floatFromInt(std.unicode.utf8CountCodepoints(label) catch label.len)) * self.cell_w;
+    return self.ui_widths.of(&self.face_set, label, m.em);
+}
+
+/// `label` set as chrome with its text row's top at `top`: a run in the UI
+/// font (the mono face under the text styles, at the editor's size).
+pub fn uiRun(self: *const View, scratch: Allocator, runs: *std.ArrayList(Run), label: []const u8, x: f32, top: f32, color: [4]f32, clip: ?region.Rect) !void {
+    if (label.len == 0) return;
+    const m = self.ui();
+    const shaped = try text_engine.shape(scratch, if (m.sans) &self.face_set.body else &self.face_set.mono, label, .{});
+    try runs.append(scratch, .{ .shaped = shaped, .baseline_y = top + m.ascent, .place = .{ .prop = .{ .x = x, .em = m.em, .color = color } }, .clip = clip });
 }
 
 fn slotValue(container: *const core.container.Container, facts: core.facts.Facts, slot: []const u8) ?[]const u8 {
@@ -534,20 +603,21 @@ const Regions = struct {
 fn carve(self: *const View, frame: region.Rect, hud: Hud) Regions {
     // A pane that declares no status line (a one-row strip) gives the row
     // to its body.
-    const status_cut = frame.cutBottom(if (hud.status_line) self.line_h else 0);
+    const status_cut = frame.cutBottom(if (hud.status_line) self.statusH() else 0);
     const rest = status_cut.rest;
     // A pane that is only its status line has no body to inset: its content
     // is empty, never negative.
+    const my = if (hud.bar) self.barMargin() else margin;
     const content: region.Rect = .{
         .x = rest.x + margin,
-        .y = rest.y + margin,
+        .y = rest.y + my,
         .w = @max(0, rest.w - 2 * margin),
-        .h = @max(0, rest.h - 2 * margin),
+        .h = @max(0, rest.h - 2 * my),
     };
     var stack = content;
     var tab: ?region.Rect = null;
     if (hud.tabs != null) {
-        const c = stack.cutTop(self.line_h);
+        const c = stack.cutTop(self.tabStripH());
         tab = c.strip;
         stack = c.rest;
     }
@@ -808,7 +878,7 @@ pub fn build(
             // (`core.pointer.clickChrome`); it has no close sub-region (see
             // `layoutTabs`), so only the body hit is ever recorded for one.
             try chrome.append(chrome_gpa, .{ .rect = .{ .x = box.x, .y = box.y, .w = @max(0, @min(box.w, close.x - box.x)), .h = box.h }, .kind = .tab, .index = tb.index, .part = .body, .entry = tab.id, .command = tab.command, .shows_here = tab.shows_here });
-            if (close.w > 0) try chrome.append(chrome_gpa, .{ .rect = close, .kind = .tab, .index = tb.index, .part = .close, .entry = tab.id });
+            if (close.w > 0) try chrome.append(chrome_gpa, .{ .rect = close, .kind = .tab, .index = tb.index, .part = .close, .entry = tab.id, .shows_here = tab.shows_here });
         }
     }
 

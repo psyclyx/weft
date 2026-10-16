@@ -615,8 +615,9 @@ sidebar.
   `pointer.close-tab` closes the tab under the pointer; defaults.js binds it to
   mouse-2.
 - A docked viewport's entry is chrome, not a document: `Registry.holdsEntry`, from
-  the entry each docked declaration last showed. The tab strip skips those entries,
-  so the sidebar listing, the toolbar and the panel's entry are never tabs.
+  the entry each docked declaration last showed. A split's tabs skip those entries,
+  so the sidebar listing, the toolbar and the panel's entry are never tabs. (Since
+  2026-10-15 each split keeps its own tabs — doc/chrome.md §3.5.)
 - `weft.statusSegment(text, role, priority, command)`. `ui/statusline-seg` is
   declared with a schema (`core.status_segment`), so a plugin binds it like the
   gutter. It is asked once per pane per built frame with the caret and whether the

@@ -445,6 +445,27 @@ fn cursorDiag(diag_layer: ?*const core.layers.Layer, cursor: usize) ?[]const u8 
     return null;
 }
 
+/// An editor pane's tabs: the documents it holds (`Pane.held`, kept by
+/// `window_cmds.holdShown`), oldest first, the one it shows active, each
+/// shown IN this pane when clicked. Drawn on every split once the window is
+/// split, so each reads as its own group; on a lone pane only once it holds
+/// more than one. What the pane shows is listed even before the wake that
+/// holds it. Name slices borrow the buffers' own strings — valid this frame.
+fn paneTabs(arena: std.mem.Allocator, fx: *const FrameCtx, pane: *const window_layout.Pane, splits: usize) ?[]view_mod.Tab {
+    var list: std.ArrayList(view_mod.Tab) = .empty;
+    const shown = fx.buffers.get(pane.buffer_id);
+    const unheld = if (shown) |b| fx.viewports.isDocument(b) and !pane.holds(b.id) else false;
+    for (pane.held.items) |id| if (fx.buffers.get(id)) |b| appendTab(arena, &list, b, pane.buffer_id);
+    if (unheld) appendTab(arena, &list, shown.?, pane.buffer_id);
+    if (list.items.len == 0 or (splits < 2 and list.items.len < 2)) return null;
+    return list.items;
+}
+
+fn appendTab(arena: std.mem.Allocator, list: *std.ArrayList(view_mod.Tab), b: *core.Buffers.Buffer, shown: core.Buffers.Id) void {
+    const nm = if (b.textEditor()) |ed| ed.backingPath() orelse b.name else b.name;
+    list.append(arena, .{ .name = std.fs.path.basename(nm), .active = b.id == shown, .id = b.id, .path = nm, .shows_here = true }) catch {};
+}
+
 /// The header strip for a DOCKED pane whose viewport declaration named tabs
 /// (`weft.viewport(..., {tabs: [...]})`, doc/rendering.md): one COMMAND tab
 /// per id, in the order declared, labeled and iconed from its presentation
@@ -1101,19 +1122,6 @@ pub const FrameBuilder = struct {
         if (act.menu_shown and surfaces.items.len == 0 and !fx.head.pick.active and fx.head.interactions.active() == null and fx.keymap.modeHasTag(fx.head.currentMode(), "menu")) {
             fx.keymap.ownBindings(arena, fx.head.currentMode(), &wk_hints) catch {};
         }
-        // Buffer tab strip (only with more than one buffer open). Name
-        // slices borrow the buffers' own strings — valid this frame.
-        var tab_list: std.ArrayList(view_mod.Tab) = .empty;
-        if (fx.buffers.count() > 1) {
-            var bit3 = fx.buffers.iterator();
-            while (bit3.next()) |b| {
-                // A docked companion's entry (the file tree, a panel, a
-                // toolbar) is chrome, not a document: never a tab.
-                if (!fx.viewports.isDocument(b)) continue;
-                const nm = if (b.textEditor()) |ed| ed.backingPath() orelse b.name else b.name;
-                tab_list.append(arena, .{ .name = std.fs.path.basename(nm), .active = b == abuf, .id = b.id, .path = nm }) catch {};
-            }
-        }
         // vim-goggles: an operation flashed a set of ranges on a document;
         // show them while the wake says the flash shows (`FlashTiming`,
         // noted before the frame). An undo's flash shows only where the
@@ -1143,7 +1151,6 @@ pub const FrameBuilder = struct {
             // which-key/files/git. This field is dead in production; see
             // `View.build`'s doc for why it stays as a legacy/test-only path.
             .hover = null,
-            .tabs = if (tab_list.items.len > 1) tab_list.items else null,
             .cursor_style = fx.cursor_cfg.styleFor(cursor_mode, core.scene_edit.textCommit(fx.semantic, fx.keymap, fx.head, cursor_mode) != null),
             .caret_place = fx.cursor_cfg.placeFor(cursor_mode),
             .cursor_on = if (fx.cursor_cfg.blinkFor(cursor_mode)) act.blink_on else true,
@@ -1198,20 +1205,21 @@ pub const FrameBuilder = struct {
         // exactly where the pane draws one (`Rows.statusLine`).
         self.win_layout.rows = .{
             .line_h = self.view.line_h,
+            .chrome_line_h = self.view.ui().line_h,
+            .status_h = self.view.statusH(),
+            .bar_inset = 2 * self.view.barMargin(),
             .inset = 2 * view_mod.View.pane_margin,
             .pane_status = !configIs(fx.config, "editor", "pane-status", "off"),
         };
         const rows = self.win_layout.rows;
         const nslots = self.win_layout.collect(focused, frame_rect, &slots);
-        // The tab strip lists the documents, so it sits on a pane that shows
-        // them: the focused one when it is an ordinary pane, else the first
-        // primary pane (focus in a docked panel leaves it over the editor).
-        const tabs_pane: ?u32 = if (focused.pane().attrs.isPrimary())
-            focused.pane().id
-        else if (self.win_layout.primaryPane()) |p| p.pane().id else null;
+        // Every editor pane draws its own tabs — the documents it holds
+        // (`Pane.held`); a docked one, its declaration's header.
+        const splits = self.win_layout.primaryCount();
 
         var foc_rect = frame_rect;
         var foc_border: region.Edges = .{};
+        var foc_bar = false;
         // The panes that PRESENT a context's status rather than an entry of
         // their own: captured last, once the context they present has been.
         var bars: [window_layout.max_panes]window_layout.Slot = undefined;
@@ -1220,6 +1228,7 @@ pub const FrameBuilder = struct {
             if (slot.focused) {
                 foc_rect = slot.rect;
                 foc_border = slot.border;
+                foc_bar = slot.bar;
                 continue; // the focused pane is captured last, below
             }
             const ob = fx.buffers.get(slot.pane.buffer_id) orelse continue;
@@ -1241,7 +1250,7 @@ pub const FrameBuilder = struct {
                 .facts = other_facts,
                 .hud = .{
                     .mode = other_facts.mode,
-                    .tabs = if (tabs_pane == slot.pane.id) hud.tabs else dockedTabs(arena, fx, slot.pane, ob),
+                    .tabs = if (slot.pane.attrs.isPrimary()) paneTabs(arena, fx, slot.pane, splits) else dockedTabs(arena, fx, slot.pane, ob),
                     .status_line = rows.statusLine(slot.pane.attrs),
                     .brand_mark = std.mem.eql(u8, ob.tool, "dashboard"),
                     .semantic_view = semanticDocumentFor(arena, fx, ob, &ob.scene_selection, false),
@@ -1249,6 +1258,7 @@ pub const FrameBuilder = struct {
                     // The focused pane, built last, paints the tooltip.
                     .tooltips = false,
                     .pane_border = slot.border,
+                    .bar = slot.bar,
                 },
             });
         }
@@ -1256,8 +1266,9 @@ pub const FrameBuilder = struct {
         // The focused pane: active buffer, full HUD, caret, picker dock.
         var fhud = hud;
         fhud.pane_border = foc_border;
+        fhud.bar = foc_bar;
         fhud.float_bounds = frame_rect;
-        if (tabs_pane != focused.pane().id) fhud.tabs = dockedTabs(arena, fx, focused.pane(), abuf);
+        fhud.tabs = if (focused.pane().attrs.isPrimary()) paneTabs(arena, fx, focused.pane(), splits) else dockedTabs(arena, fx, focused.pane(), abuf);
         fhud.status_line = rows.statusLine(focused.pane().attrs);
         try self.capturePane(fx, input, .{
             .buffer = abuf,

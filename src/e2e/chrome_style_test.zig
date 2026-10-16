@@ -254,3 +254,109 @@ test "e2e/chrome-style: config.js draws widget chrome, and theme.set-chrome swit
     const tab_row: Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(h.app_w), .h = view.line_h + 2 * h.view.View.pane_margin };
     try t.expect(!differsIn(text, again, tab_row));
 }
+
+/// What `pane` drew in the last frame: its rect and its hits.
+fn paneMap(ed: *Editor, pane: *window_layout.Node) !h.view.View.PaneMap {
+    const v = try ed.ensureView();
+    for (v.pane_maps[0..v.pane_map_count]) |m| if (m.pane == pane.pane().id) return m;
+    return error.PaneNotDrawn;
+}
+
+/// The hit of the node labeled `label` in the active tool's view.
+fn toolHit(ed: *Editor, label: []const u8) !h.view.semantic.Hit {
+    const ref = ed.toolView() orelse return error.NoTool;
+    const instance = ed.session.system.semantic.views.get(ref) orelse return error.ToolViewGone;
+    const id = for (instance.focus_order) |id| {
+        const node = instance.node(id) orelse continue;
+        if (node.content == .action and std.mem.eql(u8, node.content.action.label, label)) break id;
+    } else return error.NoSuchItem;
+    const v = try ed.ensureView();
+    for (v.pane_maps[0..v.pane_map_count]) |m| for (m.hits) |hit| {
+        if (hit.node == id and hit.view.eql(ref)) return hit;
+    };
+    return error.ItemNotDrawn;
+}
+
+/// Hovering the far end of `row` — past its text — lights the whole row:
+/// the frame changes at both ends of it.
+fn rowLightsOnHover(ed: *Editor, row: Rect) !void {
+    const gpa = t.allocator;
+    const v = try ed.ensureView();
+    const resting = try ed.renderComposite();
+    defer gpa.free(resting);
+    try motion(ed, .{ row.x + row.w - 2, row.y + row.h / 2 });
+    const lit = try ed.renderComposite();
+    defer gpa.free(lit);
+    try t.expect(differsIn(resting, lit, .{ .x = row.x, .y = row.y, .w = v.cell_w, .h = row.h }));
+    try t.expect(differsIn(resting, lit, .{ .x = row.x + row.w - v.cell_w, .y = row.y, .w = v.cell_w, .h = row.h }));
+}
+
+test "e2e/chrome-style: config.js — a listing's rows and the dashboard's items answer the pointer alike: a list's rows, not buttons; buttons have room; menubar titles abut" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    _ = try proj.oracle("mkdir -p sub; printf 'a\\n' > alpha.txt; printf 'b\\n' > bravo.txt");
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+    defer gpa.free(config_dir);
+    var loader: ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    try h.bootConfig(&ed, config_dir, &loader);
+    ed.run("dashboard.open");
+    ed.applyWindow();
+    gpa.free(try ed.renderComposite());
+    const v = try ed.ensureView();
+    try t.expectEqual(Style.widget, v.chrome);
+    proj.shot(&ed, "chrome-style-lists-resting");
+
+    // A dashboard item is a row: a click anywhere on it reaches it, and the
+    // pointer anywhere on it lights all of it — no button face.
+    const item = try toolHit(&ed, "New buffer");
+    try t.expect(item.rect.w > 20 * v.cell_w);
+    try t.expectEqual(v.line_h, item.rect.h);
+    try rowLightsOnHover(&ed, item.rect);
+    proj.shot(&ed, "chrome-style-lists-dashboard-hover");
+
+    // A listing's row, the same.
+    const sidebar = try @import("chrome_test.zig").viewportPane(&ed, "sidebar");
+    const rows = (try paneMap(&ed, sidebar)).hits;
+    try t.expect(rows.len >= 3);
+    const row = rows[2].rect;
+    try t.expect(row.w > 20 * v.cell_w);
+    try rowLightsOnHover(&ed, row);
+    proj.shot(&ed, "chrome-style-lists-sidebar-hover");
+
+    // The chrome's text is smaller than the editor's (`theme/ui-scale`).
+    try t.expect(v.ui().em < v.em);
+    // A button's face, and what a click reaches, is taller than its label's
+    // line; the toolbar still holds it.
+    const palette = try toolbarButton(&ed, "Palette");
+    const toolbar = (try paneMap(&ed, try @import("chrome_test.zig").viewportPane(&ed, "toolbar"))).rect;
+    try t.expect(palette.h > v.ui().line_h + 2);
+    try t.expect(palette.y >= toolbar.y and palette.y + palette.h <= toolbar.y + toolbar.h);
+    // Its face lights to the edge of that taller region.
+    const before = try ed.renderComposite();
+    defer gpa.free(before);
+    try motion(&ed, .{ palette.x + palette.w / 2, palette.y + palette.h / 2 });
+    const lit = try ed.renderComposite();
+    defer gpa.free(lit);
+    try t.expect(differsIn(before, lit, .{ .x = palette.x + palette.w / 2, .y = palette.y, .w = 1, .h = 2 }));
+    proj.shot(&ed, "chrome-style-lists-button-hover");
+
+    // Menubar titles abut, each the bar's full height, as a desktop's do —
+    // and the bar is as tall as a line of the chrome's text, and its margins.
+    const titles = (try paneMap(&ed, try @import("chrome_test.zig").viewportPane(&ed, "menubar"))).hits;
+    try t.expect(titles.len >= 3);
+    for (titles[0 .. titles.len - 1], titles[1..]) |a, b| {
+        try t.expectApproxEqAbs(a.rect.x + a.rect.w, b.rect.x, 0.5);
+        try t.expectEqual(v.ui().line_h + 2 * v.barMargin(), a.rect.h);
+    }
+    try motion(&ed, .{ titles[1].rect.x + 2, titles[1].rect.y + 2 });
+    proj.shot(&ed, "chrome-style-lists-menubar-hover");
+    ed.click(.{ titles[1].rect.x + 2, titles[1].rect.y + 2 });
+    proj.shot(&ed, "chrome-style-lists-menubar-open");
+}

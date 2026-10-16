@@ -195,12 +195,21 @@ pub fn applyIntents(
             applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
     }
     {
-        // A pane whose buffer was closed falls back to the active one so no
-        // leaf dangles.
+        // A pane whose buffer was closed falls back to the newest tab it still
+        // holds, else to the active entry, so no leaf dangles.
         const PruneCtx = struct { active: core.Buffers.Id, bufs: *core.Buffers };
         win_layout.eachPane(PruneCtx{ .active = buffers.active_id, .bufs = buffers }, struct {
             fn visit(c: PruneCtx, p: *window_layout.Pane) void {
-                if (c.bufs.get(p.buffer_id) == null) p.buffer_id = c.active;
+                if (c.bufs.get(p.buffer_id) != null) return;
+                var i = p.held.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    if (c.bufs.get(p.held.items[i]) != null) {
+                        p.buffer_id = p.held.items[i];
+                        return;
+                    }
+                }
+                p.buffer_id = c.active;
             }
         }.visit);
     }
@@ -208,12 +217,34 @@ pub fn applyIntents(
     return dirty;
 }
 
+/// Keep every editor pane's tabs (`Pane.held`) true to what it has shown:
+/// the document it shows now is held — however it got there: an open, a
+/// switch, a click, a split — and an entry that closed, or that a viewport
+/// has taken as its own, is let go. Docked panes hold nothing: their header
+/// is their declaration's (`dockedTabs`). Run once per wake, after the
+/// window intents, so the frame that follows draws the sets as they are.
+pub fn holdShown(win_layout: *window_layout.Layout, buffers: *core.Buffers, viewports: *const core.viewport.Registry) void {
+    const Ctx = struct { gpa: std.mem.Allocator, bufs: *core.Buffers, viewports: *const core.viewport.Registry };
+    win_layout.eachPane(Ctx{ .gpa = win_layout.gpa, .bufs = buffers, .viewports = viewports }, struct {
+        fn visit(c: Ctx, p: *window_layout.Pane) void {
+            if (!p.attrs.isPrimary()) return;
+            var i: usize = 0;
+            while (i < p.held.items.len) {
+                const b = c.bufs.get(p.held.items[i]);
+                if (b != null and c.viewports.isDocument(b.?)) i += 1 else _ = p.held.orderedRemove(i);
+            }
+            const shown = c.bufs.get(p.buffer_id) orelse return;
+            if (c.viewports.isDocument(shown)) p.hold(c.gpa, p.buffer_id) catch {};
+        }
+    }.visit);
+}
+
 /// Close `node` — the one way a pane leaves the tree, whatever asked
 /// (`window.close`, hiding a named viewport, its header's ×). When the head
 /// was in it, focus moves to the pane the close hands it and the active
 /// entry follows, so no key ever goes to an entry no pane shows. False when
 /// the layout refused (the last pane to edit in).
-fn closePane(
+pub fn closePane(
     win_layout: *window_layout.Layout,
     view: *view_mod.View,
     buffers: *core.Buffers,

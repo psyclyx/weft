@@ -1,4 +1,6 @@
-//! Status line + which-key panel — HUD text assembly (always mono).
+//! Status line + which-key panel — HUD text assembly. The status line is
+//! chrome, set in the chrome's text (`View.ui`): mono cells under the text
+//! styles, the UI font measured in pixels under `widget`; which-key is mono.
 //!
 //! Free functions over `*View`: they read the view's metrics/theme/faces and
 //! append runs + rects into the frame's builders. Split out of `view.zig`;
@@ -31,10 +33,10 @@ pub const ChromeSink = struct {
     /// they are drawn in (`Hud.status_of`): a click acts there.
     of: ?u32 = null,
 
-    fn segment(self: ChromeSink, v: *const View, y: f32, index: usize, from: usize, to: usize, command: []const u8, label: []const u8) !void {
-        if (to <= from) return;
+    fn segment(self: ChromeSink, rect: region.Rect, index: usize, command: []const u8, label: []const u8) !void {
+        if (rect.w <= 0) return;
         try self.list.append(self.gpa, .{
-            .rect = v.cellsRect(y, from, to - from),
+            .rect = rect,
             .kind = .status,
             .index = index,
             // Copied into the frame arena with the hit: the segment's command
@@ -68,7 +70,8 @@ pub fn buildHud(
     // frame by one carving (build), so a panel physically cannot land on
     // the status line or the body — the class of bug the old
     // rows_total-N arithmetic allowed.
-    const base_y = baseIn(v, status_rect.y, 0);
+    // The text row centred in the bar.
+    const base_y = chrome_mod.textTop(v, status_rect) + v.ui().ascent;
     // The bar is the whole row, edge to edge across the pane: the text sits
     // on the body's columns inside it, the background does not.
     try rects.append(scratch, .{
@@ -84,23 +87,39 @@ pub fn buildHud(
     // what does not fit shrinks, then goes, lowest priority first
     // (`status_layout`). So a segment is either drawn whole, drawn short
     // with its `…`, or not drawn; nothing is clipped at the pane's edge.
+    // Under `widget` the same rules run in pixels of the UI font.
+    const px = v.ui().sans;
     const segs = hud.statusline_segs;
     const items = try scratch.alloc(status_layout.Item, segs.len);
     for (segs, items) |seg, *it| it.* = .{
         .side = if (seg.align_right) .right else .left,
         .priority = seg.priority,
-        .full = cellsOf(v, seg, seg.text),
-        .compact = if (seg.compact.len > 0) cellsOf(v, seg, seg.compact) else null,
+        .full = if (px) pxOf(v, seg, seg.text) else cellsOf(v, seg, seg.text),
+        .compact = if (seg.compact.len == 0) null else if (px) pxOf(v, seg, seg.compact) else cellsOf(v, seg, seg.compact),
         .elide = seg.elide,
     };
     const placed = try scratch.alloc(status_layout.Placed, segs.len);
-    status_layout.layout(items, cols_visible, placed);
+    if (px) {
+        const em = v.ui().em;
+        status_layout.layoutIn(.{
+            .gap = @intFromFloat(@round(em)),
+            .cluster_gap = @intFromFloat(@round(em)),
+            .min_elided = @intFromFloat(@round(4 * em)),
+        }, items, @intFromFloat(@as(f32, @floatFromInt(cols_visible)) * v.cell_w), placed);
+    } else status_layout.layout(items, cols_visible, placed);
 
-    const row_y = status_rect.y;
     for (segs, placed, 0..) |seg, p, index| {
         if (p.form == .dropped) continue;
-        const drawn = try drawSegment(v, scratch, runs, rects, seg, p, base_y, lookOf(v, hud, seg, index));
-        try chrome.segment(v, row_y, index, p.col, p.col + p.cols, seg.command, drawn);
+        const box: region.Rect = if (px)
+            .{ .x = v.origin_x + @as(f32, @floatFromInt(p.col)), .y = status_rect.y, .w = @floatFromInt(p.cols), .h = status_rect.h }
+        else
+            v.cellsRect(status_rect.y, p.col, p.cols);
+        const look = lookOf(v, hud, seg, index);
+        const drawn = if (px)
+            try drawSegmentPx(v, scratch, runs, rects, seg, p, box, look)
+        else
+            try drawSegment(v, scratch, runs, rects, seg, p, base_y, look);
+        try chrome.segment(box, index, seg.command, drawn);
     }
 
     // which-key host fallback: a chord is pending and no pick is open — list
@@ -156,6 +175,76 @@ fn cellsOf(v: *const View, seg: ui_mesh.Seg, text: []const u8) usize {
     const pad: usize = if (seg.bg_override != null) 2 else 0;
     const icon: usize = if (iconPlace(v, seg, text) == .before) 2 else 0;
     return status_layout.cells(text) + pad + icon;
+}
+
+/// The pixels `text` takes as `seg` in the UI font: a chip's padding either
+/// side, and an icon's room before it (one that stands in for the text's
+/// leading glyph takes that glyph's place).
+fn pxOf(v: *const View, seg: ui_mesh.Seg, text: []const u8) usize {
+    const pad: f32 = if (seg.bg_override != null) 2 * chrome_mod.padX(v, .chip) else 0;
+    const shown, const icon = pxParts(v, seg, text);
+    const icon_w: f32 = if (icon) chrome_mod.iconSide(v) + @round(v.ui().em * 0.4) else 0;
+    return @intFromFloat(@ceil(v.uiWidth(shown) + pad + icon_w));
+}
+
+/// The text a segment draws in pixels, and whether an icon goes before it:
+/// an icon standing in for the leading glyph replaces it.
+fn pxParts(v: *const View, seg: ui_mesh.Seg, text: []const u8) struct { []const u8, bool } {
+    return switch (iconPlace(v, seg, text)) {
+        .none => .{ text, false },
+        .before => .{ text, true },
+        .stands_in => blk: {
+            const len = std.unicode.utf8ByteSequenceLength(text[0]) catch 1;
+            break :blk .{ std.mem.trimStart(u8, text[@min(text.len, len)..], " "), true };
+        },
+    };
+}
+
+/// `text` cut to `room` pixels of the UI font, the cut end marked `…`, as
+/// `status_layout.cut` cuts cells: between codepoints, never past `room`.
+fn cutPx(v: *const View, buf: []u8, text: []const u8, room: f32, end: status_layout.Elide) []const u8 {
+    if (v.uiWidth(text) <= room or end == .none) return text;
+    const have = status_layout.cells(text);
+    // The most codepoints that fit beside the `…`.
+    var keep = have;
+    while (keep > 0) : (keep -= 1) {
+        const cut = status_layout.cut(buf, text, keep + 1, end);
+        if (v.uiWidth(cut) <= room) return cut;
+    }
+    return text[0..0];
+}
+
+/// `drawSegment` in pixels of the UI font, in `box`.
+fn drawSegmentPx(
+    v: *View,
+    scratch: Allocator,
+    runs: *std.ArrayList(Run),
+    rects: *std.ArrayList(Rect),
+    seg: ui_mesh.Seg,
+    p: status_layout.Placed,
+    box: region.Rect,
+    look: Look,
+) ![]const u8 {
+    const form_text = if (p.compact) seg.compact else seg.text;
+    const pad: f32 = if (seg.bg_override != null) chrome_mod.padX(v, .chip) else 0;
+    const shown_text, const icon = pxParts(v, seg, form_text);
+    const icon_w: f32 = if (icon) chrome_mod.iconSide(v) + @round(v.ui().em * 0.4) else 0;
+    const room = box.w - 2 * pad - icon_w;
+    const cut_buf = try scratch.alloc(u8, shown_text.len + status_layout.ellipsis.len);
+    const shown = if (p.form == .elided) cutPx(v, cut_buf, shown_text, room, seg.elide) else shown_text;
+
+    const sink: chrome_mod.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
+    try chrome_mod.paint(sink, look.role, .{ .hover = look.hover }, .{ .bg = look.bg }, box);
+    const color = seg.fg_override orelse v.theme.roleColor(seg.role);
+    var x = box.x + pad;
+    if (icon) {
+        _ = try chrome_mod.drawIcon(sink, seg.icon, x + chrome_mod.iconSide(v) / 2, box.y + box.h / 2, chrome_mod.iconSide(v), color);
+        x += icon_w;
+    }
+    try v.uiRun(scratch, runs, shown, x, chrome_mod.textTop(v, box), color, box);
+    // What it reads as: its whole form unless it was cut — the glyph an
+    // icon stands in for included, as on the cell grid.
+    return if (p.form == .elided) shown else form_text;
 }
 
 /// Draw one placed segment: its role's look (a chip's background, a hover

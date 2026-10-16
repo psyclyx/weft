@@ -55,6 +55,10 @@ pub const Hud = struct {
     /// Draw the pane's status line (the viewport's `status_line` attribute,
     /// or a pane presenting a status).
     status_line: bool = true,
+    /// A bar of chrome (a menubar, a toolbar — a dock sized in rows of
+    /// chrome): carved with the bar's margins above and below
+    /// (`View.barMargin`), not a pane's.
+    bar: bool = false,
     /// The pane whose context `statusline_segs` describe, when it is not
     /// this one: this pane PRESENTS another context's status (a bar showing
     /// `weft://here/status/primary`), and a click on a segment acts there.

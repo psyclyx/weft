@@ -13,9 +13,10 @@ weft.plugin("offers");
 
 weft.viewport("toolbar", {
   edge: "top",
-  // One text row, however large the font: a share of the frame would grow
-  // the strip with the window.
-  extent: { rows: 1 },
+  // One row of the chrome's text, however large the font: a share of the
+  // frame would grow the strip with the window. `chromeRows`, not `rows`:
+  // the chrome style may set its buttons smaller than the editor's text.
+  extent: { chromeRows: 1 },
   // Never in `window.focus-next`'s rotation, and never where the keys go: a click
   // acts through it and the editor keeps the keyboard, so the strip keeps
   // describing the editor while it is being clicked.

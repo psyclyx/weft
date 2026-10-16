@@ -97,6 +97,10 @@ pub const Extent = union(enum) {
     /// Whole text rows, at least one — or none, for a viewport that is only
     /// its status line (`status_line` set): a bar presenting a status.
     rows: u16,
+    /// Whole rows of the CHROME's text, at least one: a bar of chrome (a
+    /// menubar, a toolbar), as tall as its style sets chrome — which may be
+    /// smaller than the editor's text.
+    chrome_rows: u16,
 
     pub fn eql(a: Extent, b: Extent) bool {
         return std.meta.eql(a, b);

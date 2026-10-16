@@ -134,11 +134,11 @@ test "e2e/status: ide.js shows one bar along the whole window's bottom — no pa
     const view = try ed.ensureView();
     const bar = try lineOf(ed, try barPane(ed));
     errdefer bar.print();
-    // The window's full width, its last row, one row tall.
+    // The window's full width, its last row, one status line tall.
     try t.expectEqual(@as(f32, 0), bar.rect.x);
     try t.expectEqual(@as(f32, @floatFromInt(h.app_w)), bar.rect.w);
     try t.expectEqual(@as(f32, @floatFromInt(h.app_h)), bar.rect.y + bar.rect.h);
-    try t.expectApproxEqAbs(view.line_h, bar.rect.h, 0.5);
+    try t.expectApproxEqAbs(view.statusH(), bar.rect.h, 0.5);
     // Its segments sit on its row, inside it.
     try t.expect(bar.n > 0);
     for (bar.rects[0..bar.n]) |r| {
@@ -391,7 +391,7 @@ test "e2e/status: vim and helix name their modes on each pane's line, which runs
         try t.expect(line.has("Ln 1, Col 1"));
         // Flush: the line's segments sit on the pane's last row.
         const view = try ed.ensureView();
-        try t.expectApproxEqAbs(line.rect.y + line.rect.h - view.line_h, line.rects[0].y, 0.5);
+        try t.expectApproxEqAbs(line.rect.y + line.rect.h - view.statusH(), line.rects[0].y, 0.5);
         if (std.mem.eql(u8, grammar.file, "config.js")) shot(&ed, "config-pane-text");
 
         ed.press("i", "i");

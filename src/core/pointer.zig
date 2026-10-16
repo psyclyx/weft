@@ -195,7 +195,29 @@ pub const Panes = struct {
     /// panel owns its entry against a plain switch). False when the pane or
     /// the entry is gone.
     show: ?*const fn (*anyopaque, *Context, PaneRef, Buffers.Id) bool = null,
+    /// Close tab `id` of `pane` — its × or a middle click — where the pane
+    /// keeps tabs of its own (an editor split): the entry leaves that pane,
+    /// and closes only when no other pane still holds it. True when the
+    /// door handled it, whatever the outcome; false leaves the ordinary
+    /// close of the entry.
+    close_tab: ?*const fn (*anyopaque, *Context, PaneRef, Buffers.Id) bool = null,
+    /// The focused pane's tab beside `id` (`TabStep`), where the pane keeps
+    /// tabs of its own: what cycling steps to, and what it shows when `id`
+    /// closes. Null where it keeps none, or has no other — the entries'
+    /// own order then.
+    tab_beside: ?*const fn (*anyopaque, *Context, Buffers.Id, TabStep) ?Buffers.Id = null,
 };
+
+/// Which tab beside another: the next or the previous, wrapping round; or
+/// what takes a closing tab's place — the next, else the previous.
+pub const TabStep = enum { next, prev, successor };
+
+/// The focused pane's tab beside `id`, through the door (`Panes.tab_beside`).
+pub fn tabBeside(ctx: *Context, id: Buffers.Id, step: TabStep) ?Buffers.Id {
+    const panes = ctx.panes orelse return null;
+    const beside = panes.tab_beside orelse return null;
+    return beside(panes.context, ctx, id, step);
+}
 
 // ── Keyspecs ────────────────────────────────────────────────────────
 
@@ -431,7 +453,7 @@ fn clickChrome(ctx: *Context, chrome: Chrome) anyerror!Value {
                 return ok;
             }
             const entry = chrome.entry orelse return ok;
-            if (chrome.part == .close) return closeEntry(ctx, entry);
+            if (chrome.part == .close) return closeTab(ctx, chrome, entry);
             // A header's entry tab shows it where the header is — a panel
             // keeps its own entry against a plain switch, as it should.
             if (chrome.shows_here) if (ctx.panes) |panes| if (panes.show) |show| if (ctx.head.pointer.hit.pane) |pane| {
@@ -458,7 +480,7 @@ fn runLine(ctx: *Context, line: []const u8) !void {
 /// Close `entry` through the ordinary `buffer.close-unmodified` (which refuses a dirty
 /// one), coming back to the entry that was active when it was another one —
 /// a borrow (`Buffers.withEntry`), so the round trip records no jump.
-fn closeEntry(ctx: *Context, entry: Buffers.Id) anyerror!Value {
+pub fn closeEntry(ctx: *Context, entry: Buffers.Id) anyerror!Value {
     if (ctx.buffers.get(entry) == null) return ok;
     return try ctx.buffers.withEntry(ctx.gpa, entry, ctx.head, ctx.keymap, closeActive, .{ctx});
 }
@@ -491,7 +513,16 @@ fn cPointerCloseTab(ctx: *Context, args: struct {}) anyerror!Value {
     // which could otherwise misname a real buffer.
     if (chrome.command().len > 0) return ok;
     _ = focusHitPane(ctx);
-    return closeEntry(ctx, chrome.entry orelse return ok);
+    return closeTab(ctx, chrome, chrome.entry orelse return ok);
+}
+
+/// Close the tab naming `entry`: through the pane's own tabs where it keeps
+/// them (`Panes.close_tab`), else the entry itself.
+fn closeTab(ctx: *Context, chrome: Chrome, entry: Buffers.Id) anyerror!Value {
+    if (chrome.shows_here) if (ctx.panes) |panes| if (panes.close_tab) |close| if (ctx.head.pointer.hit.pane) |pane| {
+        if (close(panes.context, ctx, pane, entry)) return ok;
+    };
+    return closeEntry(ctx, entry);
 }
 
 /// Motion with the button held: select from where the button went down to

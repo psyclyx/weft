@@ -110,7 +110,7 @@ fn appendAction(a: std.mem.Allocator, nodes: *std.ArrayList(Node), next_id: *u64
     // below with this node as the subject).
     try nodes.append(a, .{
         .id = id,
-        .role = "dashboard.item",
+        .role = "dashboard.row",
         .layout = .{ .column = 2 },
         .focusable = true,
         .content = .{ .action = .{ .action = activate_action, .label = try a.dupe(u8, label) } },

@@ -68,11 +68,27 @@ pub const cluster_gap = 2;
 /// The shortest an elided segment may become, `…` included: shorter says
 /// nothing, and the segment goes instead.
 pub const min_elided = 6;
+
+/// The unit a row is laid out in: its gaps and its shortest elision. The
+/// rules are the same in any unit — cells of the mono grid (`cell_units`),
+/// or pixels where a chrome style sets the status line in a proportional
+/// face.
+pub const Units = struct {
+    gap: usize = gap,
+    cluster_gap: usize = cluster_gap,
+    min_elided: usize = min_elided,
+};
+pub const cell_units: Units = .{};
 /// Segments past this many are not laid out (drawn nowhere).
 pub const max_items = 64;
 
 /// Lay `items` out in a row of `width` cells into `out` (one per item).
 pub fn layout(items: []const Item, width: usize, out: []Placed) void {
+    layoutIn(cell_units, items, width, out);
+}
+
+/// `layout` in `units`: widths, columns and `width` all in that unit.
+pub fn layoutIn(units: Units, items: []const Item, width: usize, out: []Placed) void {
     std.debug.assert(out.len >= items.len);
     const n = @min(items.len, max_items);
     for (out[0..items.len]) |*p| p.* = .{};
@@ -94,12 +110,12 @@ pub fn layout(items: []const Item, width: usize, out: []Placed) void {
 
     // Least important first, each as little as makes the row fit.
     for (yielding) |i| {
-        const total = used(items, out, n);
+        const total = used(units, items, out, n);
         if (total <= width) break;
         if (out[i].form == .dropped) continue;
         // The cells this segment may keep for the row to fit.
         const room = out[i].cols -| (total - width);
-        if (room > 0 and items[i].elide != .none and room >= min_elided) {
+        if (room > 0 and items[i].elide != .none and room >= units.min_elided) {
             out[i] = .{ .form = .elided, .cols = room };
             break;
         }
@@ -115,26 +131,26 @@ pub fn layout(items: []const Item, width: usize, out: []Placed) void {
     for (items[0..n], out[0..n]) |it, *p| {
         if (it.side != .left or p.form == .dropped) continue;
         p.col = col;
-        col += p.cols + gap;
+        col += p.cols + units.gap;
     }
     var right: usize = 0;
     var any = false;
     for (items[0..n], out[0..n]) |it, p| {
         if (it.side != .right or p.form == .dropped) continue;
-        right += p.cols + @as(usize, if (any) gap else 0);
+        right += p.cols + @as(usize, if (any) units.gap else 0);
         any = true;
     }
     col = width -| right;
     for (items[0..n], out[0..n]) |it, *p| {
         if (it.side != .right or p.form == .dropped) continue;
         p.col = col;
-        col += p.cols + gap;
+        col += p.cols + units.gap;
     }
 }
 
 /// Cells the placement in `out` needs: each cluster's segments and the gaps
 /// between them, and the gap between the clusters when both show.
-fn used(items: []const Item, out: []const Placed, n: usize) usize {
+fn used(units: Units, items: []const Item, out: []const Placed, n: usize) usize {
     var sides = [2]struct { cols: usize = 0, count: usize = 0 }{ .{}, .{} };
     for (items[0..n], out[0..n]) |it, p| {
         if (p.form == .dropped) continue;
@@ -144,9 +160,9 @@ fn used(items: []const Item, out: []const Placed, n: usize) usize {
     }
     var total: usize = 0;
     for (sides) |s| if (s.count > 0) {
-        total += s.cols + (s.count - 1) * gap;
+        total += s.cols + (s.count - 1) * units.gap;
     };
-    if (sides[0].count > 0 and sides[1].count > 0) total += cluster_gap;
+    if (sides[0].count > 0 and sides[1].count > 0) total += units.cluster_gap;
     return total;
 }
 

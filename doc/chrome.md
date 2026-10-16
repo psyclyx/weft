@@ -425,6 +425,17 @@ styles on one frame and checks every chrome role renders under each.
   flash's (`FlashTiming.note`: its start, its `editor/flash-ms`, its lapse;
   the build wrote all three and dirtied the view), so one frame input drawn
   twice draws the same lists.
+- **Lists are not buttons; buttons have room** (2026-10-15). An action node
+  whose role says `row` (a listing's `..`, the dashboard's items) is a list's
+  row: it acts as a button but draws none. Any row with focusable or
+  activatable text answers the pointer as a list's row does — the whole row
+  lights, a step under the focus wash, and a click anywhere on it reaches its
+  first such span (`primarySpan`) — so a listing and the dashboard behave
+  alike. Under `widget` a button's face reaches past its label's line
+  (`chrome.bleed`), and so does what a click reaches; rows holding chrome
+  are spaced by that reach so stacked faces never meet. Menubar titles are
+  not buttons either: they abut, and the lit one is a square wash the bar's
+  full height, the menu hung flush beneath it.
 
 What this leaves for the later lanes, and two things found on the way:
 
@@ -449,6 +460,52 @@ What this leaves for the later lanes, and two things found on the way:
   first. (It was first done inside `bind` for the whole transient tier,
   which silently dropped one of a plugin's two transient slot providers
   and orphaned it; `bind` accumulates at every tier.)
+
+### 3.4 The chrome's text (2026-10-15)
+
+Chrome is set in its own text, as a desktop's is: under `widget`, the
+platform's sans face at `theme/ui-scale` of the editor's size (`0.85`
+unless a config binds another), on a line of its own (1.3 em, the glyphs
+centred). Under the text styles it is the editor's mono cells, exactly, so
+those styles stay on the grid. `gfx/view/ui_font.zig` holds the metrics
+(`View.ui()`) and the one measure every chrome layout goes through
+(`View.uiWidth`, cached per label and size); `View.uiRun` sets a label.
+
+Everything chrome is laid out by that measure: a button's and a menubar
+title's width (`chrome.buttonWidth`, `titleWidth`), a menu's columns, a
+tab, a tooltip, and the status line — `status_layout`'s rules unchanged,
+run in pixels (`layoutIn`) with cuts measured to fit (`statusline.cutPx`).
+In a scene row, chrome takes the width it measures and what follows it
+follows where it ends (`semantic.placeSpans`); text stays on the grid. A row
+of chrome alone is a line of the chrome's text tall.
+
+The bars shrink with it: a status line and a tab strip are a chrome line and
+some room (`View.statusH`, `tabStripH`), and a dock sized
+`extent: {chromeRows: n}` (config/menubar.js, config/toolbar.js) counts the
+chrome's lines and is carved with a bar's margins (`View.barMargin`), not a
+pane's — so a menubar is as tall as its titles. Menus, tooltips and the
+status line follow; completion popups and the picker keep the editor's
+text, since what they list is mostly code.
+
+### 3.5 Each split keeps its own tabs (2026-10-15)
+
+A tab strip is a split's, not the window's: every editor pane holds the
+documents it has shown (`window_layout.Pane.held`), as an IDE's editor group
+does, and draws them (`frame_builder.paneTabs`) — on every split once the
+window is split, on a lone pane once it holds more than one. The set is kept
+in one place, once per wake (`window_cmds.holdShown`): whatever a pane shows
+— by an open, a switch, a click — it holds, and an entry that closed, or that
+a viewport took as its own, it lets go. A new split holds only what it was
+split from; `window.move-*` swaps sets with contents.
+
+A tab click shows its entry in its own split. Its × (or a middle click) goes
+through the `Panes.close_tab` door: an entry another split still holds only
+leaves this one; otherwise it closes by the ordinary close, which refuses
+unsaved edits and so leaves the tab. The split then shows its neighbouring
+tab, or — its last gone, and another split to edit in — goes. Cycling
+(`buffer.next`/`prev`) and the successor of a closed entry follow the
+focused split's tabs through `Panes.tab_beside`, falling back to every
+document where a pane keeps no tabs.
 
 ## 4. The status bar
 

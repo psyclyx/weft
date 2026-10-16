@@ -419,10 +419,13 @@ test "e2e/panels: closing and cycling documents never hands a pane a viewport's 
     var chrome: [8]?u32 = undefined;
     chromeEntries(ed, &chrome);
 
-    // Cycling steps through documents only — the scratch, a, b — never the
-    // toolbar or the file tree, and comes back round.
+    // Cycling steps through the split's tabs — documents only, never the
+    // toolbar or the file tree — and comes back round.
+    var tabs_buf: [16]u32 = undefined;
+    const tabs = ed.tabEntries(&tabs_buf).len;
+    try t.expect(tabs >= 2);
     const start = ed.buffers.active_id;
-    for (0..3) |_| {
+    for (0..tabs) |_| {
         ed.run("buffer.next");
         ed.applyWindow();
         try t.expect(ed.session.system.viewports.isDocument(ed.buffers.active()));

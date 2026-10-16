@@ -93,6 +93,29 @@ pub const Pane = struct {
     /// through every relocation and goes when the pane goes: whether a named
     /// viewport is on screen is whether some pane says so.
     viewport: ?u32 = null,
+    /// The documents this pane holds — its tabs, oldest first: every one it
+    /// has shown and not let go (a split's own set, as an IDE's editor group
+    /// has). Owned by the layout's allocator; it moves with the pane through
+    /// every relocation and is freed when the pane goes. Kept by
+    /// `app/window_cmds.holdShown`, never by a renderer.
+    held: std.ArrayList(core.Buffers.Id) = .empty,
+
+    /// Whether the pane holds `id`.
+    pub fn holds(self: *const Pane, id: core.Buffers.Id) bool {
+        return std.mem.indexOfScalar(core.Buffers.Id, self.held.items, id) != null;
+    }
+
+    /// Hold `id`, after what it already holds.
+    pub fn hold(self: *Pane, gpa: std.mem.Allocator, id: core.Buffers.Id) !void {
+        if (!self.holds(id)) try self.held.append(gpa, id);
+    }
+
+    /// Let `id` go; where it was in the list, or null when it was not held.
+    pub fn release(self: *Pane, id: core.Buffers.Id) ?usize {
+        const at = std.mem.indexOfScalar(core.Buffers.Id, self.held.items, id) orelse return null;
+        _ = self.held.orderedRemove(at);
+        return at;
+    }
 };
 
 /// A slot-table index for a live pane — the numerator half of the
@@ -107,6 +130,9 @@ pub const Slot = struct {
     rect: Rect,
     focused: bool,
     border: region.Edges,
+    /// A bar of chrome: the panel of a dock sized in `chrome_rows`, carved
+    /// with the bar's margins (`Rows.bar_inset`).
+    bar: bool = false,
 };
 
 /// Bounds the fixed collect/scan buffers. Far more panes than any human
@@ -162,6 +188,13 @@ pub const Node = union(enum) {
 /// for layouts no view has measured yet.
 pub const Rows = struct {
     line_h: f32 = 16,
+    /// A row of the chrome's text (`View.ui`): what a `chrome_rows` dock
+    /// counts in.
+    chrome_line_h: f32 = 16,
+    /// A pane's own status line (`View.statusH`).
+    status_h: f32 = 16,
+    /// A bar's margins above and below its row, together (`View.barMargin`).
+    bar_inset: f32 = 16,
     /// Margins around a pane's body, both sides together.
     inset: f32 = 16,
     /// Whether panes carry status lines of their own at all — off where a
@@ -180,9 +213,14 @@ pub const Rows = struct {
     /// body rows is only its status line (a bar presenting a status), with
     /// no body to put margins round.
     pub fn px(self: Rows, n: u16, attrs: core.viewport.Attrs) f32 {
-        if (n == 0) return if (attrs.status_line) self.line_h else 0;
-        const status: f32 = if (self.statusLine(attrs)) self.line_h else 0;
-        return @as(f32, @floatFromInt(n)) * self.line_h + self.inset + status;
+        return self.pxOf(n, self.line_h, self.inset, attrs);
+    }
+
+    /// `px` for rows `line_h` tall inside margins `inset`.
+    fn pxOf(self: Rows, n: u16, line_h: f32, inset: f32, attrs: core.viewport.Attrs) f32 {
+        if (n == 0) return if (attrs.status_line) self.status_h else 0;
+        const status: f32 = if (self.statusLine(attrs)) self.status_h else 0;
+        return @as(f32, @floatFromInt(n)) * line_h + inset + status;
     }
 };
 
@@ -196,10 +234,12 @@ fn dockHalves(d: Node.Dock, rect: Rect, rows: Rows) struct { panel: Rect, rest: 
     const panel_first = d.edge == .left or d.edge == .top;
     const share: f32 = switch (d.extent) {
         .fraction => |f| f,
-        .rows => |n| blk: {
+        inline .rows, .chrome_rows => |n, unit| blk: {
             const along = if (axis == .horizontal) rect.h else rect.w;
             if (along <= 0) break :blk 0;
-            break :blk @min(1, rows.px(n, d.panel.leaf.attrs) / along);
+            const line_h = if (unit == .rows) rows.line_h else rows.chrome_line_h;
+            const inset = if (unit == .rows) rows.inset else rows.bar_inset;
+            break :blk @min(1, rows.pxOf(n, line_h, inset, d.panel.leaf.attrs) / along);
         },
     };
     const halves = rect.split(axis, if (panel_first) share else 1 - share);
@@ -459,8 +499,13 @@ pub const Layout = struct {
         errdefer self.gpa.destroy(second);
         const first_id = try self.allocSlot(first);
         const second_id = try self.allocSlot(second);
-        first.* = .{ .leaf = .{ .id = first_id, .buffer_id = old.buffer_id, .top_row = old.top_row, .attrs = old.attrs } }; // keeps the focus + scroll
-        second.* = .{ .leaf = .{ .id = second_id, .buffer_id = old.buffer_id, .top_row = old.top_row, .attrs = old.attrs } };
+        // The new half holds the one document it was split from; the
+        // original keeps every tab it had.
+        var second_held: std.ArrayList(core.Buffers.Id) = .empty;
+        errdefer second_held.deinit(self.gpa);
+        try second_held.append(self.gpa, old.buffer_id);
+        first.* = .{ .leaf = .{ .id = first_id, .buffer_id = old.buffer_id, .top_row = old.top_row, .attrs = old.attrs, .held = old.held } }; // keeps the focus + scroll
+        second.* = .{ .leaf = .{ .id = second_id, .buffer_id = old.buffer_id, .top_row = old.top_row, .attrs = old.attrs, .held = second_held } };
         self.freeSlot(old.id); // retire the pre-split identity — only now that the new slots are committed
         // Mutate the focused leaf into a split in place — no parent relink,
         // so pointers elsewhere in the tree stay valid.
@@ -497,6 +542,7 @@ pub const Layout = struct {
         const relocated_id: ?PaneId = if (sib_val == .leaf) try self.allocSlot(parent.node) else null;
         self.freeSlot(focused.leaf.id);
         if (sib_val == .leaf) self.freeSlot(sib_val.leaf.id);
+        focused.leaf.held.deinit(self.gpa);
         self.gpa.destroy(focused);
         // The parent BECOMES the sibling's content: copy the sibling value
         // up (its children pointers survive), then free the empty shell.
@@ -533,7 +579,7 @@ pub const Layout = struct {
     }
 
     /// Swap `focused`'s contents with the neighbor in `dir` (vim `C-w H/J/K/L`-
-    /// ish). Semantics: swap the two leaves' {buffer_id, top_row} ONLY — a
+    /// ish). Semantics: swap the two leaves' {buffer_id, top_row, held} ONLY — a
     /// directional swap of adjacent panes' CONTENT, not a full
     /// rotation-to-edge, and NOT an identity swap (`id` stays put on each
     /// address; a handle any head holds into either pane still resolves to
@@ -549,10 +595,13 @@ pub const Layout = struct {
         if (!focused.leaf.attrs.isPrimary() or !nb.leaf.attrs.isPrimary()) return false;
         const fb = focused.leaf.buffer_id;
         const ft = focused.leaf.top_row;
+        const fh = focused.leaf.held;
         focused.leaf.buffer_id = nb.leaf.buffer_id;
         focused.leaf.top_row = nb.leaf.top_row;
+        focused.leaf.held = nb.leaf.held;
         nb.leaf.buffer_id = fb;
         nb.leaf.top_row = ft;
+        nb.leaf.held = fh;
         return true;
     }
 
@@ -633,6 +682,7 @@ fn freeNode(gpa: std.mem.Allocator, node: *Node) void {
         freeNode(gpa, pair[0]);
         freeNode(gpa, pair[1]);
     }
+    if (node.* == .leaf) node.leaf.held.deinit(gpa);
     gpa.destroy(node);
 }
 
@@ -796,6 +846,10 @@ fn edgesOf(rect: Rect, frame: Rect) region.Edges {
 }
 
 fn collectRec(node: *Node, rect: Rect, frame: Rect, focused: *Node, out: []Slot, n: *usize, rows: Rows) void {
+    collectIn(node, rect, frame, focused, out, n, rows, false);
+}
+
+fn collectIn(node: *Node, rect: Rect, frame: Rect, focused: *Node, out: []Slot, n: *usize, rows: Rows, bar: bool) void {
     const pair = childRects(node, rect, rows) orelse {
         if (n.* < out.len) {
             out[n.*] = .{
@@ -803,13 +857,16 @@ fn collectRec(node: *Node, rect: Rect, frame: Rect, focused: *Node, out: []Slot,
                 .rect = rect,
                 .focused = node == focused,
                 .border = edgesOf(rect, frame),
+                .bar = bar,
             };
             n.* += 1;
         }
         return;
     };
-    collectRec(pair[0].node, pair[0].rect, frame, focused, out, n, rows);
-    collectRec(pair[1].node, pair[1].rect, frame, focused, out, n, rows);
+    // A dock's panel sized in rows of chrome is a bar.
+    const panel_bar = node.* == .dock and node.dock.extent == .chrome_rows;
+    collectIn(pair[0].node, pair[0].rect, frame, focused, out, n, rows, false);
+    collectIn(pair[1].node, pair[1].rect, frame, focused, out, n, rows, panel_bar);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -999,7 +1056,7 @@ test "dock: a bar of no body rows is exactly its status line, across the whole f
     const side = try l.dock(.left, .{ .fraction = 0.25 }, 5, companion);
     const bar_attrs: core.viewport.Attrs = .{ .cycles = false, .persistent = true, .focus_source = false, .takes_focus = false };
     const bar = try l.dock(.bottom, .{ .rows = 0 }, 7, bar_attrs);
-    l.rows = .{ .line_h = 20, .inset = 16 };
+    l.rows = .{ .line_h = 20, .inset = 16, .status_h = 20 };
     const frame: Rect = .{ .x = 0, .y = 0, .w = 400, .h = 300 };
     try t.expectEqual(Rect{ .x = 0, .y = 280, .w = 400, .h = 20 }, l.focusedRect(bar, frame));
     try t.expectEqual(@as(f32, 280), l.focusedRect(side, frame).h);
@@ -1010,7 +1067,7 @@ test "dock: a row-sized panel reserves no status row where panes draw none" {
     var l = try Layout.init(t.allocator, 1);
     defer l.deinit();
     const panel = try l.dock(.bottom, .{ .rows = 12 }, 5, companion);
-    l.rows = .{ .line_h = 20, .inset = 16 };
+    l.rows = .{ .line_h = 20, .inset = 16, .status_h = 20 };
     const frame: Rect = .{ .x = 0, .y = 0, .w = 400, .h = 600 };
     try t.expectApproxEqAbs(@as(f32, 12 * 20 + 16 + 20), l.focusedRect(panel, frame).h, 0.01);
     // `editor/pane-status off`: no pane draws a line, so none is carved.

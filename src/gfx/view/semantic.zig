@@ -60,6 +60,8 @@ pub const Span = struct {
     /// Its column is where nesting put it (the scene declared none), and it
     /// starts its row.
     natural: bool = false,
+    /// Its producer placed it (`layout.column`), rather than nesting.
+    declared: bool = false,
     /// A cell of a drawn GRAPH (role `edge`): lines from its centre to the
     /// sides it links, and — an action node — a node drawn there. Its text
     /// is not drawn; it is what the node's tooltip says.
@@ -75,12 +77,13 @@ pub const Span = struct {
         return visualWidth(self.text) + @as(usize, if (self.chrome == .button or self.chrome == .menu_title) 2 else 0);
     }
 
-    /// Cells under `v`'s chrome style.
-    fn cellsIn(self: Span, v: *const View) usize {
-        if (self.graph != null) return Graph.cells;
-        if (self.chrome == .button) return chrome_mod.buttonCols(v, self.content());
-        if (self.chrome == .menu_title) return chrome_mod.titleCols(self.content());
-        return visualWidth(self.text);
+    /// Its width under `v`'s chrome style: text on the cell grid, chrome
+    /// as its style measures it (`chrome.buttonWidth`, `titleWidth`).
+    fn widthIn(self: Span, v: *const View) f32 {
+        if (self.graph != null) return @as(f32, Graph.cells) * v.cell_w;
+        if (self.chrome == .button) return chrome_mod.buttonWidth(v, self.content());
+        if (self.chrome == .menu_title) return chrome_mod.titleWidth(v, self.content());
+        return @as(f32, @floatFromInt(visualWidth(self.text))) * v.cell_w;
     }
 
     fn content(self: Span) chrome_mod.Content {
@@ -241,16 +244,11 @@ const Builder = struct {
             },
             .container => unreachable,
         };
-        const natural_column: usize = if (preceding.len == 0)
-            depth * 2
-        else blk: {
-            const prior = preceding[preceding.len - 1];
-            break :blk @as(usize, prior.column) + prior.cells() + 2;
-        };
         const graph: ?Graph = if (std.mem.eql(u8, leafOf(node.role), "edge")) Graph.of(node) else null;
         const role: ?chrome_mod.Role = if (graph != null) null else switch (node.content) {
             // An action node is a button, unless its role says it is a
-            // menubar title or a ROW (a listing's `..` reads as a row).
+            // menubar title or a ROW (a listing's `..`, a dashboard's items:
+            // they act as buttons and read as a list's rows).
             .action => if (std.mem.eql(u8, leafOf(node.role), menu_mod.role_title))
                 .menu_title
             else if (std.mem.eql(u8, leafOf(node.role), "row"))
@@ -259,6 +257,14 @@ const Builder = struct {
                 .button,
             .label => if (std.mem.eql(u8, leafOf(node.role), "separator")) .separator else null,
             else => null,
+        };
+        const natural_column: usize = if (preceding.len == 0)
+            depth * 2
+        else blk: {
+            // Menubar titles abut — their padding is inside them, and the
+            // pointer crossing from one to the next never leaves the bar.
+            const prior = preceding[preceding.len - 1];
+            break :blk @as(usize, prior.column) + prior.cells() + gapAfter(prior.chrome, role);
         };
         return .{
             .chrome = role,
@@ -272,6 +278,7 @@ const Builder = struct {
             .text = text,
             .column = node.layout.column orelse @intCast(@min(natural_column, std.math.maxInt(u16))),
             .natural = node.layout.column == null and preceding.len == 0,
+            .declared = node.layout.column != null,
             .tone = toneFor(node),
             .focusable = node.focusable,
             .activatable = node.content == .action,
@@ -299,10 +306,18 @@ pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *s
         content.y += v.line_h;
         content.h -= v.line_h;
     }
-    content.x += v.cell_w;
-    content.w = @max(0, content.w - v.cell_w);
-    const visible = @max(1, @as(usize, @intFromFloat(@max(0, content.h) / v.line_h)));
-    top_row.* = @min(top_row.*, rows.len -| visible);
+    const titled = content.y != body.y;
+    // A BAR — one row of chrome alone, nothing in it to focus or reveal (a
+    // menubar, a toolbar) — starts at the pane's margin, as a desktop's does:
+    // no gutter for a revealed row's mark, and no indent from nesting.
+    const bar = rows.len == 1 and !titled and primarySpan(rows[0]) == null;
+    if (!bar) {
+        content.x += v.cell_w;
+        content.w = @max(0, content.w - v.cell_w);
+    }
+    // Never scrolled past where the last rows fill the pane.
+    top_row.* = @min(top_row.*, rows.len);
+    while (top_row.* > 0 and fitting(v, rows[top_row.* - 1 ..], titled, content.h) == rows.len - top_row.* + 1) top_row.* -= 1;
     const reveal = document.active and (v.semantic_last_view == null or !v.semantic_last_view.?.eql(document.view) or v.semantic_last_node != document.focused);
     if (document.active) {
         v.semantic_last_view = document.view;
@@ -311,13 +326,13 @@ pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *s
     if (reveal) for (rows, 0..) |row, index| {
         if (!row.focused) continue;
         if (index < top_row.*) top_row.* = index;
-        if (index >= top_row.* + visible) top_row.* = index + 1 - visible;
+        while (top_row.* < index and fitting(v, rows[top_row.* .. index + 1], titled, content.h) <= index - top_row.*) top_row.* += 1;
         break;
     };
     // One indentation scale over every row, not only the visible ones, so the
     // tree does not re-indent as it scrolls.
-    const scale = indentScale(rows, @intFromFloat(@max(0, content.w) / v.cell_w));
-    try drawRows(v, scratch, hit_arena, runs, rects, &hits, document.view, rows[top_row.*..], content, hud, true, scale);
+    const scale = if (bar) 0 else indentScale(rows, @intFromFloat(@max(0, content.w) / v.cell_w));
+    try drawRows(v, scratch, hit_arena, runs, rects, &hits, document.view, rows[top_row.*..], content, hud, true, scale, titled);
     return hits.toOwnedSlice(hit_arena);
 }
 
@@ -337,21 +352,13 @@ pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *st
     if (menu_mod.isMenu(overlay.document.root)) return drawMenu(v, scratch, hit_arena, runs, rects, overlay, hud, body, bounds, caret_at);
     const rows = try rowsFor(scratch, overlay.document);
     if (rows.len == 0) return .{ .hits = &.{} };
-    var widest: usize = 1;
-    for (rows) |row| {
-        var occupied: usize = 0;
-        for (row.spans, 0..) |span, index| {
-            const column = @max(occupied, @as(usize, span.column));
-            occupied = column + span.cellsIn(v) + @as(usize, @intFromBool(index + 1 < row.spans.len));
-        }
-        widest = @max(widest, occupied);
-    }
+    const widest = try widestRow(v, scratch, rows);
     const area = body;
-    const visible_rows = @min(rows.len, @max(1, @as(usize, @intFromFloat(@max(0, area.h) / v.line_h)) -| 1));
+    const visible_rows = @max(@min(rows.len, 1), fitting(v, rows, false, area.h - v.line_h));
     const pad_x = v.cell_w;
     const pad_y = v.line_h * 0.5;
-    const box_w = @min(area.w, @as(f32, @floatFromInt(widest + 2)) * v.cell_w);
-    const box_h = @min(area.h, @as(f32, @floatFromInt(visible_rows)) * v.line_h + 2 * pad_y);
+    const box_w = @min(area.w, widest + 2 * v.cell_w);
+    const box_h = @min(area.h, extent(v, rows[0..visible_rows], false) + 2 * pad_y);
     const x = std.math.clamp(area.x + (area.w - box_w) / 2, area.x, @max(area.x, area.x + area.w - box_w));
     const bottom = std.mem.eql(u8, overlay.presentation, "bottom") or
         std.mem.eql(u8, overlay.presentation, "which-key-like");
@@ -367,7 +374,7 @@ pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *st
     try chrome_mod.paintPanel(sink, .{ .x = x, .y = y, .w = box_w, .h = box_h }, v.theme.background, v.theme.accent, .popup);
     const inner: region.Rect = .{ .x = x + pad_x, .y = y + pad_y, .w = @max(0, box_w - 2 * pad_x), .h = @max(0, box_h - 2 * pad_y) };
     var hits: std.ArrayList(Hit) = .empty;
-    try drawRows(v, scratch, hit_arena, runs, rects, &hits, overlay.document.view, rows[0..visible_rows], inner, hud, true, 1);
+    try drawRows(v, scratch, hit_arena, runs, rects, &hits, overlay.document.view, rows[0..visible_rows], inner, hud, true, 1, false);
     return .{ .hits = try hits.toOwnedSlice(hit_arena), .box = .{ .x = x, .y = y, .w = box_w, .h = box_h } };
 }
 
@@ -392,29 +399,40 @@ fn drawMenu(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
 /// A scene's rows in `body`: each span in its column, a chrome node painted
 /// by its role in the cells it measures, and every focusable or activatable
 /// span's box filed as a hit.
-fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), hits: *std.ArrayList(Hit), view_ref: semantic.view.Ref, rows: []const Row, body: region.Rect, hud: view.Hud, clip_width: bool, scale: f32) !void {
-    const count = @min(rows.len, @as(usize, @intFromFloat(@max(0, body.h) / v.line_h)));
-    for (rows[0..count], 0..) |row, index| {
-        const y = body.y + @as(f32, @floatFromInt(index)) * v.line_h;
+fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), hits: *std.ArrayList(Hit), view_ref: semantic.view.Ref, rows: []const Row, body: region.Rect, hud: view.Hud, clip_width: bool, scale: f32, titled: bool) !void {
+    const count = fitting(v, rows, titled, body.h);
+    var tops: Tops = .{ .v = v, .prev = if (titled) 0 else null };
+    const cells: usize = @intFromFloat(@max(0, body.w) / v.cell_w);
+    for (rows[0..count]) |row| {
+        const y = body.y + tops.next(row);
+        const rh = rowHeight(v, row);
+        // A row the pointer is on lights as a list's row does — the whole
+        // row, a click anywhere on which reaches its `primary` span — so a
+        // listing and a dashboard answer the pointer alike.
+        const primary = primarySpan(row);
+        const hovered = primary != null and for (row.spans) |span| {
+            if (hud.pointer.onNode(view_ref, span.node)) break true;
+        } else false;
         if (row.selected) {
             // A selected row wears the selection's wash, as selected text does.
-            try rects.append(scratch, .{ .x = body.x, .y = y, .w = body.w, .h = v.line_h, .color = v.theme.selection });
+            try rects.append(scratch, .{ .x = body.x, .y = y, .w = body.w, .h = rh, .color = v.theme.selection });
         } else if (row.focused) {
             var color = v.theme.background;
             for (0..3) |i| color[i] = color[i] * 0.8 + v.theme.selection[i] * 0.2;
-            try rects.append(scratch, .{ .x = body.x, .y = y, .w = body.w, .h = v.line_h, .color = color });
+            try rects.append(scratch, .{ .x = body.x, .y = y, .w = body.w, .h = rh, .color = color });
+        } else if (hovered) {
+            // A step under the focused row's wash.
+            var color = v.theme.background;
+            for (0..3) |i| color[i] = color[i] * 0.9 + v.theme.selection[i] * 0.1;
+            try rects.append(scratch, .{ .x = body.x, .y = y, .w = body.w, .h = rh, .color = color });
         }
+        const row_hits = hits.items.len;
         // The revealed row wears its own mark — an accent bar at the gutter
         // edge — so it reads beside the selection's wash, never as it.
-        if (row.revealed) try rects.append(scratch, .{ .x = body.x - v.cell_w, .y = y, .w = @max(1, v.cell_w / 4), .h = v.line_h, .color = v.theme.accent });
-        const editing_metadata = editingMetadata(row);
-        const cells: usize = @intFromFloat(@max(0, body.w) / v.cell_w);
-        const shift = indentShift(row, scale);
-        var occupied: usize = 0;
-        for (row.spans) |span| {
-            const declared_column = declaredColumn(span, cells, editing_metadata) orelse continue;
-            const column = @max(occupied, declared_column -| shift);
-            const x = body.x + @as(f32, @floatFromInt(column)) * v.cell_w;
+        if (row.revealed) try rects.append(scratch, .{ .x = body.x - v.cell_w, .y = y, .w = @max(1, v.cell_w / 4), .h = rh, .color = v.theme.accent });
+        const xs = try placeSpans(v, scratch, row, cells, indentShift(row, scale), body.x);
+        for (row.spans, xs, 0..) |span, placed, span_index| {
+            const x = placed orelse continue;
             if (clip_width and x >= body.x + body.w) continue;
             const available_cells: usize = @intFromFloat(@max(0, body.x + body.w - x) / v.cell_w);
             if (span.selection) |sel| {
@@ -425,45 +443,42 @@ fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
             }
             if (span.graph) |g| {
                 const box: region.Rect = .{ .x = x, .y = y, .w = @as(f32, Graph.cells) * v.cell_w, .h = v.line_h };
-                const hovered = hud.pointer.onNode(view_ref, span.node);
-                try drawGraphCell(v, scratch, rects, g, box, colorFor(v, span.tone), .{ .hovered = hovered, .focused = span.focused });
-                occupied = column + Graph.cells + 1;
+                const span_hovered = hud.pointer.onNode(view_ref, span.node);
+                try drawGraphCell(v, scratch, rects, g, box, colorFor(v, span.tone), .{ .hovered = span_hovered, .focused = span.focused });
                 if (g.node == null) continue;
-                if (hovered) v.build_tip = .{ .label = span.text, .reason = span.reason, .command = span.name };
+                if (span_hovered) v.build_tip = .{ .label = span.text, .reason = span.reason, .command = span.name };
                 try hits.append(hit_arena, .{ .view = view_ref, .node = span.node, .rect = box });
                 continue;
             }
             if (span.chrome) |role| {
-                // A chrome node: its style draws it, in the cells (or, in a
-                // menu, the row) it is given, and that box is what a click
-                // reaches.
+                // A chrome node: its style draws it, in the room it measures
+                // (or, in a menu, the row) and the row's height, and that
+                // box is what a click reaches.
                 const sink: chrome_mod.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
-                const hovered = hud.pointer.onNode(view_ref, span.node);
+                const span_hovered = hud.pointer.onNode(view_ref, span.node);
                 const state: chrome_mod.State = .{
-                    .hover = hovered,
-                    .pressed = hovered and hud.pointer.pressed,
+                    .hover = span_hovered,
+                    .pressed = span_hovered and hud.pointer.pressed,
                     .disabled = span.reason.len != 0,
                     // A menubar title is lit while its menu is open.
                     .focused = row.focused or span.lit,
                 };
                 var content = span.content();
                 content.fg = colorFor(v, span.tone);
-                const box: region.Rect = .{ .x = x, .y = y, .w = @min(@as(f32, @floatFromInt(span.cellsIn(v))) * v.cell_w, @max(0, body.x + body.w - x)), .h = v.line_h };
+                const box: region.Rect = .{ .x = x, .y = y, .w = @min(span.widthIn(v), @max(0, body.x + body.w - x)), .h = rh };
                 switch (role) {
                     .separator => {
                         if (row.spans.len == 1)
-                            try chrome_mod.paintSeparator(sink, .{ .x = body.x, .y = y, .w = body.w, .h = v.line_h }, .horizontal)
+                            try chrome_mod.paintSeparator(sink, .{ .x = body.x, .y = y, .w = body.w, .h = rh }, .horizontal)
                         else
-                            try chrome_mod.paintSeparator(sink, .{ .x = x, .y = y + 3, .w = v.cell_w, .h = @max(0, v.line_h - 6) }, .vertical);
-                        occupied = column + visualWidth(span.text) + 1;
+                            try chrome_mod.paintSeparator(sink, .{ .x = x, .y = y + 3, .w = box.w, .h = @max(0, rh - 6) }, .vertical);
                         continue;
                     },
                     else => try chrome_mod.paint(sink, role, state, content, box),
                 }
-                if (hovered) v.build_tip = .{ .label = span.text, .reason = span.reason, .command = span.name };
-                occupied = column + span.cellsIn(v) + 1;
+                if (span_hovered) v.build_tip = .{ .label = span.text, .reason = span.reason, .command = span.name };
                 if (!span.focusable and !span.activatable) continue;
-                try hits.append(hit_arena, .{ .view = view_ref, .node = span.node, .rect = box });
+                try hits.append(hit_arena, .{ .view = view_ref, .node = span.node, .rect = chrome_mod.faceBox(v, role, box) });
                 continue;
             }
             const text = if (clip_width) try fitLabel(scratch, span, available_cells) else span.text;
@@ -472,13 +487,143 @@ fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.Array
                 const prefix = firstCells(text, sel.caret);
                 if (prefix.len < text.len) try popup.propLine(v, scratch, runs, firstCells(text[prefix.len..], 1), x + @as(f32, @floatFromInt(sel.caret)) * v.cell_w, y + v.ascent, v.theme.cursor_text);
             };
-            occupied = column + visualWidth(span.text) + 1;
             if (!span.focusable and !span.activatable) continue;
+            if (primary == span_index) {
+                // The whole row, beneath every other span's own region.
+                try hits.insert(hit_arena, row_hits, .{ .view = view_ref, .node = span.node, .rect = .{ .x = body.x, .y = y, .w = body.w, .h = rh } });
+                continue;
+            }
             const available = @max(0, body.x + body.w - x);
             const width = @min(available, @max(v.cell_w, @as(f32, @floatFromInt(visualWidth(span.text))) * v.cell_w));
             try hits.append(hit_arena, .{ .view = view_ref, .node = span.node, .rect = .{ .x = x, .y = y, .w = width, .h = v.line_h } });
         }
     }
+}
+
+/// Where each of `row`'s spans starts in a pane `cells` wide whose content
+/// begins at `origin`, or null for a span the width hides. Text sits on the
+/// cell grid in its column; chrome is as wide as it measures (`widthIn`), so
+/// what follows it on the row follows where it ENDS: a span nesting placed
+/// keeps its gap after its neighbour (`gapAfterPx`), one its producer placed
+/// keeps its column unless its neighbour reaches past it.
+fn placeSpans(v: *const View, scratch: Allocator, row: Row, cells: usize, shift: usize, origin: f32) ![]?f32 {
+    const xs = try scratch.alloc(?f32, row.spans.len);
+    const editing_metadata = editingMetadata(row);
+    var end: ?f32 = null;
+    var prior: ?chrome_mod.Role = null;
+    for (row.spans, xs) |span, *out| {
+        out.* = null;
+        const declared_column = declaredColumn(span, cells, editing_metadata) orelse continue;
+        const grid = origin + @as(f32, @floatFromInt(declared_column -| shift)) * v.cell_w;
+        const x = if (end) |e|
+            if (span.declared) @max(e + minGapPx(v, prior), grid) else e + gapAfterPx(v, prior, span.chrome)
+        else
+            grid;
+        out.* = x;
+        end = x + span.widthIn(v);
+        prior = span.chrome;
+    }
+    return xs;
+}
+
+/// The widest `rows` reach from their content's start, laid out by
+/// `placeSpans`.
+fn widestRow(v: *const View, scratch: Allocator, rows: []const Row) !f32 {
+    var widest: f32 = v.cell_w;
+    for (rows) |row| {
+        const xs = try placeSpans(v, scratch, row, std.math.maxInt(u16), 0, 0);
+        for (row.spans, xs) |span, x| if (x) |at| {
+            widest = @max(widest, at + span.widthIn(v));
+        };
+    }
+    return widest;
+}
+
+/// The room nesting leaves between a span and the next: two cells — none
+/// between menubar titles, which abut, and under `widget` a little between
+/// two pieces of chrome, as a desktop toolbar's buttons sit.
+fn gapAfterPx(v: *const View, prior: ?chrome_mod.Role, next: ?chrome_mod.Role) f32 {
+    if (prior == .menu_title and next == .menu_title) return 0;
+    if (v.chrome == .widget and prior != null and next != null) return @round(v.ui().em * 0.3);
+    return @as(f32, @floatFromInt(gapAfter(prior, next))) * v.cell_w;
+}
+
+/// The least room before a span its producer placed: a cell, none after a
+/// menubar title.
+fn minGapPx(v: *const View, prior: ?chrome_mod.Role) f32 {
+    return if (prior == .menu_title) 0 else v.cell_w;
+}
+
+/// A row's height: a line of the editor's text — or, a row of chrome alone
+/// (a menubar, a toolbar), a line of the chrome's own (`View.ui`).
+fn rowHeight(v: *const View, row: Row) f32 {
+    for (row.spans) |span| if (span.chrome == null) return v.line_h;
+    return v.ui().line_h;
+}
+
+/// The span a click on a row's empty space reaches, and whose row lights
+/// under the pointer: its first focusable or activatable text — a listing's
+/// name, a dashboard's item. A row of only chrome (a toolbar's buttons) or
+/// of a graph has none: each of its elements answers the pointer alone.
+fn primarySpan(row: Row) ?usize {
+    for (row.spans, 0..) |span, index| {
+        if (span.chrome != null or span.graph != null) continue;
+        if (span.focusable or span.activatable) return index;
+    }
+    return null;
+}
+
+/// The cells between a span and the next on its row when nesting places
+/// them: two, except between menubar titles, which abut.
+fn gapAfter(prior: ?chrome_mod.Role, next: ?chrome_mod.Role) usize {
+    return if (prior == .menu_title and next == .menu_title) 0 else 2;
+}
+
+/// The room a row takes beyond its text line, above and below: the reach of
+/// its chrome's faces past the line (`chrome.bleed`) and a pixel more, so
+/// faces on stacked rows never touch. A row of plain text takes none.
+fn rowMargin(v: *const View, row: Row) f32 {
+    var reach: f32 = 0;
+    for (row.spans) |span| if (span.chrome) |role| {
+        reach = @max(reach, chrome_mod.bleed(v, role));
+    };
+    return if (reach > 0) reach + 1 else 0;
+}
+
+/// Where each of a run of rows begins, from 0: a line apart, and further
+/// between rows that hold chrome (`rowMargin`). The run's own top and bottom
+/// take nothing — the pane's margin holds a face there — unless text (a
+/// title, `prev` 0) is above it.
+const Tops = struct {
+    v: *const View,
+    y: f32 = 0,
+    /// The margin of what is above the next row; null for nothing.
+    prev: ?f32 = null,
+
+    fn next(self: *Tops, row: Row) f32 {
+        const margin = rowMargin(self.v, row);
+        if (self.prev) |p| self.y += p + margin;
+        const top = self.y;
+        self.y += rowHeight(self.v, row);
+        self.prev = margin;
+        return top;
+    }
+};
+
+/// How many of `rows`, from the first, fit in a height of `h`.
+fn fitting(v: *const View, rows: []const Row, titled: bool, h: f32) usize {
+    var tops: Tops = .{ .v = v, .prev = if (titled) 0 else null };
+    for (rows, 0..) |row, index| {
+        if (tops.next(row) + rowHeight(v, row) > h + 0.01) return index;
+    }
+    return rows.len;
+}
+
+/// The height `rows` take, laid out by `Tops`.
+fn extent(v: *const View, rows: []const Row, titled: bool) f32 {
+    var tops: Tops = .{ .v = v, .prev = if (titled) 0 else null };
+    for (rows) |row| _ = tops.next(row);
+    return tops.y;
 }
 
 /// One graph cell in `box`: a line from the centre to each linked side (an

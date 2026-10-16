@@ -495,3 +495,126 @@ test "e2e/files: semantic rows scroll beyond one screen without a text document"
     try t.expectEqual(@as(usize, 0), presenter.top_row);
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "no text in this view") == null);
 }
+
+/// The entries pane `pane`'s tab strip listed in the last frame, in order,
+/// and where each one's close glyph is.
+fn paneTabs(ed: *Editor, pane: window_layout.PaneId, ids: []u32, closes: []region.Rect) usize {
+    const v = ed.ensureView() catch return 0;
+    var n: usize = 0;
+    for (v.pane_maps[0..v.pane_map_count]) |m| {
+        if (m.pane != pane) continue;
+        for (m.chrome) |c| {
+            if (c.kind != .tab or n >= ids.len) continue;
+            switch (c.part) {
+                .body => {
+                    ids[n] = c.entry orelse continue;
+                    n += 1;
+                },
+                .close => if (n > 0) {
+                    closes[n - 1] = c.rect;
+                },
+            }
+        }
+    }
+    return n;
+}
+
+fn expectTabs(ed: *Editor, pane: window_layout.PaneId, want: []const u32) !void {
+    gpa_free(ed, try ed.renderComposite());
+    var ids: [16]u32 = undefined;
+    var closes: [16]region.Rect = undefined;
+    const n = paneTabs(ed, pane, &ids, &closes);
+    errdefer std.debug.print("pane {d} tabs: {any}, want {any}\n", .{ pane, ids[0..n], want });
+    try t.expectEqualSlices(u32, want, ids[0..n]);
+}
+
+fn gpa_free(ed: *Editor, pixels: []u8) void {
+    ed.gpa.free(pixels);
+}
+
+/// Click the close glyph of `id`'s tab in pane `pane`.
+fn closeTabIn(ed: *Editor, pane: window_layout.PaneId, id: u32) !void {
+    gpa_free(ed, try ed.renderComposite());
+    var ids: [16]u32 = undefined;
+    var closes: [16]region.Rect = undefined;
+    const n = paneTabs(ed, pane, &ids, &closes);
+    const at = std.mem.indexOfScalar(u32, ids[0..n], id) orelse return error.NoSuchTab;
+    const r = closes[at];
+    ed.click(.{ r.x + r.w / 2, r.y + r.h / 2 });
+    ed.applyWindow();
+}
+
+test "app/window: each split keeps its own tabs — a new split holds what it was split from, a tab closed in one split stays open in the other, and a split's last tab takes the split with it" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+    defer gpa.free(config_dir);
+    var loader: ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    try bootConfig(&ed, config_dir, &loader);
+    ed.applyWindow(); // the first wake: the pane holds what it starts on
+    const first = ed.buffers.active_id;
+    ed.runStr("buffer.create", "*alpha*");
+    ed.applyWindow();
+    const alpha = ed.buffers.active_id;
+    ed.runStr("buffer.create", "*bravo*");
+    ed.applyWindow();
+    const bravo = ed.buffers.active_id;
+    const lone = window_layout.headFocus(ed.win_layout, ed.head).pane().id;
+
+    // One pane: the documents it has shown, oldest first.
+    try expectTabs(&ed, lone, &.{ first, alpha, bravo });
+
+    // Split: the new half holds only what it was split from; the original
+    // keeps every tab. Each draws its own strip.
+    ed.run("window.split-right");
+    ed.applyWindow();
+    // A split mints both halves fresh ids; focus stays on the original.
+    const left = window_layout.headFocus(ed.win_layout, ed.head).pane().id;
+    ed.run("window.focus-right");
+    ed.applyWindow();
+    const right = window_layout.headFocus(ed.win_layout, ed.head).pane().id;
+    try t.expect(right != left);
+    try expectTabs(&ed, left, &.{ first, alpha, bravo });
+    try expectTabs(&ed, right, &.{bravo});
+
+    // What opens in a split joins that split's tabs only.
+    ed.runStr("buffer.create", "*charlie*");
+    ed.applyWindow();
+    const charlie = ed.buffers.active_id;
+    try expectTabs(&ed, right, &.{ bravo, charlie });
+    try expectTabs(&ed, left, &.{ first, alpha, bravo });
+    proj.shot(&ed, "split-tabs");
+
+    // Cycling steps through the focused split's tabs, not every document.
+    ed.run("buffer.next");
+    ed.applyWindow();
+    try t.expectEqual(bravo, ed.buffers.active_id);
+    ed.run("buffer.next");
+    ed.applyWindow();
+    try t.expectEqual(charlie, ed.buffers.active_id);
+
+    // Closing bravo in the left split: the right still holds it, so it only
+    // leaves the left — the document stays open.
+    try closeTabIn(&ed, left, bravo);
+    try t.expect(ed.buffers.get(bravo) != null);
+    try expectTabs(&ed, left, &.{ first, alpha });
+    try expectTabs(&ed, right, &.{ bravo, charlie });
+
+    // Closing charlie in the right split: nowhere else, so it closes, and
+    // the split shows its neighbouring tab.
+    try closeTabIn(&ed, right, charlie);
+    try t.expect(ed.buffers.get(charlie) == null);
+    try expectTabs(&ed, right, &.{bravo});
+
+    // Its last tab: bravo closes, and the split goes with it.
+    try closeTabIn(&ed, right, bravo);
+    try t.expect(ed.buffers.get(bravo) == null);
+    try t.expectEqual(@as(usize, 1), ed.win_layout.primaryCount());
+    try expectTabs(&ed, window_layout.headFocus(ed.win_layout, ed.head).pane().id, &.{ first, alpha });
+}

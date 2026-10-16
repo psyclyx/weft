@@ -118,7 +118,9 @@ The existing verbs persist with their meanings — `weft.plugin(name, {grants})`
   designation or a key's value inside what is shown, without taking focus
   (doc/model.md §2.5; D2 revisited in doc/cwa-config-decisions.md). A
   "sidebar" is a fragment bundling these; so is a "toolbar"
-  (`config/toolbar.js`: a top dock one text row tall, `extent: {rows: 1}`,
+  (`config/toolbar.js`: a top dock one row of chrome tall,
+  `extent: {chromeRows: 1}` — rows of the chrome's text, which `widget`
+  sets smaller than the editor's; `{rows: n}` counts the editor's —
   that takes no focus and has no status line, presenting
   `weft://here/offers/primary` as a strip).
 - **Action contracts, not bare names.** A declared semantic action carries

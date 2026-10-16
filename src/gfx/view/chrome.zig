@@ -16,7 +16,7 @@
 //! with the D2 primitives: rounded rects, outlines, soft shadows and icons.
 //!
 //! Layout that other code measures (a button's cells in a scene row, a
-//! status segment's columns) is decided by `buttonCols` and friends, which
+//! status segment's columns) is decided by `buttonWidth` and friends, which
 //! every style answers; painting never moves anything a hit rect was taken
 //! from. Hover and press are frame INPUT (`Hud.pointer`, doc/model.md §2.7):
 //! a style reads them, it never asks for them.
@@ -125,11 +125,10 @@ pub const Sink = struct {
         try self.rect(.{ .x = box.x, .y = box.y, .w = box.w, .h = box.h, .color = color, .shape = .{ .rounded = shape } });
     }
 
-    /// A label at x on the row whose top is `row_y`, clipped to `clip`.
+    /// A label in the chrome's text (`View.uiRun`) at x on the text row
+    /// whose top is `row_y`, clipped to `clip`.
     fn label(self: Sink, text: []const u8, x: f32, row_y: f32, color: [4]f32, clip: ?region.Rect) !void {
-        if (text.len == 0) return;
-        try popup.propLine(self.v, self.scratch, self.runs, text, x, row_y + self.v.ascent, color);
-        self.runs.items[self.runs.items.len - 1].clip = clip;
+        try self.v.uiRun(self.scratch, self.runs, text, x, row_y, color, clip);
     }
 
     /// The icon `name` in a square of side `side` centred on (cx, cy);
@@ -182,7 +181,27 @@ fn textColor(v: *const View, state: State, content: Content) [4]f32 {
 
 /// The side of an icon drawn beside text of the view's size.
 pub fn iconSide(v: *const View) f32 {
-    return @round(@min(v.line_h - 2, v.em * 0.95));
+    const ui = v.ui();
+    return @round(@min(ui.line_h - 2, ui.em * 0.95));
+}
+
+/// The top of a chrome text row centred in `box`.
+pub fn textTop(v: *const View, box: region.Rect) f32 {
+    return box.y + @round((box.h - v.ui().line_h) / 2);
+}
+
+/// The room either side of a button's or a menubar title's label: a cell
+/// on the grid, a share of the UI font's size under `widget`.
+pub fn padX(v: *const View, role: Role) f32 {
+    if (v.chrome != .widget) return v.cell_w;
+    return @round(v.ui().em * @as(f32, if (role == .menu_title) 0.7 else 0.6));
+}
+
+/// What an icon before a label takes: two cells on the grid, the icon and a
+/// gap under `widget`.
+fn iconSlot(v: *const View) f32 {
+    if (v.chrome != .widget) return 2 * v.cell_w;
+    return iconSide(v) + @round(v.ui().em * 0.4);
 }
 
 fn cols(text: []const u8) usize {
@@ -201,12 +220,35 @@ pub fn hasIcon(v: *const View, content: Content) bool {
     return v.icon(name) != null;
 }
 
-/// A button's width in cells, in every style: a cell of padding either side
-/// of the label, and two more for an icon when the style draws one. The
-/// scene presenter lays buttons out on the cell grid with this, so a click
-/// lands on the button whatever the style paints.
-pub fn buttonCols(v: *const View, content: Content) usize {
-    return cols(content.label) + 2 + @as(usize, if (hasIcon(v, content)) 2 else 0);
+/// A button's width, in every style: its padding either side of the label
+/// (`padX`), and an icon's slot when the style draws one — on the text
+/// styles a cell of padding and two cells of icon, so a button stays on the
+/// grid. The scene presenter lays buttons out with this, so a click lands on
+/// the button whatever the style paints.
+pub fn buttonWidth(v: *const View, content: Content) f32 {
+    return v.uiWidth(content.label) + 2 * padX(v, .button) + if (hasIcon(v, content)) iconSlot(v) else 0;
+}
+
+/// How far a role's face reaches past its text line, above and below. Under
+/// `widget` a button's face is taller than the label it frames, and a
+/// menubar title lights the bar's full height, as a desktop menubar's does;
+/// the text styles stay on the cell grid. The presenter spaces rows by it,
+/// so faces never overlap, and files the face as what a click reaches.
+pub fn bleed(v: *const View, role: Role) f32 {
+    if (v.chrome != .widget) return 0;
+    return switch (role) {
+        // A pixel short of a bar's edge (`View.barMargin`).
+        .button => @max(0, v.barMargin() - 1),
+        .menu_title => v.barMargin(),
+        else => 0,
+    };
+}
+
+/// The face of a `role` element whose text line is `box`: the box grown by
+/// its `bleed`.
+pub fn faceBox(v: *const View, role: Role, box: region.Rect) region.Rect {
+    const b = bleed(v, role);
+    return .{ .x = box.x, .y = box.y - b, .w = box.w, .h = box.h + 2 * b };
 }
 
 // ── Painting ────────────────────────────────────────────────────────
@@ -240,21 +282,22 @@ fn paintButton(s: Sink, state: State, content: Content, box: region.Rect) !void 
         .widget => {
             // FLAT: a toolbar button is its icon and label until the pointer
             // is on it; hover and press show a rounded rectangle (a small
-            // radius, never a pill), inset from the cell box so neighbours
-            // never touch. A disabled button draws no surface at all — its
-            // dimmed text says it (it stays clickable, to say why).
+            // radius, never a pill) reaching past the label's line (`bleed`),
+            // inset from the cell box so neighbours never touch. A disabled
+            // button draws no surface at all — its dimmed text says it (it
+            // stays clickable, to say why).
             if (!state.disabled and (state.hover or state.pressed or state.focused)) {
-                const inset: f32 = 3;
-                const face: region.Rect = .{ .x = box.x + 1, .y = box.y + inset, .w = @max(0, box.w - 2), .h = @max(0, box.h - 2 * inset) };
-                try s.rounded(face, surfaceFill(v, state, 0.5), .{ .radius = 4 });
+                const f = faceBox(v, .button, box);
+                try s.rounded(.{ .x = f.x + 1, .y = f.y, .w = @max(0, f.w - 2), .h = f.h }, surfaceFill(v, state, 0.5), .{ .radius = 5 });
             }
         },
     }
-    var x = box.x + v.cell_w;
+    var x = box.x + padX(v, .button);
     if (hasIcon(v, content)) {
-        if (try s.icon(content.icon.?, x + v.cell_w * 0.5 + 1, box.y + v.line_h / 2, iconSide(v), fg)) x += 2 * v.cell_w;
+        const cx = if (style == .widget) x + iconSide(v) / 2 else x + v.cell_w * 0.5 + 1;
+        if (try s.icon(content.icon.?, cx, box.y + box.h / 2, iconSide(v), fg)) x += iconSlot(v);
     }
-    try s.label(content.label, x, box.y, fg, box);
+    try s.label(content.label, x, textTop(v, box), fg, box);
 }
 
 /// The wash behind a lit row (hover, the keyboard's place, a press): the whole
@@ -280,15 +323,16 @@ fn paintRow(s: Sink, state: State, content: Content, box: region.Rect) !void {
     try rowWash(s, hover, box);
     const fg = textColor(v, state, content);
     var label_clip = box;
+    const ty = textTop(v, box);
     if (content.key_hint.len != 0) {
-        const hint_w = colsW(v, cols(content.key_hint));
+        const hint_w = v.uiWidth(content.key_hint);
         const hx = box.x + box.w - hint_w - v.cell_w;
         if (hx > box.x) {
-            try s.label(content.key_hint, hx, box.y, v.theme.status, box);
+            try s.label(content.key_hint, hx, ty, v.theme.status, box);
             label_clip.w = @max(0, hx - v.cell_w - box.x);
         }
     }
-    try s.label(content.label, box.x, box.y, fg, label_clip);
+    try s.label(content.label, box.x, ty, fg, label_clip);
 }
 
 /// A lone menu item's columns (a panel's are `menu.layout`'s, shared by all
@@ -313,7 +357,7 @@ pub fn paintMenuRow(s: Sink, state: State, content: Content, box: region.Rect, c
     try rowWash(s, wash, box);
     const fg = textColor(v, state, content);
     // The text row sits in the middle of a taller `widget` row.
-    const ty = box.y + @round((box.h - v.line_h) / 2);
+    const ty = textTop(v, box);
     const cy = box.y + box.h / 2;
     if (columns.lead > 0) {
         const cx = box.x + columns.lead / 2;
@@ -323,10 +367,10 @@ pub fn paintMenuRow(s: Sink, state: State, content: Content, box: region.Rect, c
             if (v.chrome == .widget) {
                 const d = @round(iconSide(v) * 0.42);
                 try s.rounded(.{ .x = @round(cx - d / 2), .y = @round(cy - d / 2), .w = d, .h = d }, th.accent, .{ .radius = d / 2 });
-            } else try s.label("•", cx - v.cell_w / 2, ty, th.accent, box);
+            } else try s.label("•", cx - v.uiWidth("•") / 2, ty, th.accent, box);
         } else if (state.checked) {
             if (!try s.icon("check", cx, cy, iconSide(v), th.accent))
-                try s.label("✓", cx - v.cell_w / 2, ty, th.accent, box);
+                try s.label("✓", cx - v.uiWidth("✓") / 2, ty, th.accent, box);
         } else if (content.icon) |name| {
             _ = try s.icon(name, cx, cy, iconSide(v), fg);
         }
@@ -335,7 +379,7 @@ pub fn paintMenuRow(s: Sink, state: State, content: Content, box: region.Rect, c
     const right = box.x + box.w - columns.keys_right;
     var label_clip = box;
     if (content.key_hint.len != 0) {
-        const hx = right - colsW(v, cols(content.key_hint));
+        const hx = right - v.uiWidth(content.key_hint);
         if (hx > lx) {
             try s.label(content.key_hint, hx, ty, if (state.disabled) mix(th.background, th.status, 0.7) else th.status, box);
             label_clip.w = @max(0, hx - v.cell_w - box.x);
@@ -346,7 +390,7 @@ pub fn paintMenuRow(s: Sink, state: State, content: Content, box: region.Rect, c
     if (content.submenu and columns.chevron > 0) {
         const cx = box.x + box.w - columns.chevron / 2 - (if (v.chrome == .widget) @as(f32, 4) else 0);
         if (!try s.icon("chevron-right", cx, cy, iconSide(v) * 0.9, fg))
-            try s.label("›", cx - v.cell_w / 2, ty, fg, box);
+            try s.label("›", cx - v.uiWidth("›") / 2, ty, fg, box);
     }
 }
 
@@ -358,22 +402,22 @@ pub fn paintMenuMore(s: Sink, box: region.Rect, dir: enum { up, down }) !void {
     const cx = box.x + box.w / 2;
     const cy = box.y + box.h / 2;
     if (!try s.icon(if (dir == .up) "chevron-up" else "chevron-down", cx, cy, iconSide(v) * 0.9, fg))
-        try s.label(if (dir == .up) "▲" else "▼", cx - v.cell_w / 2, box.y + @round((box.h - v.line_h) / 2), fg, box);
+        try s.label(if (dir == .up) "▲" else "▼", cx - v.uiWidth("▲") / 2, textTop(v, box), fg, box);
 }
 
 /// A menubar title: a padded label, its mnemonic underlined, washed while its
-/// menu is open (`focused`) or the pointer is on it.
+/// menu is open (`focused`) or the pointer is on it. Not a button: titles
+/// abut, and the wash is square and fills the bar's height (`bleed`), so the
+/// open title meets the menu hung beneath it — a desktop menubar's look.
 fn paintTitle(s: Sink, state: State, content: Content, box: region.Rect) !void {
     const v = s.v;
     const th = &v.theme;
     const lit = state.focused or state.hover or state.pressed;
-    if (lit) switch (v.chrome) {
-        .text, .text_icons => try s.fill(box, mix(th.background, th.selection, if (state.focused) 0.85 else 0.45)),
-        .widget => try s.rounded(.{ .x = box.x, .y = box.y + 2, .w = box.w, .h = @max(0, box.h - 4) }, mix(th.background, th.selection, if (state.focused) 0.85 else 0.5), .{ .radius = 5 }),
-    };
-    const x = box.x + v.cell_w;
-    try s.label(content.label, x, box.y, textColor(v, state, content), box);
-    if (content.mnemonic) |at| try underline(s, content.label, at, x, box.y, textColor(v, state, content));
+    if (lit) try s.fill(faceBox(v, .menu_title, box), mix(th.background, th.selection, if (state.focused) 0.85 else 0.45));
+    const x = box.x + padX(v, .menu_title);
+    const ty = textTop(v, box);
+    try s.label(content.label, x, ty, textColor(v, state, content), box);
+    if (content.mnemonic) |at| try underline(s, content.label, at, x, ty, textColor(v, state, content));
 }
 
 /// Underline codepoint `at` of `label`, drawn from `x` on the text row whose
@@ -381,14 +425,20 @@ fn paintTitle(s: Sink, state: State, content: Content, box: region.Rect) !void {
 fn underline(s: Sink, label: []const u8, at: usize, x: f32, row_y: f32, color: [4]f32) !void {
     const v = s.v;
     if (at >= cols(label)) return;
-    const ux = x + colsW(v, at);
-    const uy = @round(row_y + v.ascent + @max(1, (v.line_h - v.ascent) * 0.35));
-    try s.fill(.{ .x = @round(ux + 1), .y = uy, .w = @max(1, @round(v.cell_w - 2)), .h = 1 }, color);
+    var it = (std.unicode.Utf8View.init(label) catch return).iterator();
+    var start: usize = 0;
+    for (0..at) |_| start += (it.nextCodepointSlice() orelse return).len;
+    const glyph = it.nextCodepointSlice() orelse return;
+    const ui = v.ui();
+    const ux = x + v.uiWidth(label[0..start]);
+    const uy = @round(row_y + ui.ascent + @max(1, (ui.line_h - ui.ascent) * 0.35));
+    try s.fill(.{ .x = @round(ux + 1), .y = uy, .w = @max(1, @round(v.uiWidth(glyph) - 2)), .h = 1 }, color);
 }
 
-/// A menubar title's width in cells: its label and a cell either side.
-pub fn titleCols(content: Content) usize {
-    return cols(content.label) + 2;
+/// A menubar title's width: its label and its padding either side (a cell
+/// on the grid).
+pub fn titleWidth(v: *const View, content: Content) f32 {
+    return v.uiWidth(content.label) + 2 * padX(v, .menu_title);
 }
 
 /// A status segment (text in its own colour) or a chip (a label on its own
@@ -405,7 +455,7 @@ fn paintSegment(s: Sink, role: Role, state: State, content: Content, box: region
 
 fn paintHeader(s: Sink, content: Content, box: region.Rect) !void {
     const v = s.v;
-    try s.label(content.label, box.x, box.y, content.fg orelse v.theme.status, box);
+    try s.label(content.label, box.x, textTop(v, box), content.fg orelse v.theme.status, box);
     if (v.chrome == .widget) try paintSeparator(s, .{ .x = box.x, .y = box.y + box.h - 1, .w = box.w, .h = 1 }, .horizontal);
 }
 
@@ -456,10 +506,10 @@ pub fn layoutTabs(v: *const View, scratch: Allocator, tabs: []const hud_mod.Tab,
         if (x >= right) break;
         const is_command = tab.command.len > 0;
         const has_icon = if (tabIconName(tab)) |name| v.icon(name) != null else false;
-        const label_w = colsW(v, cols(tab.name));
+        const label_w = v.uiWidth(tab.name);
         var w: f32 = undefined;
         var close_x: f32 = undefined;
-        const close_w: f32 = if (is_command) 0 else if (v.chrome == .widget) v.line_h else v.cell_w;
+        const close_w: f32 = if (is_command) 0 else if (v.chrome == .widget) v.ui().line_h else v.cell_w;
         switch (v.chrome) {
             .text, .text_icons => {
                 const icon_w: f32 = if (v.chrome == .text_icons and has_icon) 2 * v.cell_w else 0;
@@ -467,8 +517,9 @@ pub fn layoutTabs(v: *const View, scratch: Allocator, tabs: []const hud_mod.Tab,
                 w = close_x + close_w + v.cell_w - x;
             },
             .widget => {
+                const pad = padX(v, .tab);
                 const icon_w: f32 = if (has_icon) iconSide(v) + 6 else 0;
-                close_x = x + 10 + icon_w + label_w + 4;
+                close_x = x + pad + icon_w + label_w + 4;
                 w = close_x + close_w + 4 - x;
             },
         }
@@ -497,14 +548,15 @@ pub fn paintTab(s: Sink, state: State, content: Content, tab: region.Rect, close
             const fill = if (state.selected) mix(th.background, th.selection, 0.62) else surfaceFill(v, state, 0.18);
             try s.fill(tab, fill);
             var x = tab.x + v.cell_w;
+            const ty = textTop(v, tab);
             if (v.chrome == .text_icons) if (content.icon) |name| {
-                if (try s.icon(name, x + v.cell_w * 0.5 + 1, tab.y + v.line_h / 2, iconSide(v), fg)) x += 2 * v.cell_w;
+                if (try s.icon(name, x + v.cell_w * 0.5 + 1, ty + v.line_h / 2, iconSide(v), fg)) x += 2 * v.cell_w;
             };
-            try s.label(content.label, x, tab.y, fg, clip);
+            try s.label(content.label, x, ty, fg, clip);
             if (close_box) |cb| {
                 const close_fg = if (close_hover) th.diag_error else th.status;
-                if (!(v.chrome == .text_icons and try s.icon("close", cb.x + cb.w / 2, cb.y + v.line_h / 2, iconSide(v) * 0.85, close_fg)))
-                    try s.label(hud_mod.tab_close_glyph, cb.x, tab.y, close_fg, clip);
+                if (!(v.chrome == .text_icons and try s.icon("close", cb.x + cb.w / 2, ty + v.line_h / 2, iconSide(v) * 0.85, close_fg)))
+                    try s.label(hud_mod.tab_close_glyph, cb.x, ty, close_fg, clip);
             }
         },
         .widget => {
@@ -521,19 +573,21 @@ pub fn paintTab(s: Sink, state: State, content: Content, tab: region.Rect, close
                 try s.fill(.{ .x = body.x, .y = body.y + body.h / 2, .w = body.w, .h = body.h / 2 }, f);
             }
             if (state.selected) try s.fill(.{ .x = body.x, .y = body.y + body.h - 2, .w = body.w, .h = 2 }, th.accent);
-            var x = tab.x + 10;
+            var x = tab.x + padX(v, .tab);
+            // The text centred in the tab's body, below its top lip.
+            const ty = textTop(v, body);
+            const cy = ty + v.ui().line_h / 2;
             if (content.icon) |name| {
                 const side = iconSide(v);
-                if (try s.icon(name, x + side / 2, tab.y + 1 + v.line_h / 2, side, fg)) x += side + 6;
+                if (try s.icon(name, x + side / 2, cy, side, fg)) x += side + 6;
             }
-            try s.label(content.label, x, tab.y + 1, fg, clip);
+            try s.label(content.label, x, ty, fg, clip);
             if (close_box) |cb| if (state.selected or state.hover) {
                 const side = iconSide(v) * 0.8;
                 const cx = cb.x + cb.w / 2;
-                const cy = tab.y + 1 + v.line_h / 2;
                 if (close_hover) try s.rounded(.{ .x = cx - side * 0.75, .y = cy - side * 0.75, .w = side * 1.5, .h = side * 1.5 }, mix(th.background, th.selection, 0.9), .{ .radius = 4 });
                 if (!try s.icon("close", cx, cy, side, if (close_hover) th.foreground else th.status))
-                    try s.label(hud_mod.tab_close_glyph, cb.x + (cb.w - v.cell_w) / 2, tab.y + 1, th.status, clip);
+                    try s.label(hud_mod.tab_close_glyph, cb.x + (cb.w - v.uiWidth(hud_mod.tab_close_glyph)) / 2, ty, th.status, clip);
             };
         },
     }
@@ -582,13 +636,15 @@ pub const Tip = struct {
 pub fn paintTooltip(s: Sink, tip: Tip, at: [2]f32, bounds: region.Rect) !void {
     const v = s.v;
     const th = &v.theme;
-    var first_cols = cols(tip.label);
-    if (tip.key_hint.len != 0) first_cols += 2 + cols(tip.key_hint);
-    const widest = @max(first_cols, cols(tip.reason));
+    const ui = v.ui();
+    const space = 2 * v.uiWidth(" ");
+    var first_w = v.uiWidth(tip.label);
+    if (tip.key_hint.len != 0) first_w += space + v.uiWidth(tip.key_hint);
+    const widest = @max(first_w, v.uiWidth(tip.reason));
     const rows: f32 = if (tip.reason.len != 0) 2 else 1;
-    const pad = v.cell_w * 0.75;
-    const w = @min(bounds.w, colsW(v, widest) + 2 * pad);
-    const h = rows * v.line_h + 6;
+    const pad = if (v.chrome == .widget) @round(ui.em * 0.6) else v.cell_w * 0.75;
+    const w = @min(bounds.w, widest + 2 * pad);
+    const h = rows * ui.line_h + 6;
     const x = std.math.clamp(at[0] + 4, bounds.x, @max(bounds.x, bounds.x + bounds.w - w));
     const below = at[1] + v.line_h;
     const y = std.math.clamp(if (below + h <= bounds.y + bounds.h) below else at[1] - h - 4, bounds.y, @max(bounds.y, bounds.y + bounds.h - h));
@@ -596,8 +652,8 @@ pub fn paintTooltip(s: Sink, tip: Tip, at: [2]f32, bounds: region.Rect) !void {
     try paintPanel(s, box, mix(th.background, th.selection, 0.35), th.status, .tooltip);
     const tx = x + pad;
     try s.label(tip.label, tx, y + 3, th.foreground, box);
-    if (tip.key_hint.len != 0) try s.label(tip.key_hint, tx + colsW(v, cols(tip.label) + 2), y + 3, th.status, box);
-    if (tip.reason.len != 0) try s.label(tip.reason, tx, y + 3 + v.line_h, th.diag_warn, box);
+    if (tip.key_hint.len != 0) try s.label(tip.key_hint, tx + v.uiWidth(tip.label) + space, y + 3, th.status, box);
+    if (tip.reason.len != 0) try s.label(tip.reason, tx, y + 3 + ui.line_h, th.diag_warn, box);
 }
 
 /// The key that runs the hovered element's command here — the tooltip's key
@@ -660,7 +716,7 @@ test "chrome: every role renders under all three styles, switched live between f
         var boxes: [cases.len + 2]region.Rect = undefined;
         for (cases, 0..) |c, i| {
             const y = 8 + @as(f32, @floatFromInt(i)) * (v.line_h + 6);
-            boxes[i] = .{ .x = 8, .y = y, .w = if (c.role == .button) colsW(&v, buttonCols(&v, c.content)) else 220, .h = if (c.role == .separator) 3 else v.line_h };
+            boxes[i] = .{ .x = 8, .y = y, .w = if (c.role == .button) buttonWidth(&v, c.content) else 220, .h = if (c.role == .separator) 3 else v.line_h };
             try paint(s, c.role, c.state, c.content, boxes[i]);
             // A segment's or chip's text is the status line's to place.
             if (c.role == .status_segment or c.role == .chip) try s.label("12:4", boxes[i].x, y, v.theme.foreground, null);
@@ -694,7 +750,7 @@ test "chrome: every role renders under all three styles, switched live between f
     }
 }
 
-test "chrome: a button's cells are the same in every style that draws the same parts" {
+test "chrome: a button keeps the cell grid under the text styles, and is set in the UI font under widget" {
     const font_provider = @import("weft_font_provider");
     var v = try View.init(testing.allocator, font_provider.defaultMono(), 16);
     defer v.deinit();
@@ -702,16 +758,20 @@ test "chrome: a button's cells are the same in every style that draws the same p
     // The text style has no icons: the label and a cell either side, which
     // is what "[Save]" took, so a toolbar keeps its columns.
     v.chrome = .text;
-    try testing.expectEqual(@as(usize, 6), buttonCols(&v, save));
+    try testing.expectEqual(colsW(&v, 6), buttonWidth(&v, save));
     v.chrome = .text_icons;
-    try testing.expectEqual(@as(usize, 8), buttonCols(&v, save));
+    try testing.expectEqual(colsW(&v, 8), buttonWidth(&v, save));
+    // `widget` sets chrome smaller than the editor's text, and measures it.
     v.chrome = .widget;
-    try testing.expectEqual(@as(usize, 8), buttonCols(&v, save));
-    // No icon by that name: no icon cells.
-    try testing.expectEqual(@as(usize, 6), buttonCols(&v, .{ .label = "Save", .icon = "no-such-icon" }));
+    try testing.expect(v.ui().em < v.em);
+    const with_icon = buttonWidth(&v, save);
+    // No icon by that name: no icon's room.
+    const bare = buttonWidth(&v, .{ .label = "Save", .icon = "no-such-icon" });
+    try testing.expect(with_icon > bare);
+    try testing.expectApproxEqAbs(v.uiWidth("Save") + 2 * padX(&v, .button), bare, 0.01);
     // `theme/icons none` turns every icon off.
     v.icons_on = false;
-    try testing.expectEqual(@as(usize, 6), buttonCols(&v, save));
+    try testing.expectEqual(bare, buttonWidth(&v, save));
 }
 
 test "chrome: the style names are the theme slot's spelling, and cycle through all three" {

@@ -180,9 +180,10 @@ test "e2e/menubar: the menubar docks above the toolbar, takes no focus, and list
         if (m.pane == bar.pane().id) bar_rect = m.rect;
         if (m.pane == tools.pane().id) tool_rect = m.rect;
     }
-    // One text row along the very top, the full width; the toolbar beneath.
+    // One row of the chrome's text along the very top, the full width; the
+    // toolbar beneath.
     try t.expectEqual(@as(f32, 0), bar_rect.?.y);
-    try t.expectApproxEqAbs(view.line_h + 2 * h.view.View.pane_margin, bar_rect.?.h, 0.5);
+    try t.expectApproxEqAbs(view.ui().line_h + 2 * view.barMargin(), bar_rect.?.h, 0.5);
     try t.expectEqual(@as(f32, @floatFromInt(h.app_w)), bar_rect.?.w);
     try t.expectEqual(bar_rect.?.y + bar_rect.?.h, tool_rect.?.y);
     var buf: [256]u8 = undefined;
@@ -621,7 +622,7 @@ fn sidebarRow(ed: *Editor, sidebar: *window_layout.Node) !h.view.semantic.Hit {
 
 // ── The pointer ─────────────────────────────────────────────────────
 
-test "e2e/menubar: hovering another title switches menus, a submenu opens beside its row and flips at the edge, a click elsewhere closes" {
+test "e2e/menubar: hovering another title switches menus, a submenu opens beside its row on the side with room, a click elsewhere closes" {
     const gpa = t.allocator;
     var app: IdeApp = undefined;
     try app.init(gpa);
@@ -648,8 +649,9 @@ test "e2e/menubar: hovering another title switches menus, a submenu opens beside
     try t.expectApproxEqAbs(parent_row.y, sub_row.y, 1);
     shot(&app, "menubar-view-submenu");
 
-    // Run ▸ Agents: the Run menu sits far enough right that its submenu
-    // would overflow the window, so it opens on the left.
+    // Run ▸ Agents: the submenu opens on whichever side of its row has room
+    // — on the left only where the right would overflow the window (the
+    // menu widget's own test drives the flip at an edge).
     const run_title = title(try barView(ed), "Run").?;
     ed.pointerMove(centre(rectOf(ed, @intFromEnum(run_title.id)).?), .{});
     ed.applyWindow();
@@ -658,7 +660,10 @@ test "e2e/menubar: hovering another title switches menus, a submenu opens beside
     const agents = submenu(try menu(ed)) orelse return error.NoSubmenu;
     const first = agents.content.container.children[0];
     const flipped = rectOf(ed, @intFromEnum(first.id)).?;
-    try t.expect(flipped.x + flipped.w <= agents_row.x);
+    if (agents_row.x + agents_row.w + flipped.w <= @as(f32, @floatFromInt(h.app_w)))
+        try t.expect(flipped.x >= agents_row.x + agents_row.w)
+    else
+        try t.expect(flipped.x + flipped.w <= agents_row.x);
     try t.expect(flipped.x >= 0);
     shot(&app, "menubar-run-flipped");
 

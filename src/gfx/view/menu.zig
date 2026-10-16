@@ -192,7 +192,8 @@ pub const Metrics = struct {
             // A clean cell box: rows are text rows, a rule is a row, and the
             // box's edges fall on cell boundaries.
             .text, .text_icons => .{ .row_h = v.line_h, .sep_h = v.line_h, .pad_x = 0, .pad_y = 0, .overlap = 0, .min_w = 16 * v.cell_w },
-            .widget => .{ .row_h = @round(v.line_h * 1.4), .sep_h = 9, .pad_x = 5, .pad_y = 5, .overlap = 3, .min_w = @max(190, 16 * v.cell_w) },
+            // Rows of the chrome's own text (`View.ui`), with room round it.
+            .widget => .{ .row_h = @round(v.ui().line_h * 1.6), .sep_h = 9, .pad_x = 5, .pad_y = 5, .overlap = 3, .min_w = @max(180, 13 * v.ui().em) },
         };
     }
 };
@@ -255,24 +256,16 @@ pub const Anchor = union(enum) {
     point: [2]f32,
 };
 
-fn cols(text: []const u8) usize {
-    return std.unicode.utf8CountCodepoints(text) catch text.len;
-}
-
-fn cellsW(v: *const View, n: usize) f32 {
-    return @as(f32, @floatFromInt(n)) * v.cell_w;
-}
-
 fn columnsFor(v: *const View, items: []const Item) struct { columns: Columns, width: f32 } {
-    var label_w: usize = 0;
-    var keys_w: usize = 0;
+    var label_w: f32 = 0;
+    var keys_w: f32 = 0;
     var any_mark = false;
     var any_icon = false;
     var any_sub = false;
     for (items) |it| {
         if (it.separator) continue;
-        label_w = @max(label_w, cols(it.label));
-        keys_w = @max(keys_w, cols(it.keys));
+        label_w = @max(label_w, v.uiWidth(it.label));
+        keys_w = @max(keys_w, v.uiWidth(it.keys));
         any_mark = any_mark or it.checked or it.radio;
         any_icon = any_icon or (it.icon != null and v.icon(it.icon.?) != null);
         any_sub = any_sub or it.submenu;
@@ -285,11 +278,11 @@ fn columnsFor(v: *const View, items: []const Item) struct { columns: Columns, wi
     const lead: f32 = if (!has_lead) 0 else if (widget) chrome.iconSide(v) + 12 else 2 * v.cell_w;
     const pad: f32 = if (widget) 10 else v.cell_w;
     const chevron: f32 = if (!any_sub) 0 else if (widget) chrome.iconSide(v) + 6 else 2 * v.cell_w;
-    const gap: f32 = if (keys_w == 0) 0 else 3 * v.cell_w;
+    const gap: f32 = if (keys_w == 0) 0 else if (widget) 2 * v.ui().em else 3 * v.cell_w;
     const label_x = if (has_lead) lead else pad;
     return .{
         .columns = .{ .lead = lead, .label = label_x, .keys_right = pad + chevron, .chevron = chevron },
-        .width = label_x + cellsW(v, label_w) + gap + cellsW(v, keys_w) + chevron + pad,
+        .width = label_x + label_w + gap + keys_w + chevron + pad,
     };
 }
 
@@ -310,8 +303,8 @@ pub fn layout(v: *const View, arena: Allocator, panels: []const Panel, anchor: A
         // before any row is cut off.
         var m = roomy;
         if (panelHeight(panel, m) > bounds.h - 2 * v.line_h) {
-            m.row_h = v.line_h;
-            m.sep_h = @min(m.sep_h, @round(v.line_h * 0.5));
+            m.row_h = v.ui().line_h;
+            m.sep_h = @min(m.sep_h, @round(v.ui().line_h * 0.5));
         }
         var h = panelHeight(panel, m);
         const w = @min(bounds.w, snap(v, @max(m.min_w, measured.width + 2 * m.pad_x)));

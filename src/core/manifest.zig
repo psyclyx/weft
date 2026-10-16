@@ -657,6 +657,7 @@ pub const Manifest = struct {
                 .fraction => |f| .{ .fraction = std.math.clamp(f, 0.05, 0.95) },
                 // No body rows only for a viewport with a status line to be.
                 .rows => |n| .{ .rows = if (attrs.status_line) n else @max(n, 1) },
+                .chrome_rows => |n| .{ .chrome_rows = @max(n, 1) },
             },
             .hidden = hidden,
             .tabs = owned_tabs,
@@ -812,6 +813,10 @@ pub const Manifest = struct {
                 },
                 .rows => |n| {
                     h.update(&[_]u8{1});
+                    h.update(std.mem.asBytes(&n));
+                },
+                .chrome_rows => |n| {
+                    h.update(&[_]u8{2});
                     h.update(std.mem.asBytes(&n));
                 },
             }

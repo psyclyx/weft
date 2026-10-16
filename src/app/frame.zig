@@ -385,6 +385,7 @@ pub const Driver = struct {
             self.ctx.last_frame_rect.*,
             self.ctx.placement,
         )) changed = true;
+        window_cmds.holdShown(self.layout, self.ctx.buffers, self.ctx.viewports);
         if (changed) self.ctx.view_dirty.* = true;
         return changed;
     }

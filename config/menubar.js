@@ -28,7 +28,8 @@ weft.plugin("menu");
 
 weft.viewport("menubar", {
   edge: "top",
-  extent: { rows: 1 },
+  // One row of the chrome's text: a menubar is as tall as its titles.
+  extent: { chromeRows: 1 },
   cycles: false,
   takesFocus: false,
   persistent: true,
