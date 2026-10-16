@@ -160,7 +160,7 @@ pub const LiveSource = struct {
     /// this, rows for one generation are refused (`wl_pick_push` answers 0)
     /// and the picker says it was cut (`Pick.truncated`). The picker draws a
     /// window of them, so this bounds memory, not what a frame costs.
-    pub const max_rows = 50_000;
+    pub const max_rows = 200_000;
 };
 
 const Phase = enum { describing, active };

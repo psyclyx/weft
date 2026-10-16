@@ -7,8 +7,6 @@ const Allocator = std.mem.Allocator;
 const wasm = @import("../wasm.zig");
 const command = @import("../command.zig");
 const pick_mod = @import("../pick.zig");
-const fs_source = @import("../fs_source.zig");
-const designation = @import("../designation.zig");
 const contract = @import("../membrane/contract.zig");
 
 const buffers = @import("buffers.zig");
@@ -341,7 +339,7 @@ pub fn hPickEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     // `Head`, so they stay ungated; the actual head mutation happens here.
     if (!requireDispatch(p, caller, "wl_pick_end")) return;
     const gpa = p.gpa;
-    defer p.pick_category.clearRetainingCapacity(); // consumed at open — see `hOpenFilePick`
+    defer p.pick_category.clearRetainingCapacity(); // consumed at open: one pick's opt-in never leaks into the next
     const bp = gpa.create(WasmBoundPick) catch return;
     // Accept keys move in ONE bulk transfer at open — never a per-candidate
     // callback the pick would have to make at accept time.
@@ -387,45 +385,6 @@ pub fn hPickEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     // Open: the feed is live. (Opening closed any live pick before it, whose
     // source cleared this field on the way out.)
     p.live_pick = live;
-}
-
-pub fn hOpenFilePick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    // HEAD-GATED (task #19 item 4): same door as `wl_pick_end`, just with a
-    // built-in file-tree source instead of guest-supplied items.
-    if (!requireDispatch(p, caller, "wl_open_file_pick")) return;
-    const gpa = p.gpa;
-    const prompt = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer gpa.free(prompt);
-    // What it lists is the place this dispatch runs in, resolved the way a
-    // typed name is (`designation.resolveRelative`), so the candidates it
-    // hands back are relative to exactly what `open` will resolve them
-    // against. The guest names no directory.
-    const ctx = p.activeCtx();
-    const root = (designation.resolveRelative(ctx, gpa, ".") catch return) orelse {
-        ctx.head.echo.say(gpa, "open: this place has no local directory to list") catch {};
-        return;
-    };
-    defer gpa.free(root);
-    const bp = gpa.create(WasmBoundPick) catch return;
-    bp.* = .{ .plugin = p, .pick_id = @intCast(args[2]) };
-    const finder = fs_source.LocalFinder.create(gpa, p.activeCtx().buffers.pool, root) catch {
-        gpa.destroy(bp);
-        return;
-    };
-    // openWith closes the source on failure; only the BoundPick is ours.
-    // The category is CONSUMED at open, here as in `hPickEnd`: this door has
-    // no `begin` to reset it, so leaving it set would let one pick's opt-in
-    // leak into the next one that forgot to declare.
-    defer p.pick_category.clearRetainingCapacity();
-    p.activeCtx().head.pick.openWith(p.activeCtx(), prompt, &.{}, .{
-        .handler = wpPickAccept,
-        .cleanup = wpPickCleanup,
-        .data = bp,
-    }, .{ .source = finder.source(), .allow_free_text = true, .category = p.pick_category.items }) catch {
-        gpa.destroy(bp);
-    };
 }
 
 fn outcomeOf(data: ?*anyopaque) ?pick_mod.Outcome {

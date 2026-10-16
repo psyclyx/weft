@@ -1222,6 +1222,44 @@ test "e2e/grep: Find in Files searches as you type, and the chosen row opens the
     try t.expect(std.mem.indexOf(u8, disk, "const a = 1;") != null);
 }
 
+// Open File is the ordinary picker fed by the files plugin, which walks the
+// place this dispatch runs in (`wl_fs_walk`) — not a finder core runs on the
+// plugin's behalf. Its rows are relative to the place, dot-entries are not
+// listed, the picker narrows them, and the chosen row opens.
+test "e2e/files: Open File lists the place as it is walked, and the chosen row opens" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+    {
+        const r = try proj.oracle("mkdir -p src/deep .hidden && printf 'first\\n' > top.txt && printf 'needle\\n' > src/deep/found.zig && printf 'x' > .hidden/secret && printf 'x' > .env");
+        gpa.free(r);
+    }
+
+    ed.run("files.find");
+    try t.expect(ed.pick.active);
+    try t.expect(try waitPick(&ed, "src/deep/found.zig", ""));
+    {
+        const shown = try pickShown(&ed);
+        defer gpa.free(shown);
+        try t.expect(std.mem.indexOf(u8, shown, "top.txt") != null);
+        try t.expect(std.mem.indexOf(u8, shown, "secret") == null);
+        try t.expect(std.mem.indexOf(u8, shown, ".env") == null);
+    }
+
+    // The picker narrows what the walk listed.
+    ed.typeText("found");
+    try t.expect(try waitPick(&ed, "src/deep/found.zig", "top.txt"));
+    ed.run("pick.accept");
+    try t.expect(!ed.pick.active);
+    try t.expect(std.mem.endsWith(u8, ed.bufferName(), "found.zig"));
+}
+
 // A search with many matches once found NONE: the exec door refused to hand
 // back a window of an output bigger than the reader's buffer, and the empty
 // answer looked like "no matches". And once it was read, filling *grep* with

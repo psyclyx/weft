@@ -205,6 +205,11 @@ pub const SpawnHandlers = @import("process.zig").Handlers;
 pub const Process = @import("process.zig").Process;
 pub const spawn = @import("process.zig").spawn;
 pub const spawnWith = @import("process.zig").spawnWith;
+pub const WalkSpec = @import("walk.zig").Spec;
+pub const WalkHandlers = @import("walk.zig").Handlers;
+pub const Walk = @import("walk.zig").Walk;
+pub const walk = @import("walk.zig").walk;
+pub const walkWith = @import("walk.zig").walkWith;
 pub const execWith = @import("exec.zig").execWith;
 
 // ── ask: a question with a continuation, not a pick id to demux ───────
@@ -1791,14 +1796,6 @@ pub fn pickAddKeyed(text: []const u8, doc: []const u8, key: []const u8) void {
 /// Open the accumulated pick.
 pub fn pickEnd() void {
     e.wl_pick_end();
-}
-/// Open a fuzzy FILE picker over the place this dispatch runs in (native
-/// recursive finder); accept dispatches to `on_pick_accept` with the chosen
-/// path, relative to that place — hand it to `open` as typed. The plugin
-/// names no directory: core resolves the place, and refuses one with no
-/// local directory.
-pub fn openFilePick(prompt: []const u8, pick_id: u32) void {
-    e.wl_open_file_pick(p(prompt.ptr), @intCast(prompt.len), pick_id);
 }
 
 // ── Surface (retained overlay: build begin→row→span…→end, then close) ────

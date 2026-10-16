@@ -248,7 +248,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_pick_query", .handler = pick.hPickQuery },
     .{ .name = "wl_pick_push", .handler = pick.hPickPush },
     .{ .name = "wl_pick_done", .handler = pick.hPickDone },
-    .{ .name = "wl_open_file_pick", .handler = pick.hOpenFilePick },
     .{ .name = "wl_pick_outcome_kind", .handler = pick.hPickOutcomeKind },
     .{ .name = "wl_pick_outcome_text", .handler = pick.hPickOutcomeText },
     .{ .name = "wl_pick_outcome_query", .handler = pick.hPickOutcomeQuery },
@@ -419,6 +418,9 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_fs_write", .handler = fs.hFsWrite },
     .{ .name = "wl_fs_append", .handler = fs.hFsAppend },
     .{ .name = "wl_fs_list", .handler = fs.hFsList },
+    .{ .name = "wl_fs_walk", .handler = fs.hFsWalk },
+    .{ .name = "wl_fs_walk_read", .handler = fs.hFsWalkRead },
+    .{ .name = "wl_fs_walk_close", .handler = fs.hFsWalkClose },
     .{ .name = "wl_semantic_fs_publish_child_directory", .handler = semantic_fs.hPublishChildDirectory },
     .{ .name = "wl_semantic_fs_publish_child_file", .handler = semantic_fs.hPublishChildFile },
     .{ .name = "wl_semantic_fs_capabilities", .handler = semantic_fs.hCapabilities },
@@ -655,6 +657,7 @@ const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_fs_write", .perm = .fs_write }, // fs.zig hFsWrite: .fs_write
     .{ .name = "wl_fs_append", .perm = .fs_write }, // fs.zig hFsAppend: .fs_write
     .{ .name = "wl_fs_list", .perm = .fs_read }, // fs.zig hFsList: .fs_read
+    .{ .name = "wl_fs_walk", .perm = .fs_read }, // fs.zig hFsWalk: .fs_read
     .{ .name = "wl_semantic_fs_publish_child_directory", .perm = .fs_read }, // semantic_fs.zig hPublishChildDirectory: .fs_read
     .{ .name = "wl_semantic_fs_publish_child_file", .perm = .fs_read }, // semantic_fs.zig hPublishChildFile: .fs_read
     .{ .name = "wl_semantic_fs_capabilities", .perm = .fs_read }, // semantic_fs.zig hCapabilities: .fs_read
@@ -714,7 +717,6 @@ const head_gated_list = [_][]const u8{
     "wl_declare_posture", // keymap.zig hDeclarePosture
     "wl_declare_capture", // pty.zig hDeclareCapture
     "wl_pick_end", // pick.zig hPickEnd
-    "wl_open_file_pick", // pick.zig hOpenFilePick
     "wl_semantic_view_focus", // semantic.zig hSemanticViewFocus
     "wl_semantic_interaction_open", // semantic.zig hSemanticInteractionOpen
     "wl_semantic_interaction_close", // semantic.zig hSemanticInteractionClose

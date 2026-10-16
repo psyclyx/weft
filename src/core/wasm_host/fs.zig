@@ -122,6 +122,9 @@ const rooted_fs = @import("../rooted_fs.zig");
 const file = @import("../file.zig");
 const grants_mod = @import("../grants.zig");
 const machinery = @import("../machinery.zig");
+const fs_walk = @import("../fs_walk.zig");
+const task = @import("../task.zig");
+const Resources = @import("../plugin_resources.zig").Resources;
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -674,6 +677,127 @@ pub fn hFsList(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     results[0] = @intCast(caller.writeMemory(@intCast(args[4]), @intCast(args[5]), listing) catch 0);
 }
 
+/// `fs.walk(path, prune, include_hidden)` semantic body (perm fs_read): start
+/// walking the directory `path` off the frame thread; the handle its paths
+/// are read through (`walkRead`), or `null` for a mundane failure (no such
+/// directory, no pool). An EMPTY `path` is the place this dispatch runs in,
+/// resolved here, so a finder names no directory (doc/model.md); a place with
+/// no local directory is `null`. Confined like every door here: the start is gated,
+/// and inside a limit it must RESOLVE beneath the limit's root (the kernel
+/// layer — a symlink to elsewhere is not a way out). Below the start, the walk
+/// enters no symlink (it lists one as an entry) and asks the machinery
+/// carve-out of every directory before entering it, so it reaches nothing
+/// the read doors would refuse.
+pub fn fsWalk(r: *Resources, id: anytype, path_in: []const u8, prune: []const []const u8, include_hidden: bool) PermError!?u32 {
+    var place_buf: PathBuf = undefined;
+    const path = if (path_in.len > 0) path_in else shared.placeRootFor(id, &place_buf);
+    if (path.len == 0) return null;
+    var scratch: PathBuf = undefined;
+    const bounds = try gate(id, .fs_read, path, &scratch);
+    const pool = r.pool orelse return null;
+    var start_buf: PathBuf = undefined;
+    const start = switch (bounds) {
+        .unconfined => realPath(path, &start_buf) orelse return null,
+        .closed => return error.OutOfLimit,
+        .within => |w| blk: {
+            const rel = w.relative(path) orelse return error.OutOfLimit;
+            var joined: PathBuf = undefined;
+            const spelled = std.fmt.bufPrint(&joined, "{s}/{s}", .{ w.root, rel }) catch return null;
+            const real = realPath(spelled, &start_buf) orelse return null;
+            var root_buf: PathBuf = undefined;
+            const real_root = realPath(w.root, &root_buf) orelse return null;
+            if (!beneath(real, real_root)) return error.OutOfLimit;
+            break :blk real;
+        },
+    };
+    const walk = fs_walk.Walk.start(r.gpa, pool, start, .{
+        .skip_hidden = !include_hidden,
+        .prune = prune,
+        .refuse = machinery.denies,
+    }) catch return null;
+    return r.walks.open(r.gpa, walk) catch {
+        walk.deinit();
+        return null;
+    };
+}
+
+/// `path` with every symlink resolved, into `buf`; null when it does not exist.
+fn realPath(path: []const u8, buf: *PathBuf) ?[]const u8 {
+    var z: PathBuf = undefined;
+    if (path.len >= z.len) return null;
+    @memcpy(z[0..path.len], path);
+    z[path.len] = 0;
+    const r = std.c.realpath(z[0..path.len :0].ptr, buf) orelse return null;
+    return std.mem.span(r);
+}
+
+/// Is `candidate` `base` itself or beneath it (both absolute, resolved)?
+fn beneath(candidate: []const u8, base: []const u8) bool {
+    if (std.mem.eql(u8, base, "/")) return true;
+    if (!std.mem.startsWith(u8, candidate, base)) return false;
+    return candidate.len == base.len or candidate[base.len] == '/';
+}
+
+/// `wl_fs_walk(path, prune, flags) -> handle`: an empty `path` is the
+/// dispatching place; `prune` is NUL-separated directory names never entered;
+/// flag 1 includes dot-entries. -1: a mundane failure (no such directory, or a
+/// place with none).
+pub fn hFsWalk(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = -1;
+    const path = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(path);
+    const prune_bytes = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer p.gpa.free(prune_bytes);
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(p.gpa);
+    var it = std.mem.tokenizeScalar(u8, prune_bytes, 0);
+    while (it.next()) |name| names.append(p.gpa, name) catch return;
+    const handle = fsWalk(&p.resources, p, path, names.items, args[4] & 1 != 0) catch |e| {
+        switch (e) {
+            error.PermissionDenied => shared.trapPermDenied(p, caller, .fs_read),
+            error.OutOfLimit => shared.trapOutOfLimit(p, caller, .fs_read, path),
+            error.Machinery => shared.trapMachinery(p, caller, .fs_read, path),
+        }
+        return;
+    } orelse return;
+    results[0] = @intCast(handle);
+}
+
+/// `wl_fs_walk_read(handle, out, cap) -> n`: whole paths (each ended by a
+/// newline, relative to the walk's start) found since the last read; `cap`
+/// must hold one path (`max_path_bytes`). 0:
+/// nothing waiting yet; -1: the walk is over and everything was read; -2: over,
+/// and it was cut at `fs_walk.max_files`; -3: no such walk. Reading the end is
+/// hearing it.
+pub fn hFsWalkRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const w = p.resources.walks.at(args[0]) orelse {
+        results[0] = -3;
+        return;
+    };
+    const cap: usize = @intCast(@max(args[2], 0));
+    const buf = p.gpa.alloc(u8, cap) catch {
+        results[0] = 0;
+        return;
+    };
+    defer p.gpa.free(buf);
+    results[0] = switch (w.take(buf)) {
+        .bytes => |n| @intCast(caller.writeMemory(@intCast(args[1]), @intCast(cap), buf[0..n]) catch 0),
+        .waiting => 0,
+        .over => |o| if (o.cut) -2 else -1,
+    };
+}
+
+/// `wl_fs_walk_close(handle)`: stop the walk and let it go. Ungated: it only
+/// releases.
+pub fn hFsWalkClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    p.resources.walks.close(args[0]);
+}
+
 /// Find-or-create the named buffer and replace its whole content with `content`,
 /// authored as `author` (grade-gated) — the shared delivery used by proc output
 /// and the async `.peer` fs listing. Frame-thread only.
@@ -838,6 +962,66 @@ test "fsExists: a symlink planted INSIDE the root cannot report on a target outs
     const missing = try std.fmt.allocPrint(gpa, "{s}/nope.txt", .{root});
     defer gpa.free(missing);
     try t.expectEqual(file.Kind.none, try fsExists(gpa, &id, missing));
+}
+
+test "fsWalk: a walk starts only inside its limit, and a symlink out of it is not a way out" {
+    const gpa = t.allocator;
+    // <tmp>/root/sub/ok.txt — inside the granted root
+    // <tmp>/secret.txt      — outside it
+    // <tmp>/root/escape     — a symlink inside the root, to its parent
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/root", .{tmp.sub_path});
+    defer gpa.free(root);
+    const inside = try std.fmt.allocPrint(gpa, "{s}/sub/ok.txt", .{root});
+    defer gpa.free(inside);
+    const outside = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/secret.txt", .{tmp.sub_path});
+    defer gpa.free(outside);
+    const sub = try std.fmt.allocPrint(gpa, "{s}/sub", .{root});
+    defer gpa.free(sub);
+    try file.writeBytesMakingDirs(gpa, sub, inside, "in root");
+    try file.writeBytes(gpa, outside, "out of root");
+    const escape = try std.fmt.allocPrintSentinel(gpa, "{s}/escape", .{root}, 0);
+    defer gpa.free(escape);
+    if (!makeSymlink("..", escape.ptr)) return error.SkipZigTest;
+
+    var table = grants_mod.HandleTable.init(gpa);
+    defer table.deinit();
+    var id: TestPrincipal = .{ .grant_table = &table };
+    id.grant_handles[shared.perm_fs_read] =
+        try table.grant(.{ .capability = "fs_read", .limit = .{ .fs_root = root } }, "confined", null);
+
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var r: Resources = .init(gpa, "walker", pool, .empty);
+    defer r.deinit();
+
+    // Starting outside the root, or at a symlink that resolves outside it, is
+    // refused — not walked.
+    const parent = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(parent);
+    try t.expectError(error.OutOfLimit, fsWalk(&r, &id, parent, &.{}, false));
+    try t.expectError(error.OutOfLimit, fsWalk(&r, &id, escape, &.{}, false));
+
+    // From the root, the symlink is listed but never entered: nothing of the
+    // parent (the secret, or the root again through it) comes back.
+    const handle = (try fsWalk(&r, &id, root, &.{}, false)).?;
+    const w = r.walks.at(@intCast(handle)).?;
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(gpa);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < deadline) {
+        switch (w.take(&buf)) {
+            .bytes => |n| try got.appendSlice(gpa, buf[0..n]),
+            .waiting => std.Thread.yield() catch {},
+            .over => break,
+        }
+    } else return error.Timeout;
+    try t.expect(std.mem.indexOf(u8, got.items, "sub/ok.txt\n") != null);
+    try t.expect(std.mem.indexOf(u8, got.items, "escape\n") != null);
+    try t.expect(std.mem.indexOf(u8, got.items, "secret") == null);
+    try t.expect(std.mem.indexOf(u8, got.items, "escape/") == null);
 }
 
 test "fsStat: confined exactly as fsExists is, and it actually carries the metadata" {

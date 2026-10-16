@@ -27,13 +27,16 @@ pub fn notifyActivate(p: *WasmPlugin, path: []const u8) void {
 /// the host calls its `on_poll` export ONLY when one of those streams has bytes
 /// pending. So idle plugins (and every plugin without a stream) cost nothing —
 /// this is readiness-driven, not a blind per-frame poll. A directory the
-/// plugin watches (`wl_semantic_fs_watch`) that changed is ready too.
+/// plugin watches (`wl_semantic_fs_watch`) that changed is ready too, and so
+/// is a directory walk (`wl_fs_walk`) with paths or an end to hand back.
 /// Returns whether it ran.
 pub fn notifyPollIfReady(p: *WasmPlugin) bool {
     // Asked every time, first: polling a watch is what drains it.
     const watched = semantic_fs_doors.pollWatches(p);
     const streamed = for (p.resources.streams.slice()) |maybe| {
         if (maybe) |s| if (s.ready()) break true;
+    } else for (p.resources.walks.slice()) |maybe| {
+        if (maybe) |w| if (w.ready()) break true;
     } else pty_doors.anyPtyReady(p) or pty_doors.anyExtentMoved(p);
     const raced = @import("capability.zig").raceReady(p);
     const ready = watched or streamed or raced;

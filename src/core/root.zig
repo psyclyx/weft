@@ -50,6 +50,8 @@ pub const pointer = @import("pointer.zig");
 pub const pick = @import("pick.zig");
 pub const surface = @import("surface.zig");
 pub const fs_source = @import("fs_source.zig");
+/// A directory walk a plugin starts and reads as it goes (`wl_fs_walk`).
+pub const fs_walk = @import("fs_walk.zig");
 pub const syntax = @import("syntax.zig");
 pub const markdown = @import("markdown.zig");
 // lsp (the client) removed — LSP is the `lsp` wasm plugin (src/plugins/lsp/root.zig),
@@ -173,6 +175,7 @@ test {
     _ = @import("weft_facts");
     _ = @import("container.zig");
     _ = @import("cache.zig");
+    _ = @import("fs_walk.zig");
     _ = @import("repl_session.zig");
     _ = @import("pty.zig");
     _ = @import("futex.zig");

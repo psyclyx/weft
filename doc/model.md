@@ -373,8 +373,9 @@ read-only with the reason (`Buffer.read_only` holds it).
 - Path subjects and `weft.placeRoot()` as a browsing root → designations.
   Done for names and pickers: a plugin hands a typed name to `file.open`
   (`weft.openTyped`; `openUnder`, the guest-side join, is deleted) and
-  `openFilePick` names no directory — core lists the dispatch's place and
-  resolves the accepted name against the same place.
+  the file finder names no directory — its walk (`wl_fs_walk` with no path)
+  lists the dispatch's place, and core resolves the accepted name against
+  the same place.
 - Raw entry ids in state that outlives entries → designations.
 - `semantic_focus` as a second selection model → extent sets.
 - Per-plugin selection loops, and the `put`/`surround.plan` style workarounds → declared mapping.

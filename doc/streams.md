@@ -141,19 +141,36 @@ previous query's process when the query moves on.
 - REPL and net sessions wake the loop when bytes land (`Pool.wakeLoop`),
   as process streams do, and the 8 ms stream poll is deleted.
 
+## 5. Reads outlive the reads after them, and directories are walked
+
+Landed:
+
+- An SDK read (`weft.path()`, `slice`, `argStr`, …) used to return a
+  slice of a scratch buffer that the next read overwrote. Now every
+  export is an entry (`plugin_sdk/entry.zig`), and a read's answer lives
+  until the host next calls the plugin.
+- `wl_fs_walk` walks a directory off the frame thread. Its paths are
+  read through `wl_fs_walk_read` as they are found, and `on_poll` is
+  raised as they land. It is `fs_read`-gated:
+  - inside a limit, the start must resolve beneath the limit's root;
+  - a symlink is listed, never entered;
+  - the machinery carve-out is asked of every directory;
+  - it stops at 200,000 files and says so.
+
+  An empty path means the place the dispatch runs in, so a finder names
+  no directory. The SDK pumps walks in `on_poll`, beside processes
+  (`weft.walk`).
+- Open File is the files plugin's search, fed by a walk; the picker
+  narrows it. `wl_open_file_pick`, `LocalFinder` and `LocalDir` are gone.
+  A live pick holds 200,000 rows, the same as a walk.
+
 ## Left
 
-- **Scratch borrowing.** An SDK read that returns a slice into the
-  shared read scratch (`weft.path()`, `slice`, `argStr`, …) is
-  overwritten by the next host call that reads. modes' runner carried
-  such a path into an argv. The fix belongs in the SDK, not in each
-  caller.
 - **The argument asker's prompt** is the status-line minibuffer, which
   is easy to miss in the IDE layout.
-- **The file finder** (`fs_source.LocalFinder` behind
-  `wl_open_file_pick`) and Browse Remote Files' `RemoteDir` move to
-  plugins over the live pick. They need either an async directory-walk
-  door or the files plugin holding `proc`.
+- **Browse Remote Files** (`fs_source.RemoteDir`) is still a native pick
+  source in core. It moves to a plugin when a remote walk can stand
+  behind the same door.
 
 ## Order
 

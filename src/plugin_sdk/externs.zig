@@ -171,7 +171,6 @@ pub extern "weft:abi/1" fn wl_pick_live(flags: u32, debounce_ms: u32, min_query:
 pub extern "weft:abi/1" fn wl_pick_query(ptr: u32, cap: u32) i32;
 pub extern "weft:abi/1" fn wl_pick_push(epoch: u32, t: u32, tl: u32, d: u32, dl: u32) i32;
 pub extern "weft:abi/1" fn wl_pick_done(epoch: u32) void;
-pub extern "weft:abi/1" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, pick_id: u32) void;
 pub extern "weft:abi/1" fn wl_pick_outcome_kind() i32;
 pub extern "weft:abi/1" fn wl_pick_outcome_text(out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_pick_outcome_query(out_ptr: u32, out_cap: u32) i32;
@@ -334,6 +333,9 @@ pub extern "weft:abi/1" fn wl_fs_stat(path: u32, path_len: u32, out_ptr: u32, ou
 pub extern "weft:abi/1" fn wl_fs_write(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 pub extern "weft:abi/1" fn wl_fs_append(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 pub extern "weft:abi/1" fn wl_fs_list(auth: u32, auth_len: u32, path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_fs_walk(path: u32, path_len: u32, prune: u32, prune_len: u32, flags: u32) i32;
+pub extern "weft:abi/1" fn wl_fs_walk_read(handle: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_fs_walk_close(handle: u32) void;
 pub extern "weft:abi/1" fn wl_semantic_fs_publish_child_directory(request_ptr: u32, request_len: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_semantic_fs_publish_child_file(request_ptr: u32, request_len: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_semantic_fs_capabilities(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, out_ptr: u32, out_cap: u32) i32;

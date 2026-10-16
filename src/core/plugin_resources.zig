@@ -43,6 +43,7 @@ const proc_stream = @import("proc_stream.zig");
 const repl_session = @import("repl_session.zig");
 const net_session = @import("net_session.zig");
 const pty_mod = @import("pty.zig");
+const fs_walk = @import("fs_walk.zig");
 const Pool = @import("task.zig").Pool;
 const command_mod = @import("command.zig");
 
@@ -89,6 +90,9 @@ pub const Resources = struct {
     /// Children on pseudo-terminals (`wl_pty_spawn`, doc/terminal.md §1): raw
     /// output back to the guest, which emulates the terminal itself.
     ptys: handles.Slots(pty_mod.Pty) = .empty,
+    /// Directory walks (`wl_fs_walk`): paths back to the guest as they are
+    /// found — a file finder's list, fed without blocking.
+    walks: handles.Slots(fs_walk.Walk) = .empty,
 
     /// WHAT THIS GUEST'S COMMANDS SAY ABOUT THEMSELVES — name, one-line
     /// summary, argument shape. Owned.
@@ -240,6 +244,7 @@ pub const Resources = struct {
         self.sessions.deinit(self.gpa); // kill + join each
         self.net_sessions.deinit(self.gpa); // shut + join each
         self.ptys.deinit(self.gpa); // hang up + join each
+        self.walks.deinit(self.gpa); // cancel each; the worker frees its own
         if (self.exec) |*e| e.deinit(self.gpa); // an unload mid-callback
         for (self.declared.items) |*d| d.deinit(self.gpa);
         self.declared.deinit(self.gpa);

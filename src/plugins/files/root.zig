@@ -21,8 +21,6 @@ const files_guest = @import("weft_files_adapter");
 
 var plugin: files_guest.Plugin = undefined;
 
-const file_pick = 0;
-
 const cmds = [_]weft.CommandEntry{
     .{ .name = "files.browse", .arity = .whole, .call = browse, .summary = "Browse a directory as a file tree.", .label = "Browse Files", .icon = "folder-tree" },
     .{ .name = "files.find", .arity = .whole, .call = find, .summary = "Find a file to edit.", .label = "Open File", .menu = "File", .group = "open", .order = 1, .icon = "file-search", .prompts = true },
@@ -36,7 +34,6 @@ comptime {
         // The `places` projection is named for what it shows, not for us.
         .capabilities = &.{"designation/places"},
         .init = start,
-        .pick = onPickAccept,
         .poll = on_poll,
     }).exportAll();
 }
@@ -147,23 +144,54 @@ fn onContextChanged() callconv(.c) void {
     publishPlaces() catch {};
 }
 
+// ── Open File ───────────────────────────────────────────────────────
+
+/// The walk feeding the open finder, stopped when it is answered.
+var finding: ?weft.Walk = null;
+
 /// The one "open a file by name" picker every grammar and config binds: vim's
 /// `SPC f f`, helix's `SPC f`, ide's C-p and the dashboard's "Open file".
+/// The ordinary picker, fed the files of the place this dispatch runs in as
+/// the walk finds them; the picker narrows them as you type. A typed name
+/// that is not in the list opens too (a new file).
 fn find() void {
-    weft.pickCategory("file");
-    weft.openFilePick("open", file_pick);
+    const spec: weft.SearchSpec = .{ .prompt = "open", .category = "file", .free_text = true, .per_query = false, .matched = false };
+    if (!weft.search(spec, listFiles, openChosen)) weft.echo("files: could not open the finder");
 }
 
-fn onPickAccept(pick_id: u32) void {
-    if (pick_id != file_pick) return;
-    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
-    defer outcome.deinit(weft.allocator);
-    const path = switch (outcome) {
-        .candidate => |candidate| candidate.text,
-        .input => |input| input,
-        .cancelled => return,
-    };
-    const trimmed = std.mem.trim(u8, path, " \t");
+fn listFiles(_: []const u8, feed: weft.Feed) void {
+    stopFinding();
+    // The place this dispatch runs in, named by core: its rows are relative to
+    // it, which is what `open` resolves a typed name against.
+    finding = weft.walkWith(weft.Feed, feed, .{}, Listing);
+    if (finding == null) {
+        weft.echo("files: this place has no local directory to list");
+        feed.done();
+    }
+}
+
+const Listing = struct {
+    pub fn path(feed: weft.Feed, rel: []const u8) void {
+        if (feed.push(rel, "")) return;
+        // Refused: the pick is gone, or holds all the rows it can.
+        feed.done();
+        stopFinding();
+    }
+    pub fn end(feed: weft.Feed, cut: bool) void {
+        finding = null;
+        feed.done();
+        if (cut) weft.echo("files: the list stops at 200000 files");
+    }
+};
+
+fn stopFinding() void {
+    if (finding) |w| w.stop();
+    finding = null;
+}
+
+fn openChosen(answer: weft.Answer) void {
+    stopFinding();
+    const trimmed = std.mem.trim(u8, answer.text(), " \t");
     if (trimmed.len > 0) weft.openTyped(trimmed);
 }
 
