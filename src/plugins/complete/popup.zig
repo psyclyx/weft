@@ -33,6 +33,8 @@ const Item = struct {
     detail: []u8,
     doc: []u8,
     kind: u8,
+    /// Its index in the race's merged ranking: what a resolve asks by.
+    merged: usize,
 
     fn free(self: Item) void {
         const a = weft.allocator;
@@ -53,6 +55,11 @@ var items: std.ArrayList(Item) = .empty;
 var shown: std.ArrayList(usize) = .empty;
 var session: ?u32 = null;
 var merged: usize = 0;
+/// Every provider has answered: no more items will come (the race stays
+/// open while the list does — an item may still be filled in).
+var done = false;
+/// The item last asked to be resolved (its text), so it is asked once.
+var asked: std.ArrayList(u8) = .empty;
 var open = false;
 /// Where the word being completed begins.
 var word_start: usize = 0;
@@ -106,6 +113,7 @@ fn open_(chosen_first: bool) void {
     open = true;
     word_start = w.start;
     merged = 0;
+    done = false;
     // Instant providers answered during the fire.
     _ = poll();
     if (!open) return;
@@ -113,53 +121,67 @@ fn open_(chosen_first: bool) void {
     redraw();
 }
 
-/// Fold in what has landed: true when the items changed.
+/// Fold in what has landed — new answers, or an item filled in: true when
+/// the items changed.
 pub fn poll() bool {
     const s = session orelse return false;
     const r = weft.capsPoll(s) orelse {
         session = null;
+        done = true;
         return false;
     };
-    var changed = false;
-    if (r.count != merged) {
-        clearItems();
-        const n = @min(r.count, max_items);
-        for (0..n) |i| {
-            const a = weft.allocator;
-            const item: Item = .{
-                .text = weft.capsMerged(a, s, i, .text) catch continue,
-                .label = weft.capsMerged(a, s, i, .label) catch &.{},
-                .detail = weft.capsMerged(a, s, i, .detail) catch &.{},
-                .doc = weft.capsMerged(a, s, i, .documentation) catch &.{},
-                .kind = weft.capsMergedKind(s, i),
-            };
-            items.append(a, item) catch {
-                item.free();
-                break;
-            };
-        }
-        merged = r.count;
-        changed = true;
+    done = r.done;
+    if (r.count == merged and !r.updated) return false;
+    clearItems();
+    const n = @min(r.count, max_items);
+    for (0..n) |i| {
+        const a = weft.allocator;
+        const item: Item = .{
+            .text = weft.capsMerged(a, s, i, .text) catch continue,
+            .label = weft.capsMerged(a, s, i, .label) catch &.{},
+            .detail = weft.capsMerged(a, s, i, .detail) catch &.{},
+            .doc = weft.capsMerged(a, s, i, .documentation) catch &.{},
+            .kind = weft.capsMergedKind(s, i),
+            .merged = i,
+        };
+        items.append(a, item) catch {
+            item.free();
+            break;
+        };
     }
-    if (r.done) {
-        // Everything is copied: the race can go.
-        weft.capsFinish(s);
-        session = null;
-    }
-    return changed;
+    merged = r.count;
+    return true;
 }
 
-/// Whether a loop's tick has anything to do: a race still running under a
-/// list no row of which was chosen (a chosen list holds still).
+/// Whether a loop's tick has anything to do: a race this popup holds. (Its
+/// `on_poll` is raised only when the race has something new.)
 pub fn racing() bool {
-    return open and session != null and chosen == null;
+    return open and session != null;
 }
 
-/// Each loop: a race still running may have new answers.
+/// Each loop: answers landed, or an item was filled in. The row chosen
+/// stays chosen.
 pub fn tick() void {
     if (!racing()) return;
+    var keep: [256]u8 = undefined;
+    var keep_len: ?usize = null;
+    if (chosen) |c| if (c < shown.items.len) {
+        const t = items.items[shown.items[c]].text;
+        if (t.len <= keep.len) {
+            @memcpy(keep[0..t.len], t);
+            keep_len = t.len;
+        }
+    };
     if (!poll()) return;
     follow();
+    if (keep_len) |n| for (shown.items, 0..) |i, row| {
+        if (!std.mem.eql(u8, items.items[i].text, keep[0..n])) continue;
+        chosen = row;
+        if (row < top) top = row;
+        if (row >= top + max_rows) top = row + 1 - max_rows;
+        redraw();
+        break;
+    };
 }
 
 /// The caret moved or text was typed: narrow to the word, or close.
@@ -181,7 +203,7 @@ pub fn follow() void {
 /// Close rather than hang about: every provider answered and nothing
 /// matches — or the one match is what is already typed.
 fn nothingToOffer(word: []const u8) bool {
-    if (shown.items.len == 0) return session == null;
+    if (shown.items.len == 0) return done;
     return shown.items.len == 1 and std.mem.eql(u8, items.items[shown.items[0]].text, word);
 }
 
@@ -248,6 +270,8 @@ pub fn close() void {
         weft.keyLayers(&.{});
     }
     open = false;
+    done = false;
+    asked.clearRetainingCapacity();
     clearItems();
     shown.clearRetainingCapacity();
     chosen = null;
@@ -278,12 +302,26 @@ fn redraw() void {
         const tag = kindTag(it.kind);
         if (tag.len > 0) weft.surfaceSpanAt(tag, .annotation, 2);
     }
-    if (chosen) |c| docsOf(items.items[shown.items[c]]);
+    if (chosen) |c| {
+        const it = items.items[shown.items[c]];
+        docsOf(it);
+        resolve(it);
+    }
     weft.surfaceEnd(if (chosen) |c| @intCast(c - top) else -1);
     if (chosen != null)
         weft.keyLayers(&.{ "complete-chosen", "complete" })
     else
         weft.keyLayers(&.{"complete"});
+}
+
+/// A chosen item with no docs: ask its provider for them, once.
+fn resolve(it: Item) void {
+    if (it.doc.len > 0) return;
+    const s = session orelse return;
+    if (std.mem.eql(u8, asked.items, it.text)) return;
+    asked.clearRetainingCapacity();
+    asked.appendSlice(weft.allocator, it.text) catch return;
+    _ = weft.capsResolve(s, it.merged);
 }
 
 /// The chosen item's documentation, as markdown: its detail (a signature, a

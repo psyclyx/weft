@@ -374,6 +374,8 @@ pub const imports = [_]Entry{
     .{ .name = "wl_caps_poll", .params = &.{.i32}, .results = &.{.i32}, .group = .capability, .doc = "fold landed answers into the fired race and rank them; the merged count (bit 30: every provider answered), or -1" },
     .{ .name = "wl_caps_merged", .params = &.{ .i32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .capability, .doc = "a merged item's field (0 text, 1 label, 2 detail, 3 documentation) into guest memory — cap 0 reports its length — or 4 its kind; -1 when there is none" },
     .{ .name = "wl_caps_finish", .params = &.{.i32}, .results = &.{}, .group = .capability, .doc = "end the fired race" },
+    .{ .name = "wl_caps_resolve", .params = &.{ .i32, .u32 }, .results = &.{.i32}, .group = .capability, .doc = "ask the provider of a merged item to fill in what it left out (completionItem/resolve) through its on_resolve; 1 asked, 0 nothing to ask, -1 no such item" },
+    .{ .name = "wl_caps_item_doc", .params = &.{ .i32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .capability, .doc = "as a provider, fill in an item of its answer with a resolved detail and documentation" },
 
     // ── syntax.zig — structural (tree-sitter) read + subbuffers ────────
     .{ .name = "wl_node_at", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "the smallest named tree-sitter node covering `offset`" },
@@ -598,10 +600,11 @@ pub const exports = [_]Export{
     .{ .name = "on_command", .params = &.{.i32}, .results = &.{}, .required = true, .doc = "dispatch a registered command by id; args/result cross via wl_arg_*/wl_set_result_*" },
     .{ .name = "on_mapping_end", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a selection mapping of the command with this id ended (after its last run, a refusal met while mapping, or no run at all); exactly once per mapping, under the same dispatch — where a per-command epilogue runs" },
     .{ .name = "on_complete", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer a completion session (handle); missing/trapped -> the host declines it" },
+    .{ .name = "on_resolve", .params = &.{ .i32, .i32 }, .results = &.{}, .required = false, .doc = "fill in item `index` of this provider's answer to completion session `session` (completionItem/resolve) — through wl_caps_item_doc, now or off a later poll" },
     .{ .name = "on_pick_accept", .params = &.{.i32}, .results = &.{}, .required = true, .doc = "a fuzzy pick this plugin opened was accepted, tagged by pick_id" },
     .{ .name = "on_menu", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a menu mode this plugin owns was entered (1) or left (0)" },
     .{ .name = "on_activate", .params = &.{}, .results = &.{}, .required = false, .doc = "a buffer took focus (path readable via wl_activate_path during the call)" },
-    .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when something this plugin holds is ready — a raw proc stream or a pty with output pending, a pty whose child ended, a grid entry of its the last frame gave a new extent, an entry holding a grid closed, or a directory it watches (wl_semantic_fs_watch) changed" },
+    .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when something this plugin holds is ready — a raw proc stream or a pty with output pending, a pty whose child ended, a grid entry of its the last frame gave a new extent, an entry holding a grid closed, a directory it watches (wl_semantic_fs_watch) changed, or a race it fired (wl_caps_fire) has answers, filled-in answers, or ended" },
     .{ .name = "on_signal", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a named signal this plugin subscribed to (by id) was raised; at the frame boundary, never inside a dispatch" },
     .{ .name = "on_context_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "keys of the head's primary context moved (entry, mode, offers, a published key…; wl_context_changed lists them); at most once per frame, after layout, never inside a dispatch" },
     .{ .name = "on_subject_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "a subject this plugin watches (wl_subject_watch) reads differently; bound to the subject's entry for the call, so the document doors read it; at the frame boundary, once per moved subject, never inside a dispatch" },
@@ -644,9 +647,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 284; // +5 wl_caps_fire/poll/merged/finish + wl_key_layers (the completion UI is a plugin: it races the providers and owns its popup's keys), +1 wl_surface_doc (a caret popup shows a markdown document: hover, docs, signature help), +1 wl_buffer_docked (a buffer switcher lists documents, not chrome), +1 wl_signal_emit_after (debounced signals), +2 wl_semantic_fs_watch + wl_semantic_fs_changed (a listing follows its directory on disk)
-const max_export_count: usize = 22;
-const max_semantic_operation_count: usize = 304; // +5 the completion consumer doors, +1 wl_surface_doc, +1 wl_buffer_docked, +2 wl_semantic_fs_watch + wl_semantic_fs_changed
+const max_import_count: usize = 286; // +2 wl_caps_resolve + wl_caps_item_doc (a completion item's docs, resolved lazily), +5 wl_caps_fire/poll/merged/finish + wl_key_layers (the completion UI is a plugin: it races the providers and owns its popup's keys), +1 wl_surface_doc (a caret popup shows a markdown document: hover, docs, signature help), +1 wl_buffer_docked (a buffer switcher lists documents, not chrome), +1 wl_signal_emit_after (debounced signals), +2 wl_semantic_fs_watch + wl_semantic_fs_changed (a listing follows its directory on disk)
+const max_export_count: usize = 23; // +1 on_resolve (a completion item's docs, resolved lazily)
+const max_semantic_operation_count: usize = 307; // +2 the resolve doors + on_resolve, +5 the completion consumer doors, +1 wl_surface_doc, +1 wl_buffer_docked, +2 wl_semantic_fs_watch + wl_semantic_fs_changed
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;

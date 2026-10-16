@@ -150,3 +150,32 @@ test "e2e/docs-popup: a chosen completion shows its docs beside the list — its
     try t.expect(std.mem.indexOf(u8, after, item) != null);
     try t.expect(std.mem.indexOf(u8, after, "\n    her\n") == null);
 }
+
+test "e2e/docs-popup: an item the server sent without docs gets them when chosen — completionItem/resolve, through the provider that answered it" {
+    const gpa = t.allocator;
+    var app: h.App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    const peer = try lang.Peer.init(gpa, "lazy");
+    defer peer.deinit(gpa);
+    try openWithPeer(&app, peer, "fn f() void {\n    her\n}\n");
+
+    const text = try ed.textAlloc();
+    defer gpa.free(text);
+    ed.buffers.active().textEditor().?.placeCursor(std.mem.indexOf(u8, text, "her\n").? + 3);
+    ed.press("i", "");
+    // Asked for: the first row is chosen, and it came with no docs — so the
+    // popup asks the server for them, and they land as the popup's document.
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    var found = false;
+    while (core.task.nowNs() < deadline and !found) {
+        if (completionPopup(ed) == null) ed.press("C-SPC", "");
+        ed.settle(3);
+        if (completionPopup(ed)) |s| found = std.mem.indexOf(u8, s.info, "Resolved **lazily**.") != null;
+    }
+    try t.expect(found);
+    const s = completionPopup(ed).?;
+    try t.expect(std.mem.indexOf(u8, s.info, "fn lazily_resolved() void") != null);
+    try t.expectEqual(@as(?usize, 0), s.selected);
+}

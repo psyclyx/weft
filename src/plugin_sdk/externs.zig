@@ -183,6 +183,8 @@ pub extern "weft:abi/1" fn wl_caps_fire(kind: u32, offset: u32, ptr: u32, len: u
 pub extern "weft:abi/1" fn wl_caps_poll(session: i32) i32;
 pub extern "weft:abi/1" fn wl_caps_merged(session: i32, i: u32, field: u32, ptr: u32, cap: u32) i32;
 pub extern "weft:abi/1" fn wl_caps_finish(session: i32) void;
+pub extern "weft:abi/1" fn wl_caps_resolve(session: i32, i: u32) i32;
+pub extern "weft:abi/1" fn wl_caps_item_doc(session: i32, index: u32, dptr: u32, dlen: u32, ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_surface_row() void;
 pub extern "weft:abi/1" fn wl_surface_span(t: u32, tl: u32, role: u32) void;
 pub extern "weft:abi/1" fn wl_surface_end(selected: i32) void;

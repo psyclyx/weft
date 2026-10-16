@@ -177,6 +177,8 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_caps_poll", .handler = capability.hCapsPoll },
     .{ .name = "wl_caps_merged", .handler = capability.hCapsMerged },
     .{ .name = "wl_caps_finish", .handler = capability.hCapsFinish },
+    .{ .name = "wl_caps_resolve", .handler = capability.hCapsResolve },
+    .{ .name = "wl_caps_item_doc", .handler = capability.hCapsItemDoc },
     .{ .name = "wl_set_fallback", .handler = keymap.hSetFallback },
     .{ .name = "wl_text_input", .handler = keymap.hTextInput },
     .{ .name = "wl_menu_mode", .handler = keymap.hMenuMode },

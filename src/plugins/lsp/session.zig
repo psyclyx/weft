@@ -153,6 +153,17 @@ pub const Session = struct {
     /// help (`signatureHelpProvider.triggerCharacters` and
     /// `retriggerCharacters`), one byte each, as `triggers`. Owned.
     sig_triggers: []u8 = &.{},
+    /// The server fills in a completion item's docs on request
+    /// (`completionProvider.resolveProvider`).
+    resolves: bool = false,
+    /// The completion session this server last answered, and each item it
+    /// answered with as the server sent it (JSON, owned): what
+    /// `completionItem/resolve` is sent back. Indexed as the items were
+    /// committed, which is the index `on_resolve` names.
+    answered: u32 = 0,
+    answered_items: std.ArrayList([]u8) = .empty,
+    /// The item being resolved: its session and index, and the JSON sent.
+    resolving: struct { session: u32 = 0, index: usize = 0, item: []const u8 = "" } = .{},
 
     /// One slot per kind: concurrency between kinds is structural, and a second
     /// ask of one kind can only ever supersede its own predecessor. It lives
@@ -376,7 +387,7 @@ pub fn mint(key: Key) ?*Session {
 /// are. Caller frees.
 pub fn initializeParams(s: *const Session) ?[]u8 {
     const caps =
-        \\"capabilities":{"textDocument":{"hover":{"contentFormat":["markdown","plaintext"]},"signatureHelp":{"signatureInformation":{"documentationFormat":["markdown","plaintext"],"parameterInformation":{"labelOffsetSupport":true},"activeParameterSupport":true}},"completion":{"completionItem":{"documentationFormat":["markdown","plaintext"]}},"synchronization":{},"publishDiagnostics":{"versionSupport":true}}}
+        \\"capabilities":{"textDocument":{"hover":{"contentFormat":["markdown","plaintext"]},"signatureHelp":{"signatureInformation":{"documentationFormat":["markdown","plaintext"],"parameterInformation":{"labelOffsetSupport":true},"activeParameterSupport":true}},"completion":{"completionItem":{"documentationFormat":["markdown","plaintext"],"resolveSupport":{"properties":["documentation","detail"]}}},"synchronization":{},"publishDiagnostics":{"versionSupport":true}}}
     ;
     if (s.root.len == 0 or s.root[0] != '/')
         return weft.allocator.dupe(u8, "{\"processId\":null,\"rootUri\":null," ++ caps ++ "}") catch null;
@@ -561,7 +572,7 @@ pub fn buildUri() ?[]u8 {
 // ── Request identity: what a session has in flight ────────────────────
 
 // ── Request identities ───────────────────────────────────────────────
-pub const Kind = enum { hover, definition, type_definition, implementation, references, symbols, format, rename, signature, inlay, codeaction, completion };
+pub const Kind = enum { hover, definition, type_definition, implementation, references, symbols, format, rename, signature, inlay, codeaction, completion, resolve };
 pub const kind_count = std.meta.fields(Kind).len;
 
 /// One ask. `id` 0 means ARMED: built, but not yet on the wire (the handshake

@@ -174,8 +174,9 @@ pub fn hCapsFire(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 /// `wl_caps_poll(session) -> count`: fold in what has landed and rank the
 /// whole (`Caps.mergedCompletion`); the count of merged items, read with
 /// `wl_caps_merged`. Bit 30 set: every provider has answered (or timed
-/// out) — nothing more will come. -1 when the session is not this plugin's
-/// or is gone.
+/// out) — no more answers will come. Bit 29 set: an answer already read was
+/// filled in since (a resolved item's docs). -1 when the session is not
+/// this plugin's or is gone.
 pub fn hCapsPoll(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
@@ -189,11 +190,15 @@ pub fn hCapsPoll(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         return;
     };
     _ = s.poll();
+    const touched = s.touched;
+    s.touched = false;
     const merged = ctx.caps.mergedCompletion(p.gpa, id) catch return;
     p.capsConsumerDrop();
     p.caps_merged = merged;
-    const n: i32 = @intCast(@min(merged.len, std.math.maxInt(u16)));
-    results[0] = if (s.done(@import("../task.zig").nowNs())) n | (1 << 30) else n;
+    var n: i32 = @intCast(@min(merged.len, std.math.maxInt(u16)));
+    if (s.done(@import("../task.zig").nowNs())) n |= 1 << 30;
+    if (touched) n |= 1 << 29;
+    results[0] = n;
 }
 
 /// `wl_caps_merged(session, i, field, ptr, cap) -> i32`: field 0 text, 1
@@ -238,12 +243,55 @@ pub fn hCapsMerged(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
 pub fn raceReady(p: *WasmPlugin) bool {
     if (p.caps_fired == 0) return false;
     const s = p.activeCtx().caps.session(p.caps_fired) orelse return true;
-    if (s.fresh < s.results.items.len) return true;
+    if (s.fresh < s.results.items.len or s.touched) return true;
     if (!p.caps_done_told and s.done(@import("../task.zig").nowNs())) {
         p.caps_done_told = true;
         return true;
     }
     return false;
+}
+
+/// `wl_caps_resolve(session, i) -> i32`: ask the provider that answered the
+/// `i`-th merged item to fill in what it left out (its documentation —
+/// `completionItem/resolve`), by calling that provider's `on_resolve(session,
+/// index)` with the item's index in ITS answer. 1 when asked; 0 when there
+/// is nothing to ask (it has docs, or its provider resolves nothing); -1
+/// when there is no such item. The answer lands as a touched session.
+pub fn hCapsResolve(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = -1;
+    const id = sessionOf(args[0]);
+    if (id == 0 or id != p.caps_fired) return;
+    const i: usize = @as(u32, @bitCast(args[1]));
+    if (i >= p.caps_merged.len) return;
+    results[0] = 0;
+    const item = p.caps_merged[i];
+    if (item.documentation.len > 0) return;
+    const caps = p.activeCtx().caps;
+    const origin = caps.itemOrigin(id, item) orelse return;
+    // Only a plugin provider has an `on_resolve` to ask.
+    const provider = for (caps.providers.items) |*pr| {
+        if (pr.handler == wpCompletionProvider and std.mem.eql(u8, pr.id, origin.provider)) break pr;
+    } else return;
+    const owner: *WasmPlugin = @ptrCast(@alignCast(provider.data.?));
+    if (owner == p) return;
+    contract.callOptionalExport("on_resolve", owner, .{ @as(i32, @intCast(id)), @as(i32, @intCast(origin.index)) }) catch return;
+    results[0] = 1;
+}
+
+/// `wl_caps_item_doc(session, index, detail, dl, doc, docl)`: as the provider
+/// that answered `session`, fill in item `index` of its answer with what it
+/// resolved: a detail (when non-empty) and its documentation (markdown).
+pub fn hCapsItemDoc(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const provider = p.provider_id orelse return;
+    const detail = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer p.gpa.free(detail);
+    const doc = caller.readMemory(p.gpa, @intCast(args[4]), @intCast(args[5])) catch return;
+    defer p.gpa.free(doc);
+    p.activeCtx().caps.resolveItem(sessionOf(args[0]), provider, @as(u32, @bitCast(args[1])), detail, doc) catch {};
 }
 
 /// `wl_caps_finish(session)`: the race is done with — dismissed, accepted,

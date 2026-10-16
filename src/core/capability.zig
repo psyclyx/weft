@@ -346,6 +346,9 @@ pub const Session = struct {
     outstanding: usize,
     results: std.ArrayList(Result) = .empty,
     fresh: usize = 0,
+    /// An answer already in was filled in since the consumer last looked —
+    /// a completion item's docs, resolved lazily (`Caps.resolveItem`).
+    touched: bool = false,
 
     fn deinit(self: *Session, gpa: Allocator) void {
         for (self.results.items) |*r| r.deinit(gpa);
@@ -683,6 +686,47 @@ pub const Caps = struct {
             .payload = owned,
         });
         s.outstanding -|= 1;
+    }
+
+    /// Where a merged completion item came from: the provider that answered
+    /// it, and its index in that provider's answer — what a lazy resolve is
+    /// asked by. Null when it is not one of the session's.
+    pub fn itemOrigin(self: *Caps, id: u64, item: *const CompletionItem) ?struct { provider: []const u8, index: usize } {
+        const s = self.sessions.get(id) orelse return null;
+        for (s.results.items) |*r| {
+            if (r.payload != .completion) continue;
+            for (r.payload.completion, 0..) |*it, i| if (it == item) return .{ .provider = r.provider, .index = i };
+        }
+        return null;
+    }
+
+    /// Fill in item `index` of `provider`'s latest answer to session `id`
+    /// with what it resolved lazily (`completionItem/resolve`): its detail,
+    /// when one came, and its documentation. The item's address is kept, so
+    /// a consumer's merged view of it stays good; the session is marked
+    /// touched, for the consumer to look again.
+    pub fn resolveItem(self: *Caps, id: u64, provider: []const u8, index: usize, detail: []const u8, documentation: []const u8) !void {
+        const s = self.sessions.get(id) orelse return;
+        var k = s.results.items.len;
+        while (k > 0) {
+            k -= 1;
+            const r = &s.results.items[k];
+            if (r.payload != .completion or !std.mem.eql(u8, r.provider, provider)) continue;
+            if (index >= r.payload.completion.len) return;
+            const it = &r.payload.completion[index];
+            if (documentation.len > 0) {
+                const owned = try self.gpa.dupe(u8, documentation);
+                self.gpa.free(it.documentation);
+                it.documentation = owned;
+            }
+            if (detail.len > 0) {
+                const owned = try self.gpa.dupe(u8, detail);
+                self.gpa.free(it.detail);
+                it.detail = owned;
+            }
+            s.touched = true;
+            return;
+        }
     }
 
     /// A provider that will never answer (dead, unsupported).

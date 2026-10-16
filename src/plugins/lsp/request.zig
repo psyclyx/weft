@@ -131,6 +131,8 @@ pub fn requestOf(s: *Session, kind: Kind, pos: Pos) i64 {
         .references => posRequest(s, "textDocument/references", pos, ",\"context\":{\"includeDeclaration\":true}"),
         .signature => posRequest(s, "textDocument/signatureHelp", pos, ""),
         .completion => posRequest(s, "textDocument/completion", pos, ""),
+        // The item as the server sent it, back to the server.
+        .resolve => s.conn.request("completionItem/resolve", s.resolving.item),
         .symbols => s.conn.request("textDocument/documentSymbol", reqParams(
             "{{\"textDocument\":{{\"uri\":\"{s}\"}}}}",
             .{uri},

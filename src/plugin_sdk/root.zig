@@ -2035,11 +2035,24 @@ pub fn capsFire(offset: usize, prefix: []const u8) ?u32 {
 }
 /// What the race has merged so far: how many items, and whether every
 /// provider has answered. Null when the session is gone.
-pub const CapsPoll = struct { count: usize, done: bool };
+/// `updated`: an item already read was filled in since (resolved docs).
+pub const CapsPoll = struct { count: usize, done: bool, updated: bool };
 pub fn capsPoll(session: u32) ?CapsPoll {
     const r = e.wl_caps_poll(@bitCast(session));
     if (r < 0) return null;
-    return .{ .count = @intCast(r & 0xffff), .done = r & (1 << 30) != 0 };
+    return .{ .count = @intCast(r & 0xffff), .done = r & (1 << 30) != 0, .updated = r & (1 << 29) != 0 };
+}
+/// Ask the provider of merged item `i` to fill in what it left out (its
+/// documentation); it lands as an `updated` poll. False when there was
+/// nothing to ask.
+pub fn capsResolve(session: u32, i: usize) bool {
+    return e.wl_caps_resolve(@bitCast(session), @intCast(i)) > 0;
+}
+/// As a provider, fill in item `index` of this plugin's answer to `session`
+/// (asked through `on_resolve(session, index)`): a detail, when non-empty,
+/// and its documentation (markdown).
+pub fn capsItemDoc(session: u32, index: usize, detail: []const u8, documentation: []const u8) void {
+    e.wl_caps_item_doc(@bitCast(session), @intCast(index), p(detail.ptr), @intCast(detail.len), p(documentation.ptr), @intCast(documentation.len));
 }
 /// A merged item's field, copied into `gpa`-owned memory. Fields: `text`
 /// (what accepting inserts), `label`, `detail`, `documentation`.

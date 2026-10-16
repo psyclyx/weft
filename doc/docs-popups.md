@@ -74,11 +74,14 @@ Phases 1–4 as planned, with these decisions on the way:
   `complete.show` (C-SPC) opens the same inline list the auto-trigger does.
   Kinds are named in the popup (`kindTag`), not by `lsp`'s annotator.
 
-Left for later:
+Left for later (resolve since done):
 
-- **`completionItem/resolve`** — a server that sends docs only on request
-  (rust-analyzer, typescript-language-server) shows none. It wants a
-  provider door: the popup asks for the chosen item (`wl_caps_resolve`), the
-  host asks the provider that answered it (`on_resolve`), and the provider
-  fills the item's docs in (`wl_caps_item_doc`).
+- **`completionItem/resolve`** — *done:* a chosen item with no docs is
+  filled in on request. The popup asks (`wl_caps_resolve`); the host asks
+  the plugin whose answer the item was (`on_resolve(session, index)`, its
+  index in THAT answer — `Caps.itemOrigin`); `lsp` sends the item back as
+  the server sent it (`completionItem/resolve`) and fills it in
+  (`wl_caps_item_doc` → `Caps.resolveItem`), which touches the session so
+  the popup's `on_poll` hears it (bit 29 of `wl_caps_poll`). The popup keeps
+  its race open while the list is, so an item can still be filled in.
 - **Kind icons** instead of tags, once an icon set has them.

@@ -509,7 +509,7 @@ fn deliver(s: *Session, p: *Pending, kind: Kind, result: rpc.Value) void {
         // re-asked: its caps session is racing a deadline, and an answer that
         // arrives after the merge closed is worse than none.
         const resolvable = if (p.target) |target| targetOffset(target) != null else false;
-        if (kind != .completion and resolvable) {
+        if (kind != .completion and kind != .resolve and resolvable) {
             _ = send(s, p, kind);
         } else retire(s, p);
         return;
@@ -527,7 +527,8 @@ fn deliver(s: *Session, p: *Pending, kind: Kind, result: rpc.Value) void {
         .signature => presentSignature(p, result),
         .inlay => presentInlay(result),
         .codeaction => presentCodeActions(s, result),
-        .completion => presentCompletion(p, result),
+        .completion => presentCompletion(s, p, result),
+        .resolve => presentResolve(s, result),
     }
     retire(s, p);
 }
@@ -651,10 +652,13 @@ fn presentCodeActions(s: *Session, result: rpc.Value) void {
 /// `CompletionList{items}`; carries label / insertText / detail / kind /
 /// documentation across to the merge + info popup. Capped so a huge list can't
 /// blow the frame. An empty result still commits (answers the session).
-fn presentCompletion(p: *Pending, result: rpc.Value) void {
+fn presentCompletion(s: *Session, p: *Pending, result: rpc.Value) void {
     const session = p.caps;
     p.caps = 0; // answered: `retire` must not also decline it
     if (session == 0) return;
+    // Kept, as sent, for `completionItem/resolve` to send back.
+    forgetAnswered(s);
+    s.answered = session;
     const items: []const rpc.Value = switch (result) {
         .array => |a| a.items,
         .object => |o| if (o.get("items")) |it| (if (it == .array) it.array.items else &.{}) else &.{},
@@ -678,8 +682,49 @@ fn presentCompletion(p: *Pending, result: rpc.Value) void {
             .rank = rank,
         });
         rank += 1;
+        if (s.resolves) {
+            if (std.json.Stringify.valueAlloc(weft.allocator, it, .{})) |json| {
+                s.answered_items.append(weft.allocator, json) catch weft.allocator.free(json);
+            } else |_| {}
+        }
     }
     weft.capsCommit(session);
+}
+
+fn forgetAnswered(s: *Session) void {
+    for (s.answered_items.items) |j| weft.allocator.free(j);
+    s.answered_items.clearRetainingCapacity();
+    s.answered = 0;
+}
+
+/// A completion's popup asks for what an item of ours left out (its docs):
+/// send the item back to the server (`completionItem/resolve`), and fill it
+/// in when the answer lands (`presentResolve`).
+fn on_resolve(session: i32, index: i32) callconv(.c) void {
+    if (index < 0) return;
+    const id: u32 = @bitCast(session);
+    for (sessions.items) |s| {
+        if (s.answered != id) continue;
+        const i: usize = @intCast(index);
+        if (!s.resolves or i >= s.answered_items.items.len) return;
+        s.resolving = .{ .session = id, .index = i, .item = s.answered_items.items[i] };
+        const p = arm(s, .resolve) orelse return;
+        if (s.ready) _ = send(s, p, .resolve);
+        return;
+    }
+}
+
+/// The server filled the item in: hand its detail and documentation back
+/// to the race it answered.
+fn presentResolve(s: *Session, result: rpc.Value) void {
+    const r = s.resolving;
+    if (r.session == 0 or r.session != s.answered) return;
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(weft.allocator);
+    if (field(result, "documentation")) |d| contentsMarkdown(&doc, d);
+    const detail = strOf(field(result, "detail"));
+    if (doc.items.len == 0 and detail.len == 0) return;
+    weft.capsItemDoc(r.session, r.index, detail, doc.items);
 }
 
 fn strOf(v: ?rpc.Value) []const u8 {
@@ -1101,6 +1146,7 @@ fn contentsText(c: rpc.Value) []const u8 {
 fn keepTriggers(s: *Session, result: ?rpc.Value) void {
     const caps = field(result orelse return, "capabilities") orelse return;
     const provider = field(caps, "completionProvider") orelse return;
+    if (field(provider, "resolveProvider")) |rp| s.resolves = rp == .bool and rp.bool;
     const list = field(provider, "triggerCharacters") orelse return;
     if (list != .array) return;
     var bytes: std.ArrayList(u8) = .empty;
@@ -1171,4 +1217,5 @@ comptime {
     weft.exportCallback("on_poll", &on_poll);
     weft.exportCallback("on_activate", &on_activate);
     weft.exportCallback("on_signal", &on_signal);
+    weft.exportCallback("on_resolve", &on_resolve);
 }

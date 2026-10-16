@@ -129,7 +129,7 @@ pub const Peer = struct {
             \\    if ($method eq "textDocument/completion") { open(my $comp, ">>", ".lsp-$tag-completion") or die; print $comp "x"; close $comp; }
             \\    my $result = {};
             \\    if ($method eq "initialize") {
-            \\        $result = { capabilities => { completionProvider => { triggerCharacters => ["."] }, hoverProvider => JSON::PP::true, signatureHelpProvider => { triggerCharacters => ["(", ","] } } };
+            \\        $result = { capabilities => { completionProvider => { triggerCharacters => ["."], resolveProvider => JSON::PP::true }, hoverProvider => JSON::PP::true, signatureHelpProvider => { triggerCharacters => ["(", ","] } } };
             \\    } elsif ($method eq "textDocument/hover") {
             \\        $result = { contents => { kind => "markdown", value => "```zig\nfn hermetic(first: u8, count: usize) void\n```\n\nA hermetic hover whose prose runs on long enough that no popup could hold it on one line,\nso it has to wrap rather than run off the window.\n\nSecond paragraph." } };
             \\    } elsif ($method eq "textDocument/signatureHelp") {
@@ -137,6 +137,12 @@ pub const Peer = struct {
             \\    } elsif ($method eq "textDocument/completion") {
             \\        my $item = "hermetic_${tag}${where}_completion";
             \\        $result = { items => [{ label => $item, insertText => $item, kind => 3, detail => "fn hermetic_detail(n: usize) void", documentation => { kind => "markdown", value => "Hermetic completion **docs**." } }] };
+            \\        $result = { items => [{ label => $item, insertText => $item, kind => 3, data => { lazy => 1 } }] } if $tag eq "lazy";
+            \\    } elsif ($method eq "completionItem/resolve") {
+            \\        my $item = $msg->{params};
+            \\        $item->{detail} = "fn lazily_resolved() void";
+            \\        $item->{documentation} = { kind => "markdown", value => "Resolved **lazily**." } if $item->{data}{lazy};
+            \\        $result = $item;
             \\    }
             \\    my $reply = encode_json({ jsonrpc => "2.0", id => $msg->{id}, result => $result });
             \\    print "Content-Length: ", length($reply), "\r\n\r\n", $reply;
