@@ -151,7 +151,7 @@ pub fn draw(
         }
         for (bytes, cells, 0..) |b, cs, face| {
             if (cs.items.len == 0) continue;
-            const shaped = try text_engine.shape(scratch, &v.face_set.mono, b.items, .{ .style = @as(Face, @enumFromInt(face)).style() });
+            const shaped = try v.shape(scratch, &v.face_set.mono, b.items, .{ .style = @as(Face, @enumFromInt(face)).style() });
             try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline, .place = .{ .cell = cs.items } });
         }
     }

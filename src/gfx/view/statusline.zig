@@ -311,7 +311,7 @@ fn cellRun(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), text: []cons
         byte += s.len;
     }
     if (cells.items.len == 0) return;
-    const shaped = try text_engine.shape(scratch, &v.face_set.mono, text[0..byte], .{});
+    const shaped = try v.shape(scratch, &v.face_set.mono, text[0..byte], .{});
     try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .cell = cells.items } });
 }
 
@@ -351,6 +351,6 @@ pub fn appendPlainRun(
         byte += s.len;
     }
     if (cells.items.len == 0) return;
-    const shaped = try text_engine.shape(scratch, &v.face_set.mono, text[0..byte], .{});
+    const shaped = try v.shape(scratch, &v.face_set.mono, text[0..byte], .{});
     try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .cell = cells.items } });
 }

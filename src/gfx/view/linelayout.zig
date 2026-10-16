@@ -444,7 +444,7 @@ fn emitMono(
 ) !void {
     const baseline_y = top + v.ascent;
     if (cells.items.len > 0) {
-        const shaped = try text_engine.shape(scratch, &v.face_set.mono, pfx_bytes.items, .{});
+        const shaped = try v.shape(scratch, &v.face_set.mono, pfx_bytes.items, .{});
         try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .cell = cells.items } });
     }
     try out.append(la, .{
@@ -817,7 +817,7 @@ fn layoutMarkdownLine(
             const st = sh.style(i);
             var j = i + 1;
             while (j < text.len and !sh.hidden(j) and sh.style(j).eql(st)) j += 1;
-            const shaped = try text_engine.shape(scratch, st.faces, text[i..j], .{ .style = st.style });
+            const shaped = try v.shape(scratch, st.faces, text[i..j], .{ .style = st.style });
             for (shaped.glyphs) |g| adv[i + g.source_start] += st.em * g.x_advance;
             i = j;
         }
@@ -850,7 +850,7 @@ fn layoutMarkdownLine(
             const st = sh.style(i);
             var j = i + 1;
             while (j < seg_to and !sh.hidden(j) and sh.style(j).eql(st)) j += 1;
-            const shaped = try text_engine.shape(scratch, st.faces, text[i..j], .{ .style = st.style });
+            const shaped = try v.shape(scratch, st.faces, text[i..j], .{ .style = st.style });
             for (shaped.glyphs) |g| {
                 try stops.append(la, .{ .off = @intCast(line.start + i + g.source_start), .x = pen + st.em * g.x_offset });
             }

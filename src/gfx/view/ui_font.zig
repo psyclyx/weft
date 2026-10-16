@@ -64,35 +64,3 @@ pub fn metrics(face: Face, sans: bool, scale: f32, editor: Metrics) Metrics {
         .cell_w = editor.cell_w,
     };
 }
-
-/// Measured widths of sans labels at one em, so a label shaped to be
-/// measured this frame is not shaped again to be measured the next. Direct
-/// mapped: a collision costs one more shaping, never a wrong width (the key
-/// is the text's full hash and the em).
-pub const Widths = struct {
-    const slots = 512;
-    keys: [slots]u64 = @splat(0),
-    widths: [slots]f32 = @splat(0),
-
-    fn key(label: []const u8, em: f32) u64 {
-        var h = std.hash.Wyhash.init(@as(u32, @bitCast(em)));
-        h.update(label);
-        return h.final() | 1; // never 0, the empty slot
-    }
-
-    /// `label`'s advance in the sans face at `em`, in pixels.
-    pub fn of(self: *Widths, set: *const fonts.FaceSet, label: []const u8, em: f32) f32 {
-        if (label.len == 0) return 0;
-        const k = key(label, em);
-        const slot: usize = @intCast(k % slots);
-        if (self.keys[slot] == k) return self.widths[slot];
-        var buf: [16 * 1024]u8 = undefined;
-        var fba = std.heap.FixedBufferAllocator.init(&buf);
-        const shaped = text_engine.shape(fba.allocator(), &set.body, label, .{}) catch
-            return @as(f32, @floatFromInt(std.unicode.utf8CountCodepoints(label) catch label.len)) * em * 0.55;
-        const w = shaped.advanceX() * em;
-        self.keys[slot] = k;
-        self.widths[slot] = w;
-        return w;
-    }
-};

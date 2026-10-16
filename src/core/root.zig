@@ -99,6 +99,9 @@ pub const designation = @import("designation.zig");
 /// shell installs a backend.
 pub const Clipboard = @import("clipboard.zig");
 pub const container = @import("container.zig");
+/// A cache that cannot grow without bound: a byte and entry budget, least
+/// recently used out first. What it caches is its owner's business.
+pub const cache = @import("cache.zig");
 pub const catalog = @import("catalog.zig");
 /// The standard intention vocabulary (`std.<domain>.<verb>`).
 pub const intentions = @import("intentions.zig");
@@ -169,6 +172,7 @@ test {
     _ = @import("identity.zig");
     _ = @import("weft_facts");
     _ = @import("container.zig");
+    _ = @import("cache.zig");
     _ = @import("repl_session.zig");
     _ = @import("pty.zig");
     _ = @import("futex.zig");

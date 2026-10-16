@@ -42,6 +42,7 @@ const render = @import("render.zig");
 
 const Theme = @import("Theme.zig");
 const ui_font = @import("ui_font.zig");
+const Shapes = @import("shapes.zig").Shapes;
 const hud_mod = @import("hud.zig");
 const Hud = hud_mod.Hud;
 
@@ -164,9 +165,9 @@ top_row: usize = 0,
 /// `theme/ui-scale`: the chrome's size against the editor's.
 ui_scale: f32 = ui_font.default_scale,
 ui_face: ui_font.Face = .{ .ascent = 0.8, .height = 1.2 },
-/// Measured label widths (`ui_font.Widths`), owned; behind a pointer so a
-/// measure through a `*const View` can fill it.
-ui_widths: *ui_font.Widths,
+/// Text shaped in this View's faces, kept between frames (`shapes.zig`),
+/// owned; behind a pointer so a build through a `*const View` can fill it.
+shapes: *Shapes,
 
 /// The most recent frame's source-offset ↔ geometry map, for
 /// hit-testing, caret, selection, and vertical motion. Its `lines`
@@ -229,8 +230,8 @@ pub fn init(gpa: Allocator, font_bytes: []const u8, em: f32) !View {
         set.* = try icons.Set.parse(gpa, @tagName(bundled), bundled.sources());
         parsed += 1;
     }
-    const widths = try gpa.create(ui_font.Widths);
-    widths.* = .{};
+    const shaped = try gpa.create(Shapes);
+    shaped.* = .init(gpa);
 
     var v: View = .{
         .gpa = gpa,
@@ -242,14 +243,15 @@ pub fn init(gpa: Allocator, font_bytes: []const u8, em: f32) !View {
         .line_h = em * (ascent - descent + gap) / upem,
         .ascent = em * ascent / upem,
         .layout_arena = std.heap.ArenaAllocator.init(gpa),
-        .ui_widths = widths,
+        .shapes = shaped,
     };
     v.ui_face = ui_font.Face.of(&v.face_set);
     return v;
 }
 
 pub fn deinit(self: *View) void {
-    self.gpa.destroy(self.ui_widths);
+    self.shapes.deinit();
+    self.gpa.destroy(self.shapes);
     self.layout_arena.deinit();
     for (&self.icon_sets.values) |*set| set.deinit();
     self.face_set.deinit();
@@ -338,7 +340,16 @@ pub fn ui(self: *const View) ui_font.Metrics {
 pub fn uiWidth(self: *const View, label: []const u8) f32 {
     const m = self.ui();
     if (!m.sans) return @as(f32, @floatFromInt(std.unicode.utf8CountCodepoints(label) catch label.len)) * self.cell_w;
-    return self.ui_widths.of(&self.face_set, label, m.em);
+    if (label.len == 0) return 0;
+    const per_em = self.shapes.advance(&self.face_set, &self.face_set.body, label, .{}) orelse
+        return @as(f32, @floatFromInt(std.unicode.utf8CountCodepoints(label) catch label.len)) * 0.55 * m.em;
+    return per_em * m.em;
+}
+
+/// `utf8` shaped in `faces`, its glyphs in `out`: `text_engine.shape`, kept
+/// between frames when `faces` is one of this View's.
+pub fn shape(self: *const View, out: Allocator, faces: *const text_engine.StyleSet, utf8: []const u8, options: text_engine.ShapeOptions) !text_engine.ShapedText {
+    return self.shapes.shape(out, &self.face_set, faces, utf8, options);
 }
 
 /// `label` set as chrome with its text row's top at `top`: a run in the UI
@@ -346,7 +357,7 @@ pub fn uiWidth(self: *const View, label: []const u8) f32 {
 pub fn uiRun(self: *const View, scratch: Allocator, runs: *std.ArrayList(Run), label: []const u8, x: f32, top: f32, color: [4]f32, clip: ?region.Rect) !void {
     if (label.len == 0) return;
     const m = self.ui();
-    const shaped = try text_engine.shape(scratch, if (m.sans) &self.face_set.body else &self.face_set.mono, label, .{});
+    const shaped = try self.shape(scratch, if (m.sans) &self.face_set.body else &self.face_set.mono, label, .{});
     try runs.append(scratch, .{ .shaped = shaped, .baseline_y = top + m.ascent, .place = .{ .prop = .{ .x = x, .em = m.em, .color = color } }, .clip = clip });
 }
 
@@ -1242,4 +1253,40 @@ test "theme/icons: names the bundled set, `none` turns icons off, and a typo cha
     try testing.expect(view.icon("kind-struct") != null);
     view.icon_choice = .lucide;
     try testing.expect(view.icon("kind-struct") == null);
+}
+
+test "shapes: the View's text is shaped once and kept, a caller gets its own copy, and other faces pass through" {
+    const gpa = testing.allocator;
+    var view = try View.init(gpa, font_provider.defaultMono(), 16);
+    defer view.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const first = try view.shape(scratch, &view.face_set.mono, "fn main() void {}", .{});
+    try testing.expectEqual(@as(u64, 1), view.shapes.cache.stats.misses);
+    const again = try view.shape(scratch, &view.face_set.mono, "fn main() void {}", .{});
+    try testing.expectEqual(@as(u64, 1), view.shapes.cache.stats.hits);
+    try testing.expectEqualSlices(text_engine.ShapedText.Glyph, first.glyphs, again.glyphs);
+    try testing.expect(first.glyphs.ptr != again.glyphs.ptr);
+    // The same text in another style or face is another entry.
+    _ = try view.shape(scratch, &view.face_set.mono, "fn main() void {}", .{ .style = .{ .italic = true } });
+    _ = try view.shape(scratch, &view.face_set.body, "fn main() void {}", .{});
+    try testing.expectEqual(@as(u32, 3), view.shapes.cache.count);
+
+    // A label measured is the entry it is drawn from.
+    view.chrome = .widget;
+    const w = view.uiWidth("Open File");
+    try testing.expect(w > 0);
+    const misses = view.shapes.cache.stats.misses;
+    var runs: std.ArrayList(Run) = .empty;
+    try view.uiRun(scratch, &runs, "Open File", 0, 0, .{ 1, 1, 1, 1 }, null);
+    try testing.expectEqual(misses, view.shapes.cache.stats.misses);
+
+    // A style set that is not the View's is shaped as it always was.
+    var other = try fonts.FaceSet.init(gpa, font_provider.defaultMono());
+    defer other.deinit();
+    const before = view.shapes.cache.count;
+    _ = try view.shape(scratch, &other.mono, "elsewhere", .{});
+    try testing.expectEqual(before, view.shapes.cache.count);
 }
