@@ -70,6 +70,13 @@ annotated_len: usize = 0,
 query: std.ArrayList(u8) = .empty,
 /// Indices into `items`, filtered by `query`, rank order.
 filtered: std.ArrayList(u32) = .empty,
+/// `filtered` with each row's score, in the same order — kept so rows a
+/// source streams in are scored ALONE and merged in, rather than every row
+/// being ranked again per batch. Empty for a `given` pick (the source ranked).
+ranked: std.ArrayList(Ranked) = .empty,
+/// The source had more rows than it handed over (it stopped at its cap):
+/// the header says so (`[1/2000+]`), so a cut is never silent.
+truncated: bool = false,
 selected: usize = 0,
 acceptor: ?Acceptor = null,
 prev_mode: []u8 = &.{},
@@ -95,6 +102,23 @@ style: Style = .orderless,
 narrow: std.ArrayList(u8) = .empty,
 
 const Frec = struct { uses: u32, last: u64 };
+
+/// A row that matched the query, with what ranks it.
+const Ranked = struct { index: u32, m: Match, frec: Frec };
+
+/// A word-start run first, then word-boundary hits (acronyms / word starts),
+/// then a tighter span — the order an item's own best occurrence is chosen by
+/// (`match.better`) — then an earlier first match, then frecency, then the
+/// order rows arrived in.
+fn rankedLess(_: void, a: Ranked, b: Ranked) bool {
+    if (a.m.word != b.m.word) return a.m.word;
+    if (a.m.boundaries != b.m.boundaries) return a.m.boundaries > b.m.boundaries;
+    if (a.m.span != b.m.span) return a.m.span < b.m.span;
+    if (a.m.start != b.m.start) return a.m.start < b.m.start;
+    if (a.frec.last != b.frec.last) return a.frec.last > b.frec.last;
+    if (a.frec.uses != b.frec.uses) return a.frec.uses > b.frec.uses;
+    return a.index < b.index;
+}
 
 pub const empty: Pick = .{};
 
@@ -182,6 +206,9 @@ fn clear(self: *Pick, gpa: Allocator) void {
     self.query = .empty;
     self.filtered.deinit(gpa);
     self.filtered = .empty;
+    self.ranked.deinit(gpa);
+    self.ranked = .empty;
+    self.truncated = false;
     self.selected = 0;
     self.style = .orderless;
     self.narrow.deinit(gpa);
@@ -458,12 +485,14 @@ pub fn appendItems(
     const keep = p.selection();
     const keep_owned = if (keep) |k| try gpa.dupe(u8, k) else null;
     defer if (keep_owned) |k| gpa.free(k);
+    const first = p.items.items.len;
     for (texts, 0..) |it, i| {
         // A streamed row's text IS its key: every producer that streams
         // (the file finder, a dir listing) streams paths.
         try p.pushRow(gpa, .{ .text = it, .doc = if (docs) |ds| ds[i] else "" }, "");
     }
-    try p.refilter(gpa);
+    // Only the new rows are scored, and merged into the ranking in hand.
+    try p.admitFrom(gpa, first);
     if (keep_owned) |k| {
         for (p.filtered.items, 0..) |idx, i| {
             if (std.mem.eql(u8, p.items.items[idx], k)) {
@@ -534,46 +563,73 @@ fn recordUse(self: *Pick, gpa: Allocator, text: []const u8) void {
 
 fn refilter(self: *Pick, gpa: Allocator) !void {
     self.filtered.clearRetainingCapacity();
-    const Scored = struct { index: u32, m: Match, frec: Frec };
-    var scored: std.ArrayList(Scored) = .empty;
-    defer scored.deinit(gpa);
-    const narrowing = self.narrow.items.len > 0;
-    if (self.style == .given and !narrowing) {
+    self.ranked.clearRetainingCapacity();
+    if (self.given()) {
         // The source's own order: it matched, it ranked.
         for (0..self.items.items.len) |i| try self.filtered.append(gpa, @intCast(i));
         if (self.selected >= self.filtered.items.len) self.selected = 0;
         return;
     }
-    for (self.items.items, 0..) |it, i| {
-        // Narrowing is a sticky pre-filter (orderless over text or doc);
-        // the live query then ranks within the narrowed set.
-        if (narrowing and orderlessMatch(self.narrow.items, it) == null and
-            orderlessMatch(self.narrow.items, self.docs.items[i]) == null) continue;
-        if (matchScore(self.style, self.query.items, it)) |m| {
-            try scored.append(gpa, .{
-                .index = @intCast(i),
-                .m = m,
-                .frec = self.frecOf(it),
-            });
+    for (0..self.items.items.len) |i| {
+        if (self.admit(i)) |r| try self.ranked.append(gpa, r);
+    }
+    std.mem.sort(Ranked, self.ranked.items, {}, rankedLess);
+    for (self.ranked.items) |r| try self.filtered.append(gpa, r.index);
+    if (self.selected >= self.filtered.items.len) self.selected = 0;
+}
+
+/// Whether the pick shows the source's rows as given, in its order.
+fn given(self: *const Pick) bool {
+    return self.style == .given and self.narrow.items.len == 0;
+}
+
+/// Row `i` scored against the narrowing and the query, or null when it does
+/// not match.
+fn admit(self: *const Pick, i: usize) ?Ranked {
+    const it = self.items.items[i];
+    // Narrowing is a sticky pre-filter (orderless over text or doc); the live
+    // query then ranks within the narrowed set.
+    if (self.narrow.items.len > 0 and orderlessMatch(self.narrow.items, it) == null and
+        orderlessMatch(self.narrow.items, self.docs.items[i]) == null) return null;
+    const m = matchScore(self.style, self.query.items, it) orelse return null;
+    return .{ .index = @intCast(i), .m = m, .frec = self.frecOf(it) };
+}
+
+/// Rank rows `[first, items.len)` — rows a source just streamed in — and merge
+/// them into the ranking already made: what the batch costs, not a re-rank of
+/// everything before it.
+fn admitFrom(self: *Pick, gpa: Allocator, first: usize) !void {
+    if (self.given()) {
+        for (first..self.items.items.len) |i| try self.filtered.append(gpa, @intCast(i));
+        return;
+    }
+    var fresh: std.ArrayList(Ranked) = .empty;
+    defer fresh.deinit(gpa);
+    for (first..self.items.items.len) |i| {
+        if (self.admit(i)) |r| try fresh.append(gpa, r);
+    }
+    if (fresh.items.len == 0) return;
+    std.mem.sort(Ranked, fresh.items, {}, rankedLess);
+    var merged = try std.ArrayList(Ranked).initCapacity(gpa, self.ranked.items.len + fresh.items.len);
+    errdefer merged.deinit(gpa);
+    var x: usize = 0;
+    var y: usize = 0;
+    while (x < self.ranked.items.len or y < fresh.items.len) {
+        const take_old = y >= fresh.items.len or
+            (x < self.ranked.items.len and !rankedLess({}, fresh.items[y], self.ranked.items[x]));
+        if (take_old) {
+            merged.appendAssumeCapacity(self.ranked.items[x]);
+            x += 1;
+        } else {
+            merged.appendAssumeCapacity(fresh.items[y]);
+            y += 1;
         }
     }
-    std.mem.sort(Scored, scored.items, {}, struct {
-        fn lt(_: void, a: Scored, b: Scored) bool {
-            // A word-start run first, then word-boundary hits (acronyms /
-            // word starts), then a tighter span — the order an item's own
-            // best occurrence is chosen by (`match.better`) — then an
-            // earlier first match, then frecency.
-            if (a.m.word != b.m.word) return a.m.word;
-            if (a.m.boundaries != b.m.boundaries) return a.m.boundaries > b.m.boundaries;
-            if (a.m.span != b.m.span) return a.m.span < b.m.span;
-            if (a.m.start != b.m.start) return a.m.start < b.m.start;
-            if (a.frec.last != b.frec.last) return a.frec.last > b.frec.last;
-            if (a.frec.uses != b.frec.uses) return a.frec.uses > b.frec.uses;
-            return a.index < b.index;
-        }
-    }.lt);
-    for (scored.items) |s| try self.filtered.append(gpa, s.index);
-    if (self.selected >= self.filtered.items.len) self.selected = 0;
+    self.ranked.deinit(gpa);
+    self.ranked = merged;
+    self.filtered.clearRetainingCapacity();
+    try self.filtered.ensureTotalCapacity(gpa, self.ranked.items.len);
+    for (self.ranked.items) |r| self.filtered.appendAssumeCapacity(r.index);
 }
 
 /// Current choice's text, if any.
@@ -637,9 +693,10 @@ fn buildDockSurface(self: *const Pick, scratch: Allocator, max_rows: usize, plac
         std.fmt.allocPrint(scratch, "[{s}]", .{self.narrow.items}) catch ""
     else
         "";
-    const query = std.fmt.allocPrint(scratch, "  {s}{s}> {s}_   [{d}/{d}] ·{s}", .{
+    const query = std.fmt.allocPrint(scratch, "  {s}{s}> {s}_   [{d}/{d}{s}] ·{s}", .{
         self.prompt,                              narrow_chip, self.query.items,
-        if (total == 0) 0 else self.selected + 1, total,       @tagName(self.style),
+        if (total == 0) 0 else self.selected + 1, total,       if (self.truncated) "+" else "",
+        @tagName(self.style),
     }) catch return null;
     surf.addSpan(scratch, query, .normal);
 
@@ -1640,4 +1697,42 @@ test "annotation: two annotators compose; a silent one costs the other nothing" 
     try t.expect(std.mem.indexOf(u8, joined, "lang:x.zig") != null);
     try t.expect(std.mem.indexOf(u8, joined, "  ") != null);
     try t.expectEqual(@as(usize, "size:x.zig  lang:x.zig".len), joined.len);
+}
+
+test "pick appendItems: rows streamed in batches rank exactly as a full re-rank of all of them would" {
+    const gpa = t.allocator;
+    const all = [_][]const u8{ "src/main.zig", "build.zig", "src/app/frame.zig", "doc/main.md", "main", "tests/main_test.zig", "README", "src/main_window.zig" };
+    // Streamed: the first three, then the rest in two batches.
+    var streamed: Pick = .empty;
+    defer streamed.deinit(gpa);
+    streamed.active = true;
+    try streamed.query.appendSlice(gpa, "main");
+    try streamed.appendItems(gpa, all[0..3], null);
+    try streamed.appendItems(gpa, all[3..6], null);
+    try streamed.appendItems(gpa, all[6..], null);
+    // Whole: every row, ranked once.
+    var whole: Pick = .empty;
+    defer whole.deinit(gpa);
+    whole.active = true;
+    try whole.query.appendSlice(gpa, "main");
+    try whole.appendItems(gpa, &all, null);
+    try whole.refilter(gpa);
+    try t.expectEqualSlices(u32, whole.filtered.items, streamed.filtered.items);
+    try t.expect(streamed.filtered.items.len > 0);
+    streamed.active = false;
+    whole.active = false;
+}
+
+test "pick header: a source that was cut says so" {
+    const gpa = t.allocator;
+    var p: Pick = .empty;
+    defer p.deinit(gpa);
+    p.active = true;
+    try p.appendItems(gpa, &.{ "a", "b" }, null);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    p.truncated = true;
+    const surf = p.buildSurface(arena.allocator(), 8, .dock).?;
+    try t.expect(std.mem.indexOf(u8, surf.rows.items[0].spans.items[0].text, "[1/2+]") != null);
+    p.active = false;
 }

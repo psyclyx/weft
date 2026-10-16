@@ -152,11 +152,15 @@ pub const LiveSource = struct {
     taken: usize = 0,
     /// The plugin said `epoch` is complete (an empty answer clears the pick).
     done: bool = false,
+    /// The cap was hit for this generation (`max_rows`).
+    capped: bool = false,
 
     pub const Row = struct { text: []u8, doc: []u8 };
-    /// A search that matches everything must not flood memory: past this,
-    /// rows for one query are refused (`wl_pick_push` answers 0).
-    pub const max_rows = 2000;
+    /// A source that has everything to say must not flood memory: past
+    /// this, rows for one generation are refused (`wl_pick_push` answers 0)
+    /// and the picker says it was cut (`Pick.truncated`). The picker draws a
+    /// window of them, so this bounds memory, not what a frame costs.
+    pub const max_rows = 50_000;
 };
 
 const Phase = enum { describing, active };

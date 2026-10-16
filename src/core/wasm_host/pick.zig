@@ -96,7 +96,12 @@ pub fn hPickPush(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         return;
     };
     const epoch: u32 = @bitCast(args[0]);
-    if (epoch != live.epoch or live.taken >= LiveSource.max_rows) {
+    if (epoch != live.epoch) {
+        results[0] = 0;
+        return;
+    }
+    if (live.taken >= LiveSource.max_rows) {
+        live.capped = true;
         results[0] = 0;
         return;
     }
@@ -163,6 +168,7 @@ fn liveQuery(data: ?*anyopaque, ctx: *command.Context, query: []const u8, epoch:
     live.epoch = @truncate(epoch);
     live.taken = 0;
     live.done = false;
+    live.capped = false;
     const saved_query = p.cur_live_query;
     p.cur_live_query = query;
     defer p.cur_live_query = saved_query;
@@ -176,6 +182,11 @@ fn livePoll(data: ?*anyopaque, ctx: *command.Context) anyerror!bool {
     const live: *LiveSource = @ptrCast(@alignCast(data.?));
     const gpa = live.plugin.gpa;
     const fresh = live.shown != live.epoch;
+    const p = &ctx.head.pick;
+    if (p.truncated != live.capped and !fresh) {
+        p.truncated = live.capped;
+        if (live.pending.items.len == 0) return true;
+    }
     if (live.pending.items.len == 0 and !(fresh and live.done)) return false;
     defer dropPending(live, gpa);
     const texts = try gpa.alloc([]const u8, live.pending.items.len);
@@ -186,13 +197,13 @@ fn livePoll(data: ?*anyopaque, ctx: *command.Context) anyerror!bool {
         tx.* = row.text;
         dc.* = row.doc;
     }
-    const p = &ctx.head.pick;
     if (fresh) {
         const entries = try gpa.alloc(pick_mod.Entry, texts.len);
         defer gpa.free(entries);
         for (entries, texts, docs) |*en, tx, dc| en.* = .{ .text = tx, .doc = dc };
         try p.refresh(gpa, entries, &.{});
         live.shown = live.epoch;
+        p.truncated = live.capped;
     } else {
         try p.appendItems(gpa, texts, docs);
     }
