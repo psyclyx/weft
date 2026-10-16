@@ -230,61 +230,6 @@ pub fn pluginLoopDue(ctx: ?*anyopaque, now: u64) ?u64 {
     return loop.nextDueNs();
 }
 
-// ── 10. Background services fallback — a deliberate, bounded-latency
-// compromise (see the report / doc/cwa-prior-docs-audit.md §5 follow-up), NOT a
-// per-subsystem reification: collab hub/conn ticking has a real push
-// wakeup (Session/Hub's `wake_fd`, registered as fd sources below), but
-// REPL/LSP proc-stream readiness (`wasm_host.notifyPollIfReady`/
-// `drainReplSessions`) and picker async POLL sources are serviced by a
-// long-running pool task writing into a plain buffer with no completion
-// signal of its own (`task.Pool`'s wake-fd only fires when the WHOLE task
-// finishes, i.e. process exit, not per byte). Rather than plumb a
-// dedicated wakeup through every one of those (repl_session.zig,
-// proc_stream.zig, each guest's own polling shape), this is one named,
-// honestly-bounded 8ms fallback. PROCESS streams have left it: their reader
-// signals the pool's wake fd when bytes land (`proc_stream.wake`), so an open
-// language server or agent no longer keeps the loop awake. REPL and net
-// sessions remain (doc/streams.md).
-//
-// Gated on an ACTUALLY-LIVE stream (review fix: gating on "any plugin
-// resident" was wrong — LSP/modes/syntax/vim etc. are ordinary plugins
-// too, so any real config would arm this at ~125 wakes/s FOREVER, worse
-// than the vsync loop it replaced, and it was masking the lost-wakeup
-// bug by accident). A plugin is "streaming" only while it holds an open
-// raw-proc, REPL, or net session — the three `handles.Slots` registries
-// in its `plugin_resources.Resources`, which BOTH planes carry now, so
-// this asks each the same question; a non-null entry is an OPEN handle,
-// independent of
-// whether it currently has pending bytes (that's what the 8ms poll is
-// FOR — to notice bytes arriving on an otherwise-quiet handle). A
-// plugin with no open stream (the common case — most plugins never open
-// one) costs nothing here. ──
-
-pub const PluginStreamCtx = struct {
-    plugins: *const std.ArrayList(*core.wasm_abi.WasmPlugin),
-    js_plugins: *const std.ArrayList(*core.quickjs.JsPlugin),
-};
-
-const plugin_stream_interval_ns: u64 = 8 * std.time.ns_per_ms;
-
-/// Whether any loaded plugin still holds a live child or socket. Both planes
-/// answer through the same `Resources.hasLiveStream`, so the JS plane is no
-/// longer asked a NARROWER question than the wasm one: it used to be checked
-/// for proc streams only, because `JsPlugin` had no session registries to
-/// check. It has them now (empty until those doors are shared), so sharing a
-/// door will not silently leave the frame loop asleep on it.
-fn hasLiveStream(self: *const PluginStreamCtx) bool {
-    for (self.plugins.items) |p| if (p.resources.hasPolledStream()) return true;
-    for (self.js_plugins.items) |jp| if (jp.resources.hasPolledStream()) return true;
-    return false;
-}
-
-pub fn pluginStreamDue(ctx: ?*anyopaque, now: u64) ?u64 {
-    const self: *const PluginStreamCtx = @ptrCast(@alignCast(ctx.?));
-    if (!hasLiveStream(self)) return null;
-    return now + plugin_stream_interval_ns;
-}
-
 test "loop sources: a pick source with rows ready wakes the loop now, not at the next unrelated wake" {
     const Fake = struct {
         var has_rows = false;

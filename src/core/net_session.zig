@@ -54,6 +54,8 @@ pub const Session = struct {
     out_mutex: task.Mutex = .{},
     out_buf: std.ArrayList(u8) = .empty,
     reader: task.Handle(void),
+    /// Woken when bytes land (`Pool.wakeLoop`): the frame loop drains them now.
+    pool: ?*task.Pool = null,
 
     /// Dial `hostport` (plaintext, or TLS verifying `host_name`) and stream it.
     pub fn start(
@@ -72,6 +74,7 @@ pub const Session = struct {
         } else {
             s.conn = .{ .plain = net.Sock.connect(gpa, hostport) catch return error.ConnectFailed };
         }
+        s.pool = pool;
         s.reader = try pool.spawnResident(residentOptions(s), readLoop, .{s});
         return s;
     }
@@ -81,6 +84,7 @@ pub const Session = struct {
         const s = try alloc(gpa, ctx, plugin, buf);
         errdefer free(s);
         s.conn = .{ .plain = net.Sock.fromFd(fd) };
+        s.pool = pool;
         s.reader = try pool.spawnResident(residentOptions(s), readLoop, .{s});
         return s;
     }
@@ -125,6 +129,7 @@ pub const Session = struct {
             s.out_mutex.lock();
             s.out_buf.appendSlice(s.gpa, buf[0..n]) catch {};
             s.out_mutex.unlock();
+            if (s.pool) |pool| pool.wakeLoop();
         }
     }
 

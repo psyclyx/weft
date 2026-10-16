@@ -666,8 +666,6 @@ pub fn main(init: std.process.Init) !void {
     _ = try sched.addTimer(&reconnect_ctx, loop_sources.reconnectDue, "reconnect_backoff");
     _ = try sched.addTimer(&session.head, loop_sources.pickDebounceDue, "pick_debounce");
     _ = try sched.addTimer(&plug.loop, loop_sources.pluginLoopDue, "plugin_loop_timers");
-    var plugin_stream_ctx: loop_sources.PluginStreamCtx = .{ .plugins = &plug.list, .js_plugins = &plug.js_list };
-    _ = try sched.addTimer(&plugin_stream_ctx, loop_sources.pluginStreamDue, "plugin_stream_poll");
 
     // Present discipline (§6 W2a-3 item 4): `present_pending` is set once a
     // frame is actually built, and cleared once `render.present` reports

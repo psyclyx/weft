@@ -229,6 +229,8 @@ pub const Session = struct {
     /// Streamed output not yet delivered, guarded by `out_mutex`.
     pending: Pending = .{},
     reader: task.Handle(void),
+    /// Woken when output lands (`Pool.wakeLoop`): the frame loop drains it now.
+    pool: *task.Pool,
     /// The child's exit code once `exitCode` has seen it end.
     exit_code: ?u8 = null,
 
@@ -254,6 +256,7 @@ pub const Session = struct {
             .environ = environ,
             .child = undefined,
             .reader = undefined,
+            .pool = pool,
         };
         errdefer {
             gpa.free(s.plugin);
@@ -301,6 +304,7 @@ pub const Session = struct {
                     s.pending.absorb(s.gpa, from, chunk) catch {};
                     s.out_mutex.unlock();
                     r.toss(chunk.len);
+                    s.pool.wakeLoop();
                 }
             }
         } else |_| {} // EndOfStream / read failure — the child is gone.

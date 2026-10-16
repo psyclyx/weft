@@ -363,7 +363,7 @@ pub const ProcStream = struct {
     }
 
     fn wake(s: *ProcStream) void {
-        if (s.pool.notify_fd) |fd| @import("scheduler.zig").signalWakeFd(fd);
+        s.pool.wakeLoop();
     }
 
     /// Frame thread: copy newly-arrived stderr into `out`, like `read`.

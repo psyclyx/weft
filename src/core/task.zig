@@ -295,6 +295,13 @@ pub const Pool = struct {
         self.notify_fd = fd;
     }
 
+    /// Wake the frame loop now (its notify fd), from any thread: what a
+    /// resident reader does when bytes land, so their consumer hears them at
+    /// once rather than at a polling interval or the next unrelated wake.
+    pub fn wakeLoop(self: *Pool) void {
+        if (self.notify_fd) |fd| scheduler.signalWakeFd(fd);
+    }
+
     /// Submit `f(args...)` to the pool. Lock-free; safe on the hot path.
     /// The returned handle is poll-only. For BOUNDED work — a save, a parse,
     /// a directory walk — that finishes and gives its worker back.
