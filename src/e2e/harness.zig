@@ -708,6 +708,28 @@ pub const Editor = struct {
         return self.session.head.echo.text();
     }
 
+    /// The one-line prompt open now (`weft_prompt`'s bar: a plugin's bottom
+    /// surface) as the text it reads — label, line, hint, without the caret
+    /// mark or the row's inset — or "" when none is open.
+    pub fn promptText(self: *Editor) []const u8 {
+        const S = struct {
+            var buf: [4096]u8 = undefined;
+        };
+        var n: usize = 0;
+        for (self.plugins.items) |pl| {
+            if (!pl.surface.active or pl.surface.placement != .bottom) continue;
+            if (pl.surface.rows.items.len != 1) continue;
+            for (pl.surface.rows.items[0].spans.items) |span| {
+                if (std.mem.eql(u8, span.text, "\u{258F}")) continue;
+                const k = @min(span.text.len, S.buf.len - n);
+                @memcpy(S.buf[n..][0..k], span.text[0..k]);
+                n += k;
+            }
+            return std.mem.trimStart(u8, S.buf[0..n], " ");
+        }
+        return "";
+    }
+
     /// Drive complete application wakes until the active buffer's async save
     /// reaches a terminal state — deterministic, no sleep-and-hope.
     ///

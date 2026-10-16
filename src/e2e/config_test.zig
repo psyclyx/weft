@@ -1167,12 +1167,12 @@ test "e2e/config: the palette runs a command WITH arguments — typed, or asked 
     ed.share_ctx.pending_listen = null;
     ed.share_ctx.pending_access = .view;
     paletteAccept(&ed, "collab.listen");
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "collab.listen <port>") != null);
+    try t.expect(std.mem.indexOf(u8, ed.promptText(), "collab.listen <port>") != null);
     try t.expectEqual(@as(?u16, null), ed.share_ctx.pending_listen); // nothing ran yet
     ed.typeText("7000");
     ed.press("Return", "");
     ed.settle(2);
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "collab.listen <access>") != null);
+    try t.expect(std.mem.indexOf(u8, ed.promptText(), "collab.listen <access>") != null);
     ed.typeText("own");
     ed.press("Return", "");
     ed.settle(2);
@@ -1183,7 +1183,7 @@ test "e2e/config: the palette runs a command WITH arguments — typed, or asked 
     //    a call. Escape is the same key that leaves every other prompt.
     ed.share_ctx.pending_listen = null;
     paletteAccept(&ed, "collab.connect");
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "collab.connect <hostport>") != null);
+    try t.expect(std.mem.indexOf(u8, ed.promptText(), "collab.connect <hostport>") != null);
     ed.press("Escape", "");
     ed.settle(2);
     try t.expect(ed.share_ctx.pending_connect == null);
@@ -1214,20 +1214,20 @@ test "e2e/config: the `:` line hints what the command being typed still wants" {
     ed.settle(2);
     ed.typeText("collab.listen");
     ed.settle(2);
-    try t.expectEqualStrings(":collab.listen <port> <access>", ed.echoText());
+    try t.expectEqualStrings(":collab.listen <port> <access>", ed.promptText());
 
     // It advances as arguments land, naming what comes NEXT rather than
     // repeating the one under the cursor — and the line supplies its own
     // separator, so a trailing space does not double up.
     ed.typeText(" 777");
     ed.settle(2);
-    try t.expectEqualStrings(":collab.listen 777 <access>", ed.echoText());
+    try t.expectEqualStrings(":collab.listen 777 <access>", ed.promptText());
     ed.typeText("7 ");
     ed.settle(2);
-    try t.expectEqualStrings(":collab.listen 7777 <access>", ed.echoText());
+    try t.expectEqualStrings(":collab.listen 7777 <access>", ed.promptText());
     ed.typeText("edit");
     ed.settle(2);
-    try t.expectEqualStrings(":collab.listen 7777 edit", ed.echoText());
+    try t.expectEqualStrings(":collab.listen 7777 edit", ed.promptText());
 
     // A word ex owns is not a registered command, so the registry has nothing
     // to say about it — no keyword list to keep in step with the parser.
@@ -1236,7 +1236,7 @@ test "e2e/config: the `:` line hints what the command being typed still wants" {
     ed.press("colon", "");
     ed.typeText("wq");
     ed.settle(2);
-    try t.expectEqualStrings(":wq", ed.echoText());
+    try t.expectEqualStrings(":wq", ed.promptText());
     ed.press("Escape", "");
     ed.settle(2);
 
@@ -1254,7 +1254,7 @@ test "e2e/config: the `:` line hints what the command being typed still wants" {
     ed.typeText("collab.listen");
     ed.press("Return", "");
     ed.settle(2);
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "collab.listen <port>") != null);
+    try t.expect(std.mem.indexOf(u8, ed.promptText(), "collab.listen <port>") != null);
 }
 
 // An agent process is its conversation's LIFETIME (doc/agents.md
@@ -2172,9 +2172,11 @@ test "e2e/config: a key bound to a command that needs an argument asks for it, t
     ed.press("F9", "");
     ed.settle(2);
     try t.expectEqualStrings("palette-arg", ed.mode());
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "<name>") != null);
+    try t.expect(std.mem.indexOf(u8, ed.promptText(), "<name>") != null);
     ed.typeText("scratchpad");
     ed.press("Return", "");
     ed.settle(2);
     try t.expectEqualStrings("scratchpad", ed.bufferName());
+    // Answered, the bar is gone.
+    try t.expectEqualStrings("", ed.promptText());
 }

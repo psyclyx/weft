@@ -12,14 +12,17 @@
 //!
 //! A user who cancels a rename and cancels a branch name should not be
 //! learning two different keys, and a plugin that wants a line of text should
-//! not be choosing a UI. This is that one primitive: the echo-line minibuffer
+//! not be choosing a UI. This is that one primitive: the minibuffer
 //! `ex` already proved, generalized, so it costs a plugin five command
 //! registrations and a callback.
 //!
 //! It needs NO new core door — it composes `textInput` (a mode whose printable
-//! keys route to a command), `setMode`, and `echo`, exactly as vim's `f`/`t`
-//! already do. Rendering is the echo line, so a colorscheme and a status line
-//! get it for free and no plugin has to own an overlay for it.
+//! keys route to a command), `setMode`, and a `.bottom` surface. The line is a
+//! BAR along the window's bottom, its label in the accent colour and a caret
+//! where typing lands — the find bar's and the picker's look. It used to be
+//! the echo line, which in a layout with a status bar reads as one more
+//! message: a command asking for its argument looked like it had done nothing.
+//! The bar is drawn in theme roles, so a colorscheme restyles it for free.
 //!
 //! Freestanding-wasm shaped: a fixed line buffer per instantiation, no
 //! allocator. Each guest is its own wasm module, so two plugins' prompts never
@@ -56,8 +59,8 @@ pub const Config = struct {
     /// with neither is a prompt whose answer goes nowhere, and is refused at
     /// compile time.
     on_accept: ?*const fn (line: []const u8) void = null,
-    /// What to do when the user backs out. Default: nothing but the echo
-    /// line clearing — cancelling is not an event most callers have work for.
+    /// What to do when the user backs out. Default: nothing but the bar
+    /// closing — cancelling is not an event most callers have work for.
     on_cancel: ?*const fn () void = null,
     /// Longest line accepted. Overflow is refused out loud, never truncated
     /// silently into a shorter branch name than the user typed.
@@ -150,9 +153,9 @@ pub fn Prompt(comptime cfg: Config) type {
         const Payload = [payload_capacity]u8;
         var payload_store: Payload align(payload_align) = undefined;
         var pending: ?*const fn (line: []const u8, held: *align(payload_align) const Payload) void = null;
-        /// Label + line + whatever `cfg.hint` trails it with.
-        var render_buf: [cfg.capacity + label_buf.len + hint_cap]u8 = undefined;
-        const hint_cap = 256;
+        /// What a refusal said, shown in the bar until the next keystroke.
+        var note_buf: [96]u8 = undefined;
+        var note_len: usize = 0;
 
         /// The five commands this prompt answers to. A plugin splices them
         /// into its own command table rather than this module registering
@@ -246,6 +249,7 @@ pub fn Prompt(comptime cfg: Config) type {
             len = @min(seed.len, buf.len);
             @memcpy(buf[0..len], seed[0..len]);
             open_now = true;
+            note_len = 0;
             render();
             weft.setMode(mode);
         }
@@ -267,7 +271,7 @@ pub fn Prompt(comptime cfg: Config) type {
             open_now = false;
             len = 0;
             pending = null;
-            weft.echo("");
+            weft.surfaceClose();
             leave();
         }
 
@@ -276,7 +280,7 @@ pub fn Prompt(comptime cfg: Config) type {
             const s = weft.argStr(0) orelse return;
             if (s.len == 0) return;
             if (len + s.len > buf.len) {
-                weft.echo(cfg.name ++ ": line too long");
+                say("line too long");
                 return;
             }
             @memcpy(buf[len .. len + s.len], s);
@@ -313,7 +317,16 @@ pub fn Prompt(comptime cfg: Config) type {
         }
 
         fn changed() void {
+            note_len = 0;
             if (cfg.on_change) |f| f(buf[0..len]);
+            render();
+        }
+
+        /// A refusal, in the bar beside the line (not on the echo line, which
+        /// the bar is there to stop the user having to watch).
+        fn say(msg: []const u8) void {
+            note_len = @min(msg.len, note_buf.len);
+            @memcpy(note_buf[0..note_len], msg[0..note_len]);
             render();
         }
 
@@ -330,7 +343,7 @@ pub fn Prompt(comptime cfg: Config) type {
             open_now = false;
             len = 0;
             leave();
-            weft.echo("");
+            weft.surfaceClose();
             // The opening's own continuation wins, and is cleared BEFORE it
             // runs: a handler that opens this prompt again must not have its
             // new payload overwritten by this one's teardown.
@@ -344,7 +357,7 @@ pub fn Prompt(comptime cfg: Config) type {
             open_now = false;
             len = 0;
             pending = null;
-            weft.echo("");
+            weft.surfaceClose();
             leave();
             if (cfg.on_cancel) |f| f();
         }
@@ -358,19 +371,21 @@ pub fn Prompt(comptime cfg: Config) type {
             if (cfg.resting) |m| weft.setMode(m) else weft.exitToResting();
         }
 
+        /// The bar: label, the line with a caret where typing lands, the
+        /// owner's hint, and any refusal — one row, one surface.
         fn render() void {
-            var w: usize = 0;
-            @memcpy(render_buf[0..label_len], label_buf[0..label_len]);
-            w += label_len;
-            @memcpy(render_buf[w .. w + len], buf[0..len]);
-            w += len;
-            if (cfg.hint) |ask| {
-                const h = ask(buf[0..len]);
-                const n = @min(h.len, render_buf.len - w);
-                @memcpy(render_buf[w .. w + n], h[0..n]);
-                w += n;
+            weft.surfaceBegin(.bottom);
+            weft.surfaceRow();
+            weft.surfaceSpan("  ", .normal); // the picker's query row is inset the same
+            weft.surfaceSpan(label_buf[0..label_len], .accent);
+            weft.surfaceSpan(buf[0..len], .normal);
+            weft.surfaceSpan("▏", .accent);
+            if (cfg.hint) |ask| weft.surfaceSpan(ask(buf[0..len]), .muted);
+            if (note_len > 0) {
+                weft.surfaceSpan("   ", .normal);
+                weft.surfaceSpan(note_buf[0..note_len], .effect);
             }
-            weft.echo(render_buf[0..w]);
+            weft.surfaceEnd(-1);
         }
     };
 }

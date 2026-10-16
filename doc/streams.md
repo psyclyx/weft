@@ -163,11 +163,15 @@ Landed:
 - Open File is the files plugin's search, fed by a walk; the picker
   narrows it. `wl_open_file_pick`, `LocalFinder` and `LocalDir` are gone.
   A live pick holds 200,000 rows, the same as a walk.
+- Every one-line prompt (the argument asker, `:`, a rename, a branch
+  name) is a bar along the window's bottom, not the echo line. It shows
+  the label in the accent colour, the line with a caret, and the owner's
+  hint, the way the picker's query row does. It is fixed once, in
+  `plugin_lib/prompt`, and a bottom dock row now draws every span it
+  has, not just the first.
 
 ## Left
 
-- **The argument asker's prompt** is the status-line minibuffer, which
-  is easy to miss in the IDE layout.
 - **Browse Remote Files** (`fs_source.RemoteDir`) is still a native pick
   source in core. It moves to a plugin when a remote walk can stand
   behind the same door.

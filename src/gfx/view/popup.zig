@@ -375,11 +375,13 @@ pub fn drawCaretSurface(
 }
 
 /// One positioned dock row: its top y, whether it's the highlighted
-/// (selected) row, its single span's text, and that span's resolved color
-/// IDENTITY. A `bottom`-placed surface is ONE span per row by construction
-/// (`Pick.buildSurface` already joins item + note into one string) — no
-/// column alignment, unlike a caret popup's list.
-pub const DockRowLayout = struct { y: f32, selected: bool, text: []const u8, role: SpanRole };
+/// (selected) row, and its spans left to right, each at its own x in its own
+/// role — a prompt's accent label, its line, a caret, a dim hint. `text` and
+/// `role` are the FIRST span's, the whole of a one-span row (the picker joins
+/// item + note into one string). No column alignment, unlike a caret popup's
+/// list: a dock row reads as one line.
+pub const DockSpanLayout = struct { x: f32, text: []const u8, role: SpanRole };
+pub const DockRowLayout = struct { y: f32, selected: bool, text: []const u8, role: SpanRole, spans: []const DockSpanLayout };
 
 /// A `bottom`-placed `Surface`'s layout: the dock rect it was handed (never
 /// resized — the region carve upstream already sized it to the surface's
@@ -403,11 +405,19 @@ pub fn layoutDockSurface(v: *View, scratch: Allocator, surf: *const core.surface
     for (surf.rows.items, 0..) |row, i| {
         const selected = surf.selected != null and surf.selected.? == i;
         const span = if (row.spans.items.len > 0) row.spans.items[0] else null;
+        const spans = try scratch.alloc(DockSpanLayout, row.spans.items.len);
+        var x = dock.x;
+        for (row.spans.items, spans) |sp, *out| {
+            out.* = .{ .x = x, .text = sp.text, .role = fromRole(sp.role) };
+            const cols = std.unicode.utf8CountCodepoints(sp.text) catch sp.text.len;
+            x += @as(f32, @floatFromInt(cols)) * v.cell_w;
+        }
         rows[i] = .{
             .y = dock.y + @as(f32, @floatFromInt(i)) * v.line_h,
             .selected = selected,
             .text = if (span) |sp| sp.text else "",
             .role = if (span) |sp| fromRole(sp.role) else .normal,
+            .spans = spans,
         };
     }
     return .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = dock.h, .rows = rows };
@@ -429,8 +439,11 @@ pub fn drawDockSurface(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), 
     const sink: chrome.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
     for (dl.rows) |row| {
         if (row.selected) try chrome.paintSelected(sink, .{ .x = dl.x, .y = row.y, .w = dl.w, .h = v.line_h }, v.theme.accent);
-        const color = if (row.selected) v.theme.background else spanRoleColor(v, row.role);
-        try propLine(v, scratch, runs, row.text, dl.x, row.y + v.ascent, color);
+        for (row.spans) |sp| {
+            if (sp.text.len == 0) continue;
+            const color = if (row.selected) v.theme.background else spanRoleColor(v, sp.role);
+            try propLine(v, scratch, runs, sp.text, sp.x, row.y + v.ascent, color);
+        }
     }
 }
 

@@ -2238,15 +2238,15 @@ test "authoring: the `:` line reads a short name, then a label, lists an ambiguo
     ed.press("colon", "");
     ed.typeText("frob-w");
     ed.press("Tab", "");
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), ":zzt.frob-widget") != null);
+    try t.expect(std.mem.indexOf(u8, ed.promptText(), ":zzt.frob-widget") != null);
     ed.press("Return", "");
     try t.expectEqual(@as(usize, 3), names.ran[0]);
     // …and lists them when it can mean several.
     ed.press("colon", "");
     ed.typeText("twi");
     ed.press("Tab", "");
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zzt.twin") != null);
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zzq.twin") != null);
+    try t.expect(std.mem.indexOf(u8, ed.promptText(), "zzt.twin") != null);
+    try t.expect(std.mem.indexOf(u8, ed.promptText(), "zzq.twin") != null);
     ed.press("Escape", "");
 
     // Vim's own words are vim's: `:w` writes.
