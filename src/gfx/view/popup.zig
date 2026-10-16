@@ -228,7 +228,15 @@ pub fn layoutCaretSurface(
     };
     const col_w = try scratch.alloc(usize, ncols);
     @memset(col_w, 0);
-    col_w[0] = 8;
+    // The floor is the main content's: the first column holding plain text
+    // (after a leading icon column, when rows carry one).
+    const main_col: usize = main: {
+        for (surf.rows.items) |row| for (row.spans.items) |sp| {
+            if (sp.role == .normal) break :main sp.column;
+        };
+        break :main 0;
+    };
+    col_w[main_col] = 8;
     for (surf.rows.items) |row| for (row.spans.items) |sp| {
         const w = if (sp.role == .icon) iconCells(v, sp.text) else std.unicode.utf8CountCodepoints(sp.text) catch sp.text.len;
         col_w[sp.column] = @max(col_w[sp.column], w);
@@ -246,7 +254,10 @@ pub fn layoutCaretSurface(
 
     const box_w = @as(f32, @floatFromInt(cursor)) * v.cell_w;
     const box_h = @as(f32, @floatFromInt(nrows)) * v.line_h;
-    const box_x = std.math.clamp(c.x, body.x, @max(body.x, body.x + body.w - box_w));
+    // The main text lines up with the anchor (the word being completed),
+    // whatever leads it in the row (a kind's icon).
+    const lead = @as(f32, @floatFromInt(col_x[main_col])) * v.cell_w - v.cell_w;
+    const box_x = std.math.clamp(c.x - lead, body.x, @max(body.x, body.x + body.w - box_w));
     var box_y = c.y_top + c.height; // just below the caret line
     var flipped_above = false;
     if (box_y + box_h > body.y + body.h) {

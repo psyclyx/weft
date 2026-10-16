@@ -389,11 +389,13 @@ styles on one frame and checks every chrome role renders under each.
   and +0.11 ms (`text-icons`, `widget`) on a 1600×1000 frame.
 - **Icons.** `gfx/icons.zig` parses stroke-style SVG (every path command,
   arcs to cubics; circle, ellipse, rect, line, poly) into path commands at
-  load. The bundled set is 47 Lucide icons, the upstream SVG files unchanged
-  in `src/gfx/icons/lucide/` beside Lucide's `LICENSE` (ISC, with the
-  Feather MIT notice it carries). Chrome asks for icons by chrome name
-  (`save`, `split-right`, `error`); `theme/icons` picks the set (`lucide`,
-  or `none` to turn icons off).
+  load. Two sets are bundled: Lucide's (the upstream SVG files unchanged in
+  `src/gfx/icons/lucide/` beside Lucide's `LICENSE` — ISC, with the Feather
+  MIT notice it carries) and weft's own (`src/gfx/icons/weft/`, every chrome
+  name plus the 25 completion `kind-*` glyphs; its style is doc/icons.md).
+  Chrome asks for icons by chrome name (`save`, `split-right`, `error`);
+  `theme/icons` picks the set (`lucide`, `weft`, or `none` to turn icons
+  off).
 - **Roles and styles.** `gfx/view/chrome.zig`: `Role`, `State`, `Content`,
   and one painter per role under each of `text`, `text-icons` and `widget`.
   Action nodes are buttons (a menu's are menu items across the row); tabs are
