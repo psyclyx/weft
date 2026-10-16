@@ -26,6 +26,8 @@
 //! `register`/effect against that declaration (the perm handshake).
 
 const std = @import("std");
+/// Read results outlive the reads after them (`entry.zig`).
+const read_life = @import("entry.zig");
 
 /// A growable heap over the guest's wasm linear memory (grows via memory.grow).
 /// Plugins that must hold data whose size the document dictates — a JSON-RPC
@@ -280,7 +282,7 @@ pub fn releaseDocSnapshot(handle: u32) void {
 /// next read call — copy to keep.
 pub fn slice(start: usize, end: usize) []const u8 {
     const n = e.wl_slice(@intCast(start), @intCast(end), p(&scratch), scratch.len);
-    return scratch[0..n];
+    return read_life.keep(scratch[0..n]);
 }
 /// `[start, end)` of the line containing `offset` (end before the newline).
 pub fn lineAt(offset: usize) Range {
@@ -359,7 +361,7 @@ pub fn pointer() ?Pointer {
 pub fn path() ?[]const u8 {
     const n = e.wl_path(p(&scratch), scratch.len);
     if (n < 0) return null;
-    return scratch[0..@intCast(n)];
+    return read_life.keep(scratch[0..@intCast(n)]);
 }
 
 // ── Group C: write (grade-gated host-side by the plugin's principal) ──
@@ -496,7 +498,7 @@ pub fn breakpointClear() void {
 pub fn breakpointOffsets() []const u8 {
     const n = e.wl_breakpoint_offsets(p(&scratch), scratch.len);
     if (n <= 0) return "";
-    return scratch[0..@intCast(n)];
+    return read_life.keep(scratch[0..@intCast(n)]);
 }
 
 // ── Annotation layers (the third-party decoration package, §11.7) ────
@@ -751,7 +753,7 @@ pub fn editRange(handle: u32, bytes: []const u8) void {
 pub fn kvGet(key: []const u8) ?[]const u8 {
     const n = e.wl_kv_get(p(key.ptr), @intCast(key.len), p(&scratch), scratch.len);
     if (n < 0) return null;
-    return scratch[0..@intCast(n)];
+    return read_life.keep(scratch[0..@intCast(n)]);
 }
 pub fn kvPut(key: []const u8, value: []const u8) void {
     e.wl_kv_put(p(key.ptr), @intCast(key.len), p(value.ptr), @intCast(value.len));
@@ -808,7 +810,7 @@ pub const ConfigIter = struct {
 pub fn configList(key: []const u8) ?ConfigIter {
     const n = e.wl_config_get(p(key.ptr), @intCast(key.len), p(&config_scratch), config_scratch.len);
     if (n < 0) return null;
-    var cur: []const u8 = config_scratch[0..@intCast(n)];
+    var cur: []const u8 = read_life.keep(config_scratch[0..@intCast(n)]);
     const count = getUv(&cur) orelse return null;
     return .{ .cur = cur, .remaining = count };
 }
@@ -856,7 +858,7 @@ pub fn argInt(i: usize) i32 {
 pub fn argStr(i: usize) ?[]const u8 {
     const n = e.wl_arg_str(@intCast(i), p(&arg_scratch), arg_scratch.len);
     if (n < 0) return null;
-    return arg_scratch[0..@intCast(n)];
+    return read_life.keep(arg_scratch[0..@intCast(n)]);
 }
 /// Set the command's integer return value.
 pub fn setResultInt(n: i32) void {
@@ -1039,7 +1041,7 @@ var call_string_scratch: [1 << 16]u8 = undefined;
 /// slice is borrowed until the next `callString`.
 pub fn callString(cmd: []const u8) ?[]const u8 {
     const n = e.wl_call_string(p(cmd.ptr), @intCast(cmd.len), p(&call_string_scratch), call_string_scratch.len);
-    return if (n < 0) null else call_string_scratch[0..@intCast(n)];
+    return if (n < 0) null else read_life.keep(call_string_scratch[0..@intCast(n)]);
 }
 /// Invoke `cmd` with a single integer arg (e.g. buffer.switch).
 pub fn runInt(cmd: []const u8, n: i32) void {
@@ -1100,14 +1102,14 @@ pub fn commandRevision() u32 {
 pub fn commandName(i: usize) ?[]const u8 {
     const n = e.wl_command_name(@intCast(i), p(&scratch), scratch.len);
     if (n < 0) return null;
-    return scratch[0..@intCast(n)];
+    return read_life.keep(scratch[0..@intCast(n)]);
 }
 /// The `i`-th command.s summary (into `arg_scratch`, so it survives a paired
 /// `commandName` read), or null.
 pub fn commandSummary(i: usize) ?[]const u8 {
     const n = e.wl_command_summary(@intCast(i), p(&arg_scratch), arg_scratch.len);
     if (n < 0) return null;
-    return arg_scratch[0..@intCast(n)];
+    return read_life.keep(arg_scratch[0..@intCast(n)]);
 }
 /// WHO the `i`-th command belongs to — the plugin that registered it, or
 /// `core`. Into its OWN scratch, so a caller may hold a name, a summary and an
@@ -1115,7 +1117,7 @@ pub fn commandSummary(i: usize) ?[]const u8 {
 pub fn commandOwner(i: usize) ?[]const u8 {
     const n = e.wl_command_owner(@intCast(i), p(&owner_scratch), owner_scratch.len);
     if (n < 0) return null;
-    return owner_scratch[0..@intCast(n)];
+    return read_life.keep(owner_scratch[0..@intCast(n)]);
 }
 /// How many arguments the `i`-th command declares, or null if unbound.
 pub fn commandArity(i: usize) ?usize {
@@ -1138,7 +1140,7 @@ pub fn commandArityRequired(i: usize) ?usize {
 pub fn commandMeta(name: []const u8) ?Presentation {
     const n = e.wl_command_meta(p(name.ptr), @intCast(name.len), p(&meta_scratch), meta_scratch.len);
     if (n < 0 or n > meta_scratch.len) return null;
-    return presentation.decode(meta_scratch[0..@intCast(n)]);
+    return presentation.decode(read_life.keep(meta_scratch[0..@intCast(n)]));
 }
 /// The keys that run `name` where the person is — the binding mode of the
 /// focused context, or the one a pick was opened from — shortest first, as a
@@ -1147,7 +1149,7 @@ pub fn commandMeta(name: []const u8) ?Presentation {
 pub fn keysFor(name: []const u8) []const u8 {
     const n = e.wl_keys_for(p(name.ptr), @intCast(name.len), p(&keys_scratch), keys_scratch.len);
     if (n < 0 or n > keys_scratch.len) return "";
-    return keys_scratch[0..@intCast(n)];
+    return read_life.keep(keys_scratch[0..@intCast(n)]);
 }
 /// The first (shortest) key `keysFor` answered, or "".
 pub fn firstKey(listing: []const u8) []const u8 {
@@ -1185,7 +1187,7 @@ pub const Standing = struct {
 pub fn commandAt(where: OfferContext, name: []const u8) ?Standing {
     const n = e.wl_command_at(@intFromEnum(where), p(name.ptr), @intCast(name.len), p(&standing_scratch), standing_scratch.len);
     if (n < 0 or n > standing_scratch.len) return null;
-    const text = standing_scratch[0..@intCast(n)];
+    const text = read_life.keep(standing_scratch[0..@intCast(n)]);
     var out: Standing = .{ .text = text };
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -1201,7 +1203,7 @@ pub fn commandAt(where: OfferContext, name: []const u8) ?Standing {
 pub fn commandArg(i: usize, k: usize) ?[]const u8 {
     const n = e.wl_command_arg(@intCast(i), @intCast(k), p(&param_scratch), param_scratch.len);
     if (n < 0) return null;
-    return param_scratch[0..@intCast(n)];
+    return read_life.keep(param_scratch[0..@intCast(n)]);
 }
 /// What `invokeIntention` did. `unknown` is not a refusal: the name is no
 /// intention, so the caller's other vocabulary (commands) still owns it.
@@ -1219,7 +1221,7 @@ pub fn invokeIntention(name: []const u8) Invocation {
     const n = e.wl_intent_invoke(p(name.ptr), @intCast(name.len), p(&intent_scratch), intent_scratch.len);
     if (n < 0) return .unknown;
     if (n == 0) return .invoked;
-    return .{ .refused = intent_scratch[0..@intCast(n)] };
+    return .{ .refused = read_life.keep(intent_scratch[0..@intCast(n)]) };
 }
 
 // ── Offers for a CHOSEN context (a toolbar, a context menu) ──────────
@@ -1301,7 +1303,7 @@ pub const Offers = struct {
 pub fn offersIn(where: OfferContext) Offers {
     const n = e.wl_offers_list(@intFromEnum(where), p(&offers_scratch), offers_scratch.len);
     if (n < 4 or n > offers_scratch.len) return .{ .bytes = &.{}, .count = 0 };
-    const bytes = offers_scratch[0..@intCast(n)];
+    const bytes = read_life.keep(offers_scratch[0..@intCast(n)]);
     return .{ .bytes = bytes, .count = std.mem.readInt(u32, bytes[0..4], .little) };
 }
 
@@ -1352,7 +1354,7 @@ var context_scratch: [2048]u8 = undefined;
 pub fn contextGet(key: []const u8) ?[]const u8 {
     const n = e.wl_context_get(p(key.ptr), @intCast(key.len), p(&context_scratch), context_scratch.len);
     if (n < 0) return null;
-    return context_scratch[0..@min(@as(usize, @intCast(n)), context_scratch.len)];
+    return read_life.keep(context_scratch[0..@min(@as(usize, @intCast(n)), context_scratch.len)]);
 }
 
 var places_scratch: [8192]u8 = undefined;
@@ -1363,7 +1365,7 @@ var places_scratch: [8192]u8 = undefined;
 pub fn places() ContextKeys {
     const n = e.wl_places(p(&places_scratch), places_scratch.len);
     const len: usize = if (n <= 0) 0 else @min(@as(usize, @intCast(n)), places_scratch.len);
-    return .{ .it = std.mem.splitScalar(u8, places_scratch[0..len], '\n'), .empty = len == 0 };
+    return .{ .it = std.mem.splitScalar(u8, read_life.keep(places_scratch[0..len]), '\n'), .empty = len == 0 };
 }
 
 /// Hear `on_subject_changed` whenever the entry opening `subject` (a
@@ -1388,7 +1390,7 @@ var changed_scratch: [4096]u8 = undefined;
 pub fn contextChanged() ContextKeys {
     const n = e.wl_context_changed(p(&changed_scratch), changed_scratch.len);
     const len: usize = if (n <= 0) 0 else @min(@as(usize, @intCast(n)), changed_scratch.len);
-    return .{ .it = std.mem.splitScalar(u8, changed_scratch[0..len], '\n'), .empty = len == 0 };
+    return .{ .it = std.mem.splitScalar(u8, read_life.keep(changed_scratch[0..len]), '\n'), .empty = len == 0 };
 }
 
 pub const ContextKeys = struct {
@@ -1417,7 +1419,7 @@ pub fn invokeIntentionIn(where: OfferContext, name: []const u8) Invocation {
     const n = e.wl_intent_invoke_at(@intFromEnum(where), p(name.ptr), @intCast(name.len), p(&intent_scratch), intent_scratch.len);
     if (n < 0) return .unknown;
     if (n == 0) return .invoked;
-    return .{ .refused = intent_scratch[0..@intCast(n)] };
+    return .{ .refused = read_life.keep(intent_scratch[0..@intCast(n)]) };
 }
 
 /// How THIS plugin's providers of `action` present their offer where they
@@ -1484,7 +1486,7 @@ pub fn bufferId(i: usize) ?i32 {
 pub fn bufferName(i: usize) ?[]const u8 {
     const n = e.wl_buffer_name(@intCast(i), p(&scratch), scratch.len);
     if (n < 0) return null;
-    return scratch[0..@intCast(n)];
+    return read_life.keep(scratch[0..@intCast(n)]);
 }
 pub fn bufferActive(i: usize) bool {
     return e.wl_buffer_active(@intCast(i)) != 0;
@@ -1504,7 +1506,7 @@ pub fn bufferDocked(i: usize) bool {
 pub fn bufferPath(i: usize) ?[]const u8 {
     const n = e.wl_buffer_path(@intCast(i), p(&scratch), scratch.len);
     if (n < 0) return null;
-    return scratch[0..@intCast(n)];
+    return read_life.keep(scratch[0..@intCast(n)]);
 }
 /// Whether the `i`-th buffer holds edits its file never received. Null when
 /// unanswerable. A tool projection is never dirty — it has no file to write.
@@ -1517,7 +1519,7 @@ pub fn bufferDirty(i: usize) ?bool {
 pub fn bufferLang(i: usize) ?[]const u8 {
     const n = e.wl_buffer_lang(@intCast(i), p(&scratch), scratch.len);
     if (n < 0) return null;
-    return scratch[0..@intCast(n)];
+    return read_life.keep(scratch[0..@intCast(n)]);
 }
 /// The `i`-th buffer's document length, or null when it holds no text.
 pub fn bufferByteLen(i: usize) ?usize {
@@ -1529,7 +1531,7 @@ pub fn bufferByteLen(i: usize) ?usize {
 pub fn bufferTool(i: usize) ?[]const u8 {
     const n = e.wl_buffer_tool(@intCast(i), p(&scratch), scratch.len);
     if (n < 0) return null;
-    return scratch[0..@intCast(n)];
+    return read_life.keep(scratch[0..@intCast(n)]);
 }
 
 // ── Instanced tool buffers ───────────────────────────────────────────
@@ -1867,11 +1869,11 @@ pub fn menuBindingCount() usize {
 }
 pub fn menuBindingKey(i: usize) []const u8 {
     const n = e.wl_menu_binding_key(@intCast(i), p(&scratch), scratch.len);
-    return if (n < 0) "" else scratch[0..@intCast(n)];
+    return if (n < 0) "" else read_life.keep(scratch[0..@intCast(n)]);
 }
 pub fn menuBindingCmd(i: usize) []const u8 {
     const n = e.wl_menu_binding_cmd(@intCast(i), p(&arg_scratch), arg_scratch.len);
-    return if (n < 0) "" else arg_scratch[0..@intCast(n)];
+    return if (n < 0) "" else read_life.keep(arg_scratch[0..@intCast(n)]);
 }
 /// Whether the `i`-th binding opens a submenu (a group) vs a leaf command.
 pub fn menuBindingIsGroup(i: usize) bool {
@@ -1903,8 +1905,8 @@ pub fn menuBindingIntent(i: usize) ?MenuIntent {
     if (n < 0) return null;
     const m = e.wl_menu_binding_intent_note(@intCast(i), p(&hint_note_scratch), hint_note_scratch.len);
     return .{
-        .name = hint_scratch[0..@intCast(n)],
-        .note = if (m < 0) "" else hint_note_scratch[0..@intCast(m)],
+        .name = read_life.keep(hint_scratch[0..@intCast(n)]),
+        .note = if (m < 0) "" else read_life.keep(hint_note_scratch[0..@intCast(m)]),
         .ready = status == 1,
     };
 }
@@ -2022,7 +2024,7 @@ pub fn provideCompletion() void {
 /// async source must copy it before deferring.
 pub fn completionPrefix() []const u8 {
     const n = e.wl_completion_prefix(p(&prefix_scratch), prefix_scratch.len);
-    return prefix_scratch[0..n];
+    return read_life.keep(prefix_scratch[0..n]);
 }
 /// Offer one candidate for `session` (accretes into a batch flushed by commit).
 pub fn capsItem(session: u32, it: Completion) void {
@@ -2124,7 +2126,7 @@ pub fn capsDecline(session: u32) void {
 /// unbacked/scratch buffer. Call from an exported `on_activate` fn.
 pub fn activatePath() []const u8 {
     const n = e.wl_activate_path(p(&scratch), scratch.len);
-    return scratch[0..@intCast(n)];
+    return read_life.keep(scratch[0..@intCast(n)]);
 }
 
 // ── Structural read + subbuffers ─────────────────────────────────────
@@ -2136,7 +2138,7 @@ pub fn nodeAt(offset: usize) ?Node {
     var span: [2]u32 = undefined;
     const n = e.wl_node_at(@intCast(offset), p(&scratch), scratch.len, p(&span));
     if (n < 0) return null;
-    return .{ .kind = scratch[0..@intCast(n)], .start = span[0], .end = span[1] };
+    return .{ .kind = read_life.keep(scratch[0..@intCast(n)]), .start = span[0], .end = span[1] };
 }
 
 /// The smallest named tree-sitter node STRICTLY enclosing `[r.start, r.end)`
@@ -2145,7 +2147,7 @@ pub fn nodeEnclosing(r: Range) ?Node {
     var span: [2]u32 = undefined;
     const n = e.wl_node_enclosing(@intCast(r.start), @intCast(r.end), p(&scratch), scratch.len, p(&span));
     if (n < 0) return null;
-    return .{ .kind = scratch[0..@intCast(n)], .start = span[0], .end = span[1] };
+    return .{ .kind = read_life.keep(scratch[0..@intCast(n)]), .start = span[0], .end = span[1] };
 }
 
 pub const Capture = struct { name: []const u8, start: usize, end: usize };
@@ -2208,7 +2210,7 @@ pub fn queryCapture(i: usize) ?Capture {
     var span: [2]u32 = undefined;
     const n = e.wl_query_capture(@intCast(i), p(&scratch), scratch.len, p(&span));
     if (n < 0) return null;
-    return .{ .name = scratch[0..@intCast(n)], .start = span[0], .end = span[1] };
+    return .{ .name = read_life.keep(scratch[0..@intCast(n)]), .start = span[0], .end = span[1] };
 }
 /// The named children of the smallest node at `off` (structural descent);
 /// returns the count, read back with `queryCapture(i)`. 0 if none/no grammar.
@@ -2250,7 +2252,7 @@ var designation_scratch: [8192]u8 = undefined;
 pub fn designation() ?[]const u8 {
     const n = e.wl_entry_designation(p(&designation_scratch), designation_scratch.len);
     if (n < 0) return null;
-    return designation_scratch[0..@min(@as(usize, @intCast(n)), designation_scratch.len)];
+    return read_life.keep(designation_scratch[0..@min(@as(usize, @intCast(n)), designation_scratch.len)]);
 }
 
 /// Declare the designation the entry this call is about represents: a
@@ -2334,7 +2336,7 @@ pub fn registerText() []const u8 {
 }
 pub fn registerTextIn(name: u8) []const u8 {
     const n = e.wl_register_text(p(&reg_scratch), reg_scratch.len, name);
-    return reg_scratch[0..@intCast(n)];
+    return read_life.keep(reg_scratch[0..@intCast(n)]);
 }
 pub fn registerLinewiseIn(name: u8) bool {
     return e.wl_register_linewise(name) != 0;
@@ -3149,7 +3151,7 @@ pub fn envPublish(vars: []const u8) i32 {
 
 pub fn placeRoot() []const u8 {
     const n = e.wl_place_root(p(&scratch), scratch.len);
-    return if (n <= 0) "" else scratch[0..@intCast(n)];
+    return if (n <= 0) "" else read_life.keep(scratch[0..@intCast(n)]);
 }
 
 /// What `rel` IS *inside* this dispatch's place — the marker query
@@ -3253,7 +3255,7 @@ pub fn procFilter(argv: []const []const u8, r: Range) void {
 pub fn fsRead(fpath: []const u8) ?[]const u8 {
     const n = e.wl_fs_read(p(fpath.ptr), @intCast(fpath.len), p(&scratch), scratch.len);
     if (n < 0) return null;
-    return scratch[0..@intCast(n)];
+    return read_life.keep(scratch[0..@intCast(n)]);
 }
 /// What `fpath` is, without reading it. Perm: fs_read.
 ///
@@ -3321,7 +3323,7 @@ pub fn fsAppend(fpath: []const u8, bytes: []const u8) bool {
 pub fn fsList(authority: []const u8, dir: []const u8) ?[]const u8 {
     const n = e.wl_fs_list(p(authority.ptr), @intCast(authority.len), p(dir.ptr), @intCast(dir.len), p(&scratch), scratch.len);
     if (n < 0) return null;
-    return scratch[0..@intCast(n)];
+    return read_life.keep(scratch[0..@intCast(n)]);
 }
 
 /// Typed status returned by the target-scoped filesystem membrane.  A
@@ -3657,7 +3659,7 @@ var slot_scratch: [1 << 16]u8 = undefined;
 pub fn payloadRead(session: u32) []const u8 {
     const n = e.wl_payload_read(@bitCast(session), p(&slot_scratch), slot_scratch.len);
     if (n < 0) return &.{};
-    return slot_scratch[0..@intCast(n)];
+    return read_life.keep(slot_scratch[0..@intCast(n)]);
 }
 
 // ── Consuming a slot: the other half of declare/bind ──────────────────
@@ -3718,7 +3720,7 @@ pub const Fire = struct {
     pub fn result(self: Fire, i: usize) ?[]const u8 {
         const n = e.wl_slot_result(@bitCast(self.session), @intCast(i), p(&slot_scratch), slot_scratch.len);
         if (n < 0) return null;
-        return slot_scratch[0..@intCast(n)];
+        return read_life.keep(slot_scratch[0..@intCast(n)]);
     }
 
     /// WHO answered `i`. Attribution is data you are given, not something
@@ -3726,7 +3728,7 @@ pub const Fire = struct {
     pub fn provider(self: Fire, i: usize) ?[]const u8 {
         const n = e.wl_slot_result_provider(@bitCast(self.session), @intCast(i), p(&provider_scratch), provider_scratch.len);
         if (n < 0) return null;
-        return provider_scratch[0..@intCast(n)];
+        return read_life.keep(provider_scratch[0..@intCast(n)]);
     }
 
     pub fn deinit(self: Fire) void {

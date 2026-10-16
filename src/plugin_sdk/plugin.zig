@@ -41,7 +41,9 @@ pub fn exportCallback(comptime logical_name: []const u8, comptime function: anyt
     const function_info = @typeInfo(function_type).@"fn";
     if (function_info.params.len != entry.params.len)
         @compileError("callback arity does not match membrane contract: " ++ logical_name);
-    @export(function, .{ .name = contract.export_prefix ++ logical_name });
+    // Every entry the host makes is an ENTRY: what the plugin reads during it
+    // stays valid for all of it (`entry.zig`).
+    @export(@import("entry.zig").wrap(function), .{ .name = contract.export_prefix ++ logical_name });
 }
 
 /// One command. `call` is the erased entry point — write `weft.thunk(handler)`

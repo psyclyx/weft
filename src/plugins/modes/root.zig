@@ -73,12 +73,9 @@ fn on_activate() callconv(.c) void {
 
 /// Run the current file with its language's interpreter, output into *run*.
 fn langRun() void {
-    // Copied out: `path` borrows the read scratch, which the next host call
-    // (focusing *run*, starting the run) reuses — the argv would carry
-    // whatever overwrote it.
-    const read = weft.path() orelse return;
-    const path = weft.allocator.dupe(u8, read) catch return;
-    defer weft.allocator.free(path);
+    // Held across host calls (focusing *run*, starting the run): a read's
+    // answer lives for the whole entry (`plugin_sdk/entry.zig`).
+    const path = weft.path() orelse return;
     const l = langFor(path) orelse return;
     if (l.run.len == 0) return; // no runner for this language
     runSubst(l.run, path);

@@ -2526,6 +2526,9 @@ test "e2e/place: a second project gets its own REPL, and neither captures the ot
 // path into a shell line (`sh {}`), so a file whose name held a space or a
 // quote ran something else, or nothing. Its runner is an argv now, and the
 // path is one argument whatever it contains; the output streams into *run*.
+// It also holds the SDK's read guarantee: the plugin reads the path, then
+// makes host calls whose reads used to overwrite it, then runs it — the
+// path stays its own for the whole call (plugin_sdk/entry.zig).
 test "e2e/run: a file whose name has a space and a quote runs as itself" {
     const gpa = t.allocator;
     var proj: Project = undefined;

@@ -217,7 +217,7 @@ var key_scratch: [1024]u8 = undefined;
 pub fn atCursor() ?[]const u8 {
     const n = e.wl_proj_at_cursor(p(&key_scratch), key_scratch.len);
     if (n <= 0) return null;
-    return key_scratch[0..@intCast(n)];
+    return @import("entry.zig").keep(key_scratch[0..@intCast(n)]);
 }
 
 /// Flip a row's fold and re-render. No producer is consulted: a fold changes
@@ -279,7 +279,7 @@ pub fn rows(out: []Row) []const Row {
     if (n <= 0) return out[0..0];
     var count: usize = 0;
     var i: usize = 0;
-    const bytes = rows_buf[0..@intCast(n)];
+    const bytes = @import("entry.zig").keep(rows_buf[0..@intCast(n)]);
     while (i < bytes.len and count < out.len) {
         const k_end = std.mem.indexOfScalarPos(u8, bytes, i, 0) orelse break;
         const t_end = std.mem.indexOfScalarPos(u8, bytes, k_end + 1, 0) orelse break;
