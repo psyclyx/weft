@@ -1,6 +1,6 @@
 //! direnv — per-project environment tooling (design §6.6), a `.wasm` plugin
 //! (perms `{proc, timer}`). It surfaces direnv's state/actions into tool
-//! buffers via the native `proc` surface: status, allow (TOFU-shaped — runs
+//! buffers, streamed as direnv writes them: status, allow (TOFU-shaped — runs
 //! arbitrary code on the target host, hence a deliberate explicit action), and
 //! reload. Applying the exported env to sibling `proc`/LSP calls (the
 //! `direnv.env-for` provider) is the next step, once a per-project env overlay
@@ -15,17 +15,19 @@
 
 const std = @import("std");
 const weft = @import("weft");
+const output = @import("weft_output");
 
 const cmds = [_]weft.CommandEntry{
     .{ .name = "direnv.status", .arity = .whole, .call = status, .summary = "Say what direnv makes of this directory.", .label = "Show Direnv Status", .menu = "Terminal/Direnv", .group = "direnv", .order = 1 },
     .{ .name = "direnv.allow", .arity = .whole, .call = allow, .summary = "Allow this directory's .envrc.", .label = "Allow Direnv", .menu = "Terminal/Direnv", .group = "direnv", .order = 2, .icon = "shield-check" },
     .{ .name = "direnv.reload", .arity = .whole, .call = reload, .summary = "Re-read the environment direnv provides.", .label = "Reload Direnv Environment", .menu = "Terminal/Direnv", .group = "direnv", .order = 3, .icon = "refresh" },
     .{ .name = "direnv.apply", .arity = .whole, .call = apply, .summary = "Apply this directory's environment.", .label = "Apply Direnv Environment", .menu = "Terminal/Direnv", .group = "direnv", .order = 4 },
+    .{ .name = "direnv.visit", .call = output.visit, .arity = .one, .summary = "Open the location the focused row names.", .internal = true },
 };
 
-/// The fill token `direnv.apply` waits on. Any other fill in this buffer (a
-/// `status`, an `allow`) must not be read as an environment.
-const apply_token: u32 = 1;
+fn initExtra() void {
+    output.installMode("direnv", "direnv.visit");
+}
 
 fn describeExtra() void {
     weft.requestPerm(.proc);
@@ -36,18 +38,31 @@ fn describeExtra() void {
     weft.requestPerm(.env);
 }
 
-fn show(cmd: []const u8) void {
-    weft.runStr("buffer.create", "*direnv*");
-    weft.procToBuffer(cmd, "*direnv*", if (std.mem.startsWith(u8, cmd, "direnv exec")) apply_token else 0);
+/// Run `argv` (direnv itself — no shell) into `*direnv*`, its messages and
+/// errors as they come.
+fn show(argv: []const []const u8, done: ?*const fn (code: i32) void) void {
+    output.show(argv, "*direnv*", "direnv", .{ .want_err = true, .exit = done });
 }
+
 fn status() void {
-    show("direnv status 2>&1");
+    show(&.{ "direnv", "status" }, null);
 }
+
 fn allow() void {
-    show("direnv allow 2>&1 && echo allowed");
+    show(&.{ "direnv", "allow" }, said("allowed"));
 }
+
 fn reload() void {
-    show("direnv reload 2>&1 && echo reloaded");
+    show(&.{ "direnv", "reload" }, said("reloaded"));
+}
+
+/// direnv says nothing when it succeeds: say it for it.
+fn said(comptime word: []const u8) *const fn (code: i32) void {
+    return struct {
+        fn f(code: i32) void {
+            weft.echo(if (code == 0) "direnv: " ++ word else "direnv: failed — see *direnv*");
+        }
+    }.f;
 }
 
 /// `direnv.apply` — hand this place the environment its `.envrc` describes, so
@@ -59,49 +74,29 @@ fn reload() void {
 /// cost is honest and named: a value containing a newline cannot survive this
 /// round trip, and is dropped rather than truncated.
 fn apply() void {
-    show("direnv exec . env 2>&1");
+    if (!weft.exec(.{ .argv = &.{ "direnv", "exec", ".", "env" } }, applied))
+        weft.echo("direnv: could not run direnv");
 }
 
-/// The environment landed in `*direnv*`. Read it back and publish it FOR THIS
-/// PLACE — the host bound the entry this fill captured, so `envPublish` names
-/// the place the command was run in, not wherever focus has since moved.
-fn on_fill_token(token: u32) callconv(.c) void {
-    if (token != apply_token) return;
-    const total = weft.byteLen();
-    if (total == 0) return weft.echo("direnv: nothing to apply here");
-
-    // Sized to the environment, not to a guess about it. A fixed buffer here
-    // would silently truncate a large one — and half an environment is worse
-    // than none: the child gets some of the project's PATH and none of its
-    // toolchain, then fails somewhere unrelated. A guest has a real growable
-    // allocator (`weft.allocator`), so the limit has no reason to exist.
-    const vars = weft.allocator.alloc(u8, total) catch
+/// The environment, published FOR THIS PLACE: an exec continuation runs in
+/// the place its command was issued in, not wherever focus has moved since.
+fn applied(r: weft.ExecDone) void {
+    if (!r.ok()) {
+        var err: [256]u8 = undefined;
+        const why = r.firstLine(.err, &err);
+        return weft.echo(if (why.len > 0) why else "direnv: could not read this directory's environment");
+    }
+    // Sized to the environment, not to a guess about it: half an environment
+    // is worse than none.
+    const vars = r.dupe(weft.allocator, .out) catch
         return weft.echo("direnv: environment too large to apply");
     defer weft.allocator.free(vars);
-
-    var w: usize = 0;
-    var base: usize = 0;
-    while (base < total) {
-        const chunk = weft.slice(base, total);
-        if (chunk.len == 0) break;
-        for (chunk) |b| {
-            // Chunk boundaries are safe to ignore: this is a byte-for-byte
-            // copy with one substitution, so a record split across two reads
-            // rejoins itself.
-            vars[w] = if (b == '\n') 0 else b;
-            w += 1;
-        }
-        base += chunk.len;
-    }
-    if (w == 0) return weft.echo("direnv: nothing to apply here");
-    if (weft.envPublish(vars[0..w]) < 0) return weft.echo("direnv: could not apply");
+    if (vars.len == 0) return weft.echo("direnv: nothing to apply here");
+    std.mem.replaceScalar(u8, vars, '\n', 0);
+    if (weft.envPublish(vars) < 0) return weft.echo("direnv: could not apply");
     weft.echo("direnv: applied to this project");
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
-}
-
-comptime {
-    weft.exportCallback("on_fill_token", &on_fill_token);
+    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra }).exportAll();
 }

@@ -1811,7 +1811,7 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
     // git holds NO FILESYSTEM AUTHORITY AT ALL — the payoff doc/place.md §4.2
     // predicted, landed. `fs_write` went first: the patch, each draft's
-    // message, and the rebase plan all go out through `wl_proc_spool`, which
+    // message, and the rebase plan all go out through `wl_exec`'s input, which
     // names and removes their temps host-side. `fs_read` followed it: finding
     // the repository root is now reading the place the dispatch is already in
     // (`wl_place_root`), and detecting an in-progress rebase is two
@@ -1873,7 +1873,7 @@ test "wasm plugin: run-command runs a shell command into a tool buffer (async)" 
     defer loop.deinit();
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    const plugin = try loadPlugin(&engine, &env.ctx, "run", @embedFile("guest_run_wasm"), .{ .loop = &loop });
+    const plugin = try loadPlugin(&engine, &env.ctx, "run", @embedFile("guest_run_wasm"), .{ .loop = &loop, .pool = env.pool });
     defer plugin.deinit();
 
     // A deterministic command (echo) — proves the proc→buffer path end to end.
@@ -1884,11 +1884,7 @@ test "wasm plugin: run-command runs a shell command into a tool buffer (async)" 
         break :blk null;
     };
     try t.expect(buf != null);
-    var rounds: usize = 0;
-    while (rounds < 20_000_000 and buf.?.textEditor().?.text().byteLen() == 0) : (rounds += 1) {
-        _ = loop.tick();
-        std.Thread.yield() catch {};
-    }
+    drainPlugin(&loop, plugin);
     const s = try buf.?.textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     // One row, rendered as a projection: rows are newline-TERMINATED, so an
@@ -1984,7 +1980,7 @@ test "wasm plugin: console-send runs the current line and appends output" {
     defer loop.deinit();
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    const plugin = try loadPlugin(&engine, &env.ctx, "console", @embedFile("guest_console_wasm"), .{ .loop = &loop });
+    const plugin = try loadPlugin(&engine, &env.ctx, "console", @embedFile("guest_console_wasm"), .{ .loop = &loop, .pool = env.pool });
     defer plugin.deinit();
 
     _ = try command.run(&env.commands, &env.ctx, "console.open", &.{}); // focus *console*
@@ -1992,14 +1988,13 @@ test "wasm plugin: console-send runs the current line and appends output" {
     try ed.insertText(gpa, "echo con-ok"); // type a command line
     const before = ed.doc.commitCount();
     _ = try command.run(&env.commands, &env.ctx, "console.send", &.{});
-    var rounds: usize = 0;
-    while (rounds < 20_000_000 and ed.doc.commitCount() == before) : (rounds += 1) {
-        _ = loop.tick();
-        std.Thread.yield() catch {};
-    }
+    drainPlugin(&loop, plugin);
+    try t.expect(ed.doc.commitCount() > before);
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
-    try t.expectEqualStrings("echo con-ok\ncon-ok", s); // output appended below the input
+    // Output appended below the input, as the command wrote it — its own
+    // newline included, so the next line typed starts on a line of its own.
+    try t.expectEqualStrings("echo con-ok\ncon-ok\n", s);
 }
 
 test "wasm plugin: vim wires the modal keymap and runs motions/operators as .wasm" {
@@ -3049,6 +3044,22 @@ fn namedBuffer(buffers: anytype, name: []const u8) ?*@import("../Buffers.zig").B
 }
 
 /// Run the loop until every spawned job has delivered (or been dropped).
+/// Run a plugin's work to the end: async-loop jobs, and the processes it is
+/// streaming — whose output reaches it through `on_poll`, raised here as the
+/// frame loop raises it — until every job has landed and every stream closed.
+fn drainPlugin(loop: *async_loop.Loop, p: *wasm_abi.WasmPlugin) void {
+    var rounds: usize = 0;
+    while (rounds < 20_000_000) : (rounds += 1) {
+        _ = loop.tick();
+        _ = wasm_host.notifyPollIfReady(p);
+        const streaming = for (p.resources.streams.slice()) |maybe| {
+            if (maybe != null) break true;
+        } else false;
+        if (loop.tasks.items.len == 0 and !streaming) return;
+        std.Thread.yield() catch {};
+    }
+}
+
 fn drainJobs(loop: *async_loop.Loop) void {
     var rounds: usize = 0;
     while (rounds < 20_000_000 and loop.tasks.items.len > 0) : (rounds += 1) {
@@ -3057,7 +3068,7 @@ fn drainJobs(loop: *async_loop.Loop) void {
     }
 }
 
-test "wasm plugin: a proc fill lands in the entry it captured, not the focused one" {
+test "wasm plugin: a run's output lands in the entry it was started for, not the focused one" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -3068,7 +3079,7 @@ test "wasm plugin: a proc fill lands in the entry it captured, not the focused o
     defer loop.deinit();
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    const plugin = try loadPlugin(&engine, &env.ctx, "run", @embedFile("guest_run_wasm"), .{ .loop = &loop });
+    const plugin = try loadPlugin(&engine, &env.ctx, "run", @embedFile("guest_run_wasm"), .{ .loop = &loop, .pool = env.pool });
     defer plugin.deinit();
 
     _ = try command.run(&env.commands, &env.ctx, "run.command", &.{.{ .string = "echo captured" }});
@@ -3080,7 +3091,7 @@ test "wasm plugin: a proc fill lands in the entry it captured, not the focused o
     const elsewhere = env.buffers.active();
     try t.expectEqualStrings("*elsewhere*", elsewhere.name);
 
-    drainJobs(&loop);
+    drainPlugin(&loop, plugin);
 
     const s = try out.textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
@@ -3089,7 +3100,7 @@ test "wasm plugin: a proc fill lands in the entry it captured, not the focused o
     try t.expectEqualStrings("*elsewhere*", env.buffers.active().name); // delivery never refocuses
 }
 
-test "wasm plugin: a proc fill whose entry closed is dropped, never redirected" {
+test "wasm plugin: a run whose entry closed is dropped, never redirected" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -3100,7 +3111,7 @@ test "wasm plugin: a proc fill whose entry closed is dropped, never redirected" 
     defer loop.deinit();
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    const plugin = try loadPlugin(&engine, &env.ctx, "run", @embedFile("guest_run_wasm"), .{ .loop = &loop });
+    const plugin = try loadPlugin(&engine, &env.ctx, "run", @embedFile("guest_run_wasm"), .{ .loop = &loop, .pool = env.pool });
     defer plugin.deinit();
 
     _ = try command.run(&env.commands, &env.ctx, "run.command", &.{.{ .string = "echo vanished" }});
@@ -3110,7 +3121,7 @@ test "wasm plugin: a proc fill whose entry closed is dropped, never redirected" 
     _ = try command.run(&env.commands, &env.ctx, "buffer.close-unmodified", &.{});
     try t.expect(namedBuffer(&env.buffers, "*output*") == null);
 
-    drainJobs(&loop);
+    drainPlugin(&loop, plugin);
 
     // The output went nowhere — not onto the survivor, not into a resurrected
     // buffer of the same name. It is noted once and dropped.
@@ -3124,7 +3135,7 @@ test "wasm plugin: a proc fill whose entry closed is dropped, never redirected" 
     }
 }
 
-test "wasm plugin: on_fill_token paints the entry its fill captured, off-focus" {
+test "wasm plugin: an exec continuation paints the entry it was issued from, off-focus" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -3144,7 +3155,7 @@ test "wasm plugin: on_fill_token paints the entry its fill captured, off-focus" 
 
     drainJobs(&loop);
 
-    // The guest's fill handler ran against the BOUND entry, not the focused
+    // The guest's continuation ran against the BOUND entry, not the focused
     // one: `*git*` holds the parsed model — never the raw porcelain — and the
     // bystander it could have painted instead stayed empty.
     const s = try model.textEditor().?.text().toOwnedSlice(gpa);
@@ -3158,7 +3169,7 @@ test "wasm plugin: on_fill_token paints the entry its fill captured, off-focus" 
 }
 
 // ── The spool: a real file for the child, no fs perm for the guest ─────────
-// doc/place.md §4.2. `wl_proc_spool` exists so "a subprocess needs a real
+// doc/place.md §4.2. `wl_exec`'s input exists so "a subprocess needs a real
 // path" stops being a reason to grant fs_write. Two things must hold for that
 // trade to be honest: the child really does read the guest's bytes off disk,
 // and the guest cannot keep — or even usefully learn — where they were.
@@ -3167,62 +3178,6 @@ test "wasm plugin: on_fill_token paints the entry its fill captured, off-focus" 
 fn spooledPath(out: []const u8) ?[]const u8 {
     const i = std.mem.indexOf(u8, out, "at=") orelse return null;
     return out[i + 3 ..];
-}
-
-test "wasm plugin: wl_proc_spool feeds the child a host-named temp, with no fs perm at all" {
-    const gpa = t.allocator;
-    var env: Env = undefined;
-    try Env.init(gpa, &env);
-    defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
-
-    var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
-    defer loop.deinit();
-    var engine = try wasm.Engine.init(gpa);
-    defer engine.deinit();
-    const plugin = try loadPlugin(&engine, &env.ctx, "spool", @embedFile("guest_spool_wasm"), .{ .loop = &loop });
-    defer plugin.deinit();
-
-    // The trade, stated as a declaration: proc+timer, and NO filesystem
-    // authority whatsoever. Everything below is done by a guest that could not
-    // open a file if it tried.
-    try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
-    try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
-    try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
-
-    _ = try command.run(&env.commands, &env.ctx, "spool.ok", &.{});
-    drainJobs(&loop);
-    const ok_buf = namedBuffer(&env.buffers, "*spool*") orelse return error.TestExpectedEqual;
-    const ok_out = try ok_buf.textEditor().?.text().toOwnedSlice(gpa);
-    defer gpa.free(ok_out);
-
-    // The child read the spooled bytes back off a real file.
-    try t.expect(std.mem.indexOf(u8, ok_out, "in=hello spool") != null);
-    // At a path the HOST chose. The guest passed a command and bytes — never a
-    // path, and never a directory to put one in.
-    const ok_at = spooledPath(ok_out) orelse return error.TestExpectedEqual;
-    try t.expect(std.mem.startsWith(u8, ok_at, "/tmp/weft-spool-"));
-    // And it is gone. The guest deliberately leaked the path through its own
-    // command's stdout — the strongest thing a guest can do to hold on to it —
-    // and the name it now has refers to nothing.
-    try t.expectEqual(file.Kind.none, file.statKind(gpa, ok_at));
-
-    // Same on the FAILURE path, which is where the old in-plugin temps used to
-    // survive: git's `rm -f` rode on the command it was appended to, so an
-    // apply or commit that died took the cleanup with it.
-    _ = try command.run(&env.commands, &env.ctx, "spool.fail", &.{});
-    drainJobs(&loop);
-    const fail_buf = namedBuffer(&env.buffers, "*spool-fail*") orelse return error.TestExpectedEqual;
-    const fail_out = try fail_buf.textEditor().?.text().toOwnedSlice(gpa);
-    defer gpa.free(fail_out);
-    try t.expect(std.mem.indexOf(u8, fail_out, "in=goodbye spool") != null);
-    const fail_at = spooledPath(fail_out) orelse return error.TestExpectedEqual;
-    try t.expect(std.mem.startsWith(u8, fail_at, "/tmp/weft-spool-"));
-    try t.expectEqual(file.Kind.none, file.statKind(gpa, fail_at));
-
-    // Two spools never share a path, so one in flight cannot eat another's
-    // input — the property git's per-draft message files used to hand-roll.
-    try t.expect(!std.mem.eql(u8, ok_at, fail_at));
 }
 
 // ── The projection: a node tree in, no offset out ──────────────────────────
@@ -3431,7 +3386,7 @@ test "membrane: no projection door takes or returns a DOCUMENT offset" {
         try t.expect(std.mem.indexOf(u8, entry.doc, "offset") == null);
     }
     try t.expect(spans_seen);
-    try t.expectEqual(@as(usize, 9), found);
+    try t.expectEqual(@as(usize, 10), found); // + wl_proj_extend
 }
 
 test "projection: an edited row is found by its ANCHORS, not by where it was rendered" {
@@ -3606,19 +3561,6 @@ test "membrane: wl_exec_status and wl_exec_read answer only inside a delivery" {
     const plugin = try loadPlugin(&engine, &env.ctx, "exec_gate", @embedFile("guest_exec_wasm"), .{});
     defer plugin.deinit();
     try t.expectEqual(@as(?plugin_resources.Resources.Exec, null), plugin.resources.exec);
-}
-
-test "membrane: wl_proc_spool returns nothing to the guest" {
-    // The other half of "a guest cannot name the temp": the door has no result
-    // and no out-pointer, so there is no channel on which the host could hand
-    // the path back. Read off the contract table rather than asserted about the
-    // handler, because the table is what the guest's extern is checked against.
-    const spool = for (contract.imports) |e| {
-        if (std.mem.eql(u8, e.name, "wl_proc_spool")) break e;
-    } else return error.TestExpectedEqual;
-    try t.expectEqual(@as(usize, 0), spool.results.len);
-    try t.expectEqual(@as(usize, 7), spool.params.len); // (cmd, input, name) pairs + token
-    try t.expectEqual(contract.Perm.proc_timer, spool.perm orelse return error.TestExpectedEqual);
 }
 
 // ── A tool's instances are addressed by buffer, never by a module global ───

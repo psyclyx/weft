@@ -30,6 +30,10 @@ pub const Spec = struct {
     /// Keep a stdin pipe for `Process.send` (a protocol peer). Without it the
     /// child's stdin is the null device.
     duplex: bool = false,
+    /// stderr into the stdout stream, in the order the child wrote it (a
+    /// build's errors are its output). Without it, stderr's tail reaches
+    /// `Handlers.exit`.
+    merge_stderr: bool = false,
 };
 
 /// Where its output goes. Each handler is handed `ctx`.
@@ -40,6 +44,10 @@ pub const Handlers = struct {
     line: ?*const fn (ctx: ?*anyopaque, line: []const u8) void = null,
     /// stdout as it lands, unsplit (a protocol peer frames its own messages).
     chunk: ?*const fn (ctx: ?*anyopaque, bytes: []const u8) void = null,
+    /// After each batch of output handed over (once per poll that had some):
+    /// where a consumer that gathers lines publishes them, once per batch
+    /// rather than once per line.
+    drained: ?*const fn (ctx: ?*anyopaque) void = null,
     /// The exit, after the last of its output: the code (-1 by signal, or it
     /// never ran) and the tail of what it said on stderr.
     exit: ?*const fn (ctx: ?*anyopaque, code: i32, stderr: []const u8) void = null,
@@ -58,6 +66,12 @@ pub const Process = struct {
     pub fn send(self: Process, bytes: []const u8) void {
         const r = live(self) orelse return;
         e.wl_proc_send(r.handle, p(bytes.ptr), @intCast(bytes.len));
+    }
+
+    /// End its input (EOF on its stdin), after what was sent (`Spec.duplex`).
+    pub fn closeInput(self: Process) void {
+        const r = live(self) orelse return;
+        e.wl_proc_close_input(r.handle);
     }
 
     /// Kill it. Nothing more is delivered — not even its exit.
@@ -138,6 +152,9 @@ pub fn spawnWith(
         fn exit(raw: ?*anyopaque, code: i32, err: []const u8) void {
             H.exit(held(raw).*, code, err);
         }
+        fn drained(raw: ?*anyopaque) void {
+            H.drained(held(raw).*);
+        }
         fn release(gpa: std.mem.Allocator, raw: ?*anyopaque) void {
             gpa.destroy(held(raw));
         }
@@ -145,10 +162,11 @@ pub fn spawnWith(
     const held = weft.allocator.create(Ctx) catch return null;
     held.* = ctx;
     return spawn(spec, .{
-        .ctx = held,
+        .ctx = @ptrCast(held),
         .line = if (@hasDecl(H, "line")) Shim.line else null,
         .chunk = if (@hasDecl(H, "chunk")) Shim.chunk else null,
         .exit = if (@hasDecl(H, "exit")) Shim.exit else null,
+        .drained = if (@hasDecl(H, "drained")) Shim.drained else null,
         .release = Shim.release,
     });
 }
@@ -163,7 +181,8 @@ fn start(spec: Spec) ?u32 {
         if (i > 0) block.append(gpa, 0) catch return null;
         block.appendSlice(gpa, arg) catch return null;
     }
-    const h = e.wl_proc_spawn(p(block.items.ptr), @intCast(block.items.len), @intCast(spec.argv.len), @intFromBool(spec.duplex));
+    const flags: u32 = @as(u32, @intFromBool(spec.duplex)) | @as(u32, @intFromBool(spec.merge_stderr)) << 1;
+    const h = e.wl_proc_spawn(p(block.items.ptr), @intCast(block.items.len), @intCast(spec.argv.len), flags);
     return if (h < 0) null else @intCast(h);
 }
 
@@ -213,6 +232,10 @@ fn drain(slot: u32) void {
         taken += bytes.len;
         if (r.handlers.chunk) |f| f(r.handlers.ctx, bytes);
         if (r.handlers.line != null) lines(slot, bytes);
+    }
+    if (taken > 0) {
+        const r = &(slots.items[slot] orelse return);
+        if (r.handlers.drained) |f| f(r.handlers.ctx);
     }
     if (taken >= budget) return; // more next poll; the host keeps waking us
     const r = &(slots.items[slot] orelse return);

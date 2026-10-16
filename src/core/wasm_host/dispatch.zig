@@ -15,7 +15,7 @@ pub fn hEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     const msg = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(msg);
     // A dispatching entry answers the head that asked. A BACKGROUND entry
-    // (`on_activate`, `on_complete`, `on_fill_token`, …) has no head that
+    // (`on_activate`, `on_complete`, …) has no head that
     // asked, so what it says is a notice to the whole system
     // (`Buffers.notices`), shown briefly where core's own background refusals
     // already go. It used to trap — the message was lost and the rest of the guest's

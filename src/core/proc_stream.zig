@@ -64,6 +64,9 @@ pub const ProcStream = struct {
     /// stdin when it is a pipe (ripgrep does) must not wait on one nobody
     /// writes.
     duplex: bool,
+    /// stderr lands in the stdout stream, in the order the child wrote it — a
+    /// build's errors ARE its output. Without it the two are apart.
+    merge_stderr: bool = false,
     /// Signalled when output lands, so the frame loop wakes for it rather
     /// than polling (the pool's notify fd; none in a test without a loop).
     pool: *task.Pool,
@@ -103,6 +106,9 @@ pub const ProcStream = struct {
     /// `send()` calls that raced the still-in-flight spawn queue here;
     /// flushed to the child's stdin the instant it's published.
     pending_out: std.ArrayList(u8) = .empty,
+    /// `closeInput` was asked before the spawn landed: close stdin right
+    /// after the queued bytes are flushed. Guarded by `spawn_mutex`.
+    input_closed: bool = false,
     out_mutex: task.Mutex = .{},
     out_buf: std.ArrayList(u8) = .empty,
     /// stderr, kept apart from stdout (a protocol on stdout must not be
@@ -145,6 +151,8 @@ pub const ProcStream = struct {
     pub const Options = struct {
         /// Keep a stdin pipe (see `duplex`).
         duplex: bool = true,
+        /// stderr into the stdout stream (see `merge_stderr`).
+        merge_stderr: bool = false,
     };
 
     /// What `exit` holds while the child runs.
@@ -197,6 +205,7 @@ pub const ProcStream = struct {
             .argv_block = block,
             .argv = owned,
             .duplex = opts.duplex,
+            .merge_stderr = opts.merge_stderr,
             .pool = pool,
             .cwd_copy = cwd_dup,
             .environ = environ,
@@ -293,6 +302,10 @@ pub const ProcStream = struct {
         if (queued.items.len > 0) {
             if (s.child.stdin) |stdin| stdin.writeStreamingAll(io, queued.items) catch {};
         }
+        if (s.input_closed) if (s.child.stdin) |stdin| {
+            stdin.close(io);
+            s.child.stdin = null;
+        };
         s.spawned = true;
         s.spawn_mutex.unlock();
         queued.deinit(s.gpa);
@@ -321,7 +334,13 @@ pub const ProcStream = struct {
             }
             const err = mr.reader(1);
             const err_chunk = err.buffered();
-            if (err_chunk.len > 0) {
+            if (err_chunk.len > 0 and s.merge_stderr) {
+                s.out_mutex.lock();
+                s.out_buf.appendSlice(s.gpa, err_chunk) catch {};
+                s.out_mutex.unlock();
+                err.toss(err_chunk.len);
+                landed = true;
+            } else if (err_chunk.len > 0) {
                 s.out_mutex.lock();
                 const room = err_cap -| s.err_buf.items.len;
                 s.err_buf.appendSlice(s.gpa, err_chunk[0..@min(room, err_chunk.len)]) catch {};
@@ -424,6 +443,23 @@ pub const ProcStream = struct {
         s.spawn_mutex.unlock();
         const stdin = s.child.stdin orelse return;
         stdin.writeStreamingAll(s.io_threaded.io(), bytes) catch {};
+    }
+
+    /// Frame thread: end the child's input (EOF on its stdin), after whatever
+    /// was sent — what a tool that reads its whole input first (a prompt on
+    /// stdin, a filter) waits for. Before the spawn lands it is remembered
+    /// and done right after the queued bytes are flushed.
+    pub fn closeInput(s: *ProcStream) void {
+        s.spawn_mutex.lock();
+        if (!s.spawned) {
+            s.input_closed = true;
+            s.spawn_mutex.unlock();
+            return;
+        }
+        s.spawn_mutex.unlock();
+        const stdin = s.child.stdin orelse return;
+        stdin.close(s.io_threaded.io());
+        s.child.stdin = null;
     }
 
     /// Kill the child, JOIN the reader (so it can't touch freed state), reap,

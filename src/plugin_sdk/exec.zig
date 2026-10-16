@@ -1,8 +1,8 @@
 //! `exec` — run a command as an ARGV and get back what it said.
 //!
 //! What this replaces, and why it is a different thing rather than a nicer
-//! spelling of the same thing. The fill doors (`procToBuffer`, `procSpool`)
-//! take a SHELL STRING and a buffer name. Everything a plugin actually wants
+//! spelling of the same thing. The fill doors it replaced (`procToBuffer`,
+//! `procSpool`, since removed) took a SHELL STRING and a buffer name. Everything a plugin actually wants
 //! from a subprocess had to be reconstructed around that:
 //!
 //!   - **The exit status** did not cross at all, so git makes each command

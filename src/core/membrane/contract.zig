@@ -367,14 +367,12 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_proc_send", .handler = proc.hProcSend },
     .{ .name = "wl_proc_read", .handler = proc.hProcRead },
     .{ .name = "wl_proc_status", .handler = proc.hProcStatus },
+    .{ .name = "wl_proc_close_input", .handler = proc.hProcCloseInput },
     .{ .name = "wl_proc_close", .handler = proc.hProcClose },
     .{ .name = "wl_place_root", .handler = proc.hPlaceRoot },
     .{ .name = "wl_place_id", .handler = proc.hPlaceId },
     .{ .name = "wl_place_has", .handler = proc.hPlaceHas },
     .{ .name = "wl_env_publish", .handler = env_host.hEnvPublish },
-    .{ .name = "wl_proc_to_buffer", .handler = proc.hProcToBuffer },
-    .{ .name = "wl_proc_append_buffer", .handler = proc.hProcAppendBuffer },
-    .{ .name = "wl_proc_spool", .handler = proc.hProcSpool },
     .{ .name = "wl_proc_filter", .handler = proc.hProcFilter },
     .{ .name = "wl_exec", .handler = proc.hExec },
     .{ .name = "wl_exec_status", .handler = proc.hExecStatus },
@@ -382,6 +380,8 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
 
     // ── projection.zig — a node tree rendered into a text buffer ──────
     .{ .name = "wl_proj_begin", .handler = proj.hProjBegin },
+    .{ .name = "wl_proj_extend", .handler = proj.hProjExtend },
+    .{ .name = "wl_buffer_append", .handler = @import("../wasm_host/plugin.zig").wasmDoor(@import("../wasm_host/append.zig").appendBody, null) },
     .{ .name = "wl_proj_node", .handler = proj.hProjNode },
     .{ .name = "wl_proj_span", .handler = proj.hProjSpan },
     .{ .name = "wl_proj_rows", .handler = proj.hProjRows },
@@ -644,9 +644,6 @@ test "membrane contract: defineImports binds every table entry onto a real linke
 const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_shell_insert", .perm = .proc_timer }, // proc.zig hShellInsert: .proc + .timer
     .{ .name = "wl_proc_spawn", .perm = .proc }, // proc.zig hProcSpawn: .proc only (no .timer)
-    .{ .name = "wl_proc_to_buffer", .perm = .proc_timer }, // proc.zig hProcToBuffer: .proc + .timer
-    .{ .name = "wl_proc_append_buffer", .perm = .proc_timer }, // proc.zig hProcAppendBuffer: .proc + .timer
-    .{ .name = "wl_proc_spool", .perm = .proc_timer }, // proc.zig hProcSpool → spawnFill: .proc + .timer
     .{ .name = "wl_proc_filter", .perm = .proc_timer }, // proc.zig hProcFilter: .proc + .timer
     .{ .name = "wl_exec", .perm = .proc_timer }, // proc.zig hExec: .proc + .timer
     .{ .name = "wl_repl_start", .perm = .proc_timer }, // sessions.zig hReplStart: .proc + .timer

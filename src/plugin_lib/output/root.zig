@@ -31,12 +31,23 @@ pub const Target = targets.Target;
 const Slot = struct {
     name: []u8,
     table: targets.Table = .{},
+    /// The run filling this buffer now; a new run kills it.
+    run: ?weft.Process = null,
+    /// Lines the run has said since the rows were last published (owned).
+    pending: std.ArrayList([]u8) = .empty,
+    /// Rows this run has published.
+    rows: usize = 0,
 };
 
+/// The most rows one run publishes. A tool that never stops talking (`yes`)
+/// must not grow a buffer without bound: past this its run is stopped, and
+/// the buffer says so.
+const max_rows = 200_000;
+
 /// One per output buffer, minted on first use and kept for `visit` to read
-/// after the command is long finished.
-var slots: [4]Slot = undefined;
-var slot_count: usize = 0;
+/// after the command is long finished. As many as the plugin's buffers: a
+/// fixed table here once meant a fifth conversation's reply went nowhere.
+var slots: std.ArrayList(Slot) = .empty;
 
 /// Install the navigation shape every output buffer shares: Return visits the
 /// focused row through `visit_cmd`, j/k walk, q goes back. This mode is its
@@ -73,6 +84,8 @@ const Request = struct {
     /// The context key that says this run is going (`Running`), and the place
     /// it was said on, where it is retracted when the run lands.
     running_key: []const u8 = "",
+    /// Told the exit code once the run is over and its rows are published.
+    exit: ?*const fn (code: i32) void = null,
     place: [1100]u8 = undefined,
     place_len: usize = 0,
 };
@@ -93,7 +106,9 @@ pub fn runningHere(key: []const u8) ?[]const u8 {
 
 /// Focus the `name` tool buffer (reused across runs — `buffer.create` does NOT
 /// dedupe by name, so re-creating would pile up duplicates), put it in `mode`,
-/// and run `argv`, publishing its output as a projection when it lands.
+/// and run `argv`, its output published as rows WHILE IT RUNS: each batch the
+/// process writes is appended (`weft.projectAppendLines`), at the cost of the
+/// batch. A run already filling this buffer is stopped first.
 ///
 /// ARGV, not a shell line. `grep` used to build `rg … -- '{s}'` and say out
 /// loud that a pattern containing a single quote was "the one gap left for a
@@ -105,21 +120,100 @@ pub fn show(argv: []const []const u8, name: []const u8, mode: []const u8, opts: 
     row_style: ?RowStyle = null,
     want_err: bool = false,
     running: ?Running = null,
+    /// What the tool reads on stdin (a prompt), sent and then closed. Null:
+    /// its stdin is the null device.
+    input: ?[]const u8 = null,
+    /// Told the exit code once the run is over and its rows are published —
+    /// what a tool that says nothing on success needs to be heard succeeding.
+    exit: ?*const fn (code: i32) void = null,
 }) void {
     const slot = slotFor(name) orelse return;
     weft.focusOrCreateBuffer(name);
     weft.setMode(mode);
+    stop(slot);
     var req: Request = .{
         .slot = slot,
         .row_style = opts.row_style,
         .want_err = opts.want_err,
+        .exit = opts.exit,
     };
+    // A fresh run starts from an empty buffer.
+    slots.items[slot].table.clear(weft.allocator);
+    slots.items[slot].rows = 0;
+    _ = weft.projectLines(slots.items[slot].name, "", Request, req, emitRow);
     if (opts.running) |r| if (weft.placeDesignation(&req.place)) |place| {
         req.place_len = place.len;
         req.running_key = r.key;
         weft.contextSetAt(r.key, r.what, place) catch {};
     };
-    if (!weft.execWith(Request, req, .{ .argv = argv }, landed)) settle(req);
+    // A build's errors are on stderr: they ARE its output, in the order written.
+    slots.items[slot].run = weft.spawnWith(Request, req, .{ .argv = argv, .merge_stderr = opts.want_err, .duplex = opts.input != null }, Stream);
+    const run = slots.items[slot].run orelse {
+        settle(req);
+        weft.echo("output: the command could not be started");
+        return;
+    };
+    if (opts.input) |bytes| {
+        run.send(bytes);
+        run.closeInput();
+    }
+}
+
+/// Stop the run filling `slot`, if any, dropping what it had not published.
+fn stop(slot: usize) void {
+    const s = &slots.items[slot];
+    if (s.run) |proc| proc.kill();
+    s.run = null;
+    dropPending(s);
+}
+
+fn dropPending(s: *Slot) void {
+    for (s.pending.items) |line| weft.allocator.free(line);
+    s.pending.clearRetainingCapacity();
+}
+
+/// What the run says, as it says it.
+const Stream = struct {
+    pub fn line(req: Request, text: []const u8) void {
+        const s = &slots.items[req.slot];
+        if (s.rows + s.pending.items.len >= max_rows) return;
+        const owned = weft.allocator.dupe(u8, text) catch return;
+        s.pending.append(weft.allocator, owned) catch {
+            weft.allocator.free(owned);
+            return;
+        };
+        if (s.rows + s.pending.items.len < max_rows) return;
+        // Full: publish, say so, and stop the run (no exit will follow a kill).
+        publish(req);
+        var note: [96]u8 = undefined;
+        const said = std.fmt.bufPrint(&note, "… stopped after {d} lines", .{max_rows}) catch "… stopped";
+        _ = weft.projectAppendLines(s.name, &.{said}, s.rows, Request, req, emitRow);
+        s.rows += 1;
+        settle(req);
+        stop(req.slot);
+    }
+
+    /// Once per batch: publish what the batch said.
+    pub fn drained(req: Request) void {
+        publish(req);
+    }
+
+    pub fn exit(req: Request, code: i32, stderr: []const u8) void {
+        _ = stderr;
+        publish(req);
+        settle(req);
+        slots.items[req.slot].run = null;
+        if (req.exit) |f| f(code);
+    }
+};
+
+/// Append the lines said since the last publish as rows.
+fn publish(req: Request) void {
+    const s = &slots.items[req.slot];
+    if (s.pending.items.len == 0) return;
+    const lines: []const []const u8 = @ptrCast(s.pending.items);
+    if (weft.projectAppendLines(s.name, lines, s.rows, Request, req, emitRow)) s.rows += lines.len;
+    dropPending(s);
 }
 
 /// The run is over: say so where it was said to be going.
@@ -219,59 +313,18 @@ test "output: a view parameter round-trips any bytes" {
     try std.testing.expectEqualStrings("don't & ?x=1", decodeParam(e, &dec).?);
 }
 
-/// The command finished: publish what it wrote as the buffer's projection.
-/// Nothing is read back out of the buffer — the bytes are right here, which is
-/// what the fill door could never say.
-fn landed(r: weft.ExecDone, req: Request) void {
-    settle(req);
-    // All of it: a tool's output is the buffer (the host caps what it keeps).
-    // A fixed scratch here once showed a search with many matches as none.
-    const out = r.dupe(weft.allocator, .out) catch "";
-    defer if (out.len > 0) weft.allocator.free(out);
-    if (out.len > 0 or !req.want_err) return fill(req, out);
-    // A build that printed nothing to stdout said whatever it had to say on
-    // stderr; showing an empty buffer instead is the failure mode this exists
-    // to end.
-    const err = r.dupe(weft.allocator, .err) catch "";
-    defer if (err.len > 0) weft.allocator.free(err);
-    fill(req, err);
-}
-
-/// A row that names a place, and one that does not. Roles rather than a boolean
-/// because a role is what a THIRD PARTY binds a verb against — it `provide`s
-/// against `.{ .role = "output.result" }` and reaches every result row without
-/// knowing which of run/make/grep produced it, or that they exist. Neither role
-/// styles as a whole row, so the location stays the only lit part.
 const role_result = "output.result";
 const role_note = "output.note";
 /// The `path:line:col` stretch inside a result row.
 const role_location = "output.location";
 
-/// Publish `text` as the buffer's projection — one node per line, each carrying
-/// its location in the table.
-///
-/// `text` is the command's own output, still in the continuation's hands. The
-/// predecessor wrote it into the buffer first and then read it all back out in
-/// scratch-sized chunks, re-splitting it into lines a second time, because the
-/// fill door delivered "your output has landed somewhere" rather than the
-/// output. This is the ONE moment the text is authoritative; from here on it is
-/// display, and the projection is what makes that literally true — nothing
-/// downstream reads a byte of it.
-fn fill(req: Request, text: []const u8) void {
-    slots[req.slot].table.clear(weft.allocator);
-    _ = weft.projectLines(slots[req.slot].name, text, Request, req, emitRow);
-}
-
-/// One row: its location into the table, its text into the tree, and the key
-/// that ties them. The key is the table INDEX — a handle into a table this
-/// library owns, minted here and never parsed out of anything rendered.
-///
-/// The ordinal the line arrived at is deliberately unused: a row's identity is
-/// its place in the TABLE, which is the same number here and would stop being
-/// so the moment a fill skipped a line.
+/// One row of output as a node, its location (if it names one) captured into
+/// the table the row's key indexes. This is the ONE moment the text is
+/// authoritative; from here on it is display — nothing downstream reads a
+/// byte of it.
 fn emitRow(b: weft.ProjectionBuilder, req: Request, ordinal: usize, line: []const u8) void {
     _ = ordinal;
-    const slot = &slots[req.slot];
+    const slot = &slots.items[req.slot];
     const row_style = req.row_style;
     const index = slot.table.len();
     slot.table.push(weft.allocator, line) catch return;
@@ -372,17 +425,19 @@ fn activeName() ?[]u8 {
 /// `name`'s slot index, minting it on first use; null when this plugin already
 /// tracks its full complement of output buffers.
 fn slotFor(name: []const u8) ?usize {
-    for (slots[0..slot_count], 0..) |*slot, i| {
+    for (slots.items, 0..) |*slot, i| {
         if (std.mem.eql(u8, slot.name, name)) return i;
     }
-    if (slot_count == slots.len) return null;
-    slots[slot_count] = .{ .name = weft.allocator.dupe(u8, name) catch return null };
-    slot_count += 1;
-    return slot_count - 1;
+    const owned = weft.allocator.dupe(u8, name) catch return null;
+    slots.append(weft.allocator, .{ .name = owned }) catch {
+        weft.allocator.free(owned);
+        return null;
+    };
+    return slots.items.len - 1;
 }
 
 fn find(name: []const u8) ?*Slot {
-    for (slots[0..slot_count]) |*slot| {
+    for (slots.items) |*slot| {
         if (std.mem.eql(u8, slot.name, name)) return slot;
     }
     return null;

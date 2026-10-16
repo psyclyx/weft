@@ -227,6 +227,15 @@ pub const ProjectionNode = @import("projection.zig").Node;
 pub const ProjectionBuilder = @import("projection.zig").Builder;
 pub const project = @import("projection.zig").begin;
 pub const projectLines = @import("projection.zig").projectLines;
+pub const projectExtend = @import("projection.zig").extend;
+
+/// Append OUTPUT to the end of the buffer named `name` (created if absent):
+/// produced, not authored — never in its undo — painted with style `class`
+/// (0 for none). What a console writes below the line it ran.
+pub fn bufferAppend(name: []const u8, text: []const u8, class: u8) void {
+    e.wl_buffer_append(p(name.ptr), @intCast(name.len), p(text.ptr), @intCast(text.len), class);
+}
+pub const projectAppendLines = @import("projection.zig").appendLines;
 pub const projectionAtCursor = @import("projection.zig").atCursor;
 pub const projectionToggleFold = @import("projection.zig").toggleFold;
 pub const projectionSelectedLines = @import("projection.zig").selectedLines;
@@ -2954,8 +2963,15 @@ pub fn semanticFieldCurrentEdit(gpa: std.mem.Allocator) (std.mem.Allocator.Error
 /// Run `cmd` in a shell off the frame thread; insert its stdout at the cursor
 /// when it finishes, resolved through its CRDT identity. Perms: proc + timer
 /// (declared in `describe`).
-pub fn shellInsert(cmd: []const u8) void {
-    e.wl_shell_insert(p(cmd.ptr), @intCast(cmd.len));
+pub fn shellInsert(argv: []const []const u8) void {
+    if (argv.len == 0) return;
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    for (argv, 0..) |arg, n| {
+        if (n > 0) block.append(allocator, 0) catch return;
+        block.appendSlice(allocator, arg) catch return;
+    }
+    e.wl_shell_insert(p(block.items.ptr), @intCast(block.items.len), @intCast(argv.len));
 }
 
 // ── Interactive REPL sessions (persistent child + comint buffer) ──────
@@ -3208,44 +3224,23 @@ pub fn netClose(handle: u32) void {
     e.wl_net_close(handle);
 }
 
-/// Run `cmd` off the frame thread and replace the scratch buffer named `name`
-/// (found or created NOW, then held by identity) with its stdout — tool output
-/// → a buffer (git status, grep, compile). `token` is opaque to the host and
-/// comes back as `on_fill_token` when the output lands, so a plugin with
-/// several fills in flight knows which one finished; the entry is bound for
-/// that call, so reads/edits/styles mean it rather than whatever is focused.
-/// Pass 0 when nothing needs to run afterwards. Perms: proc + timer.
-pub fn procToBuffer(cmd: []const u8, name: []const u8, token: u32) void {
-    e.wl_proc_to_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len), token);
-}
-/// Like `procToBuffer` but APPENDS the output — a console/comint log.
-pub fn procAppendBuffer(cmd: []const u8, name: []const u8, token: u32) void {
-    e.wl_proc_append_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len), token);
-}
-
-/// `procToBuffer` for a command that needs its input as a FILE. The host
-/// writes `input` to a temp path IT chooses, substitutes that path for every
-/// `{}` in `cmd`, runs it, fills `name` with stdout (token → `on_fill_token`,
-/// exactly as `procToBuffer`), and deletes the temp whether the command
-/// succeeded or failed.
-///
-/// The path is never spelled here, so a plugin that only needs to hand a
-/// subprocess bytes on disk — `git apply {}`, `git commit -F '{}'`,
-/// `llm < {}` — needs NO `fs_write`: it cannot choose where the bytes land and
-/// cannot leave them there. Perms: proc + timer, the same as `procToBuffer`.
-///
-/// `cmd` is yours to compose, so keep `{}` reserved: any other `{}` in the
-/// string (a path with braces in it, say) is substituted too.
-pub fn procSpool(cmd: []const u8, input: []const u8, name: []const u8, token: u32) void {
-    e.wl_proc_spool(p(cmd.ptr), @intCast(cmd.len), p(input.ptr), @intCast(input.len), p(name.ptr), @intCast(name.len), token);
-}
-
 /// Filter `[r.start, r.end)` through `cmd` (a `{}` placeholder gets a temp file
 /// the range is written to, transformed in place, and read back) and replace
 /// the range with the result — formatters and vim `!`-filters. Async, CRDT-
 /// anchored, and authored as this plugin's peer. Perms: proc + timer.
-pub fn procFilter(cmd: []const u8, r: Range) void {
-    e.wl_proc_filter(p(cmd.ptr), @intCast(cmd.len), @intCast(r.start), @intCast(r.end));
+/// Filter `r` in place through `argv` (no shell): the host writes the range to
+/// a temp file it names, runs `argv` with `{}` (in any argument) standing for
+/// that path, and replaces the range with the file's contents afterwards — an
+/// authored edit, undoable like any other. A formatter's `--write {}`.
+pub fn procFilter(argv: []const []const u8, r: Range) void {
+    if (argv.len == 0) return;
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    for (argv, 0..) |arg, i| {
+        if (i > 0) block.append(allocator, 0) catch return;
+        block.appendSlice(allocator, arg) catch return;
+    }
+    e.wl_proc_filter(p(block.items.ptr), @intCast(block.items.len), @intCast(argv.len), @intCast(r.start), @intCast(r.end));
 }
 
 // ── fs (perm-gated fs_read / fs_write) — local, cwd-relative ──────────

@@ -8,8 +8,8 @@
 
 const std = @import("std");
 const weft = @import("weft");
+const output = @import("weft_output");
 
-var cmd_buf: [1 << 12]u8 = undefined;
 var echo_buf: [128]u8 = undefined;
 
 const Lang = struct { ext: []const u8, name: []const u8, run: []const u8 };
@@ -39,7 +39,12 @@ fn langFor(path: []const u8) ?Lang {
 
 const cmds = [_]weft.CommandEntry{
     .{ .name = "modes.run", .arity = .whole, .call = langRun, .summary = "Run the current file with its language's runner.", .label = "Run File", .menu = "Run", .group = "run", .order = 1, .icon = "play" },
+    .{ .name = "modes.visit", .call = output.visit, .arity = .one, .summary = "Open the location the focused run row names.", .internal = true },
 };
+
+fn initExtra() void {
+    output.installMode("modes-run", "modes.visit");
+}
 
 fn describeExtra() void {
     weft.requestPerm(.proc);
@@ -68,33 +73,31 @@ fn on_activate() callconv(.c) void {
 
 /// Run the current file with its language's interpreter, output into *run*.
 fn langRun() void {
-    const path = weft.path() orelse return;
+    // Copied out: `path` borrows the read scratch, which the next host call
+    // (focusing *run*, starting the run) reuses — the argv would carry
+    // whatever overwrote it.
+    const read = weft.path() orelse return;
+    const path = weft.allocator.dupe(u8, read) catch return;
+    defer weft.allocator.free(path);
     const l = langFor(path) orelse return;
     if (l.run.len == 0) return; // no runner for this language
     runSubst(l.run, path);
 }
 
-/// Substitute `{}` → `path` in `template` into `cmd_buf` and run it.
+/// Run `template` — words, `{}` standing for the file — with `{}` replaced by
+/// `path` as ONE argument, whatever the path contains: an argv, never a shell
+/// line a path with a space or a quote would break. Its output streams into
+/// `*run*`, its locations visitable.
 fn runSubst(template: []const u8, path: []const u8) void {
-    var w: usize = 0;
-    var i: usize = 0;
-    while (i < template.len) : (i += 1) {
-        if (i + 1 < template.len and template[i] == '{' and template[i + 1] == '}') {
-            const n = @min(path.len, cmd_buf.len - w);
-            @memcpy(cmd_buf[w .. w + n], path[0..n]);
-            w += n;
-            i += 1;
-        } else if (w < cmd_buf.len) {
-            cmd_buf[w] = template[i];
-            w += 1;
-        }
-    }
-    weft.runStr("buffer.create", "*run*");
-    weft.procToBuffer(cmd_buf[0..w], "*run*", 0);
+    var words: weft.Argv = .{};
+    var it = std.mem.tokenizeAny(u8, template, " \t");
+    while (it.next()) |w| words.push(if (std.mem.eql(u8, w, "{}")) path else w);
+    if (words.full or words.n == 0) return;
+    output.show(words.slice(), "*run*", "modes-run", .{ .want_err = true });
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
+    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra }).exportAll();
 }
 
 comptime {

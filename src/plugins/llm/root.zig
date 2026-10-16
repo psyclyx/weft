@@ -1,13 +1,13 @@
 //! llm — a minimal agent adapter, the CLI variant (design §6.5: "CLI:
-//! {proc, fs.read}"), a `.wasm` plugin (perms `{proc, timer}`). It SPOOLS the
-//! prompt — hands it to `weft.procSpool`, which lands it in a temp file the
-//! HOST names and removes — and pipes that to an `llm` CLI, streaming the reply
-//! into a conversation buffer. This is the thin end of the agent story — no
-//! tools, no session peer, no net (that tier needs `net.connect` +
-//! `spawnPeer`); it is the honest minimum that runs today.
+//! {proc, fs.read}"), a `.wasm` plugin (perms `{proc, timer}`). It hands the
+//! prompt to an `llm` CLI on its stdin and streams the reply into a
+//! conversation buffer as the CLI writes it (`output.show` with `input`). This
+//! is the thin end of the agent story — no tools, no session peer, no net
+//! (that tier needs `net.connect` + `spawnPeer`); it is the honest minimum that
+//! runs today.
 //!
 //! Every ask is its own CONVERSATION: it takes a fresh buffer (`*llm*`,
-//! `*llm:2*`, …) and its own spooled prompt, so two asks in flight neither
+//! `*llm:2*`, …) and its own process and stdin, so two asks in flight neither
 //! overwrite each other's prompt nor land in each other's reply.
 //!
 //! No `fs_write`: the plugin never names a path, so it cannot choose where the
@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
+const output = @import("weft_output");
 
 /// `params` is the command's argument shape, written the way a person reads
 /// it back (`describeCommand`): the palette shows it beside the row, the `:`
@@ -30,7 +31,12 @@ const Cmd = struct {
 const cmds = [_]weft.CommandEntry{
     .{ .name = "llm.ask", .call = ask, .arity = .whole, .params = "prompt", .summary = "Ask the configured LLM command a question, with the reply in its own buffer.", .label = "Ask LLM", .menu = "Run/Tools", .group = "llm", .order = 1, .icon = "sparkles", .prompts = true },
     .{ .name = "llm.ask-line", .arity = .one, .call = askLine, .summary = "Ask the configured LLM command, using the current line as the prompt.", .label = "Ask LLM with Line", .menu = "Run/Tools", .group = "llm", .order = 2, .icon = "sparkles" },
+    .{ .name = "llm.visit", .call = output.visit, .arity = .one, .summary = "Open the location the focused reply row names.", .internal = true },
 };
+
+fn initExtra() void {
+    output.installMode("llm-reply", "llm.visit");
+}
 
 fn describeExtra() void {
     weft.requestPerm(.proc);
@@ -49,17 +55,16 @@ fn run(prompt: []const u8) void {
     const ordinal = weft.instanceOrdinal("llm") orelse return;
     var name_buf: [32]u8 = undefined;
     const buf = weft.instanceName("llm", ordinal, &name_buf) orelse return;
-    weft.runStr("buffer.create", buf);
-    // The CLI reads the prompt from stdin; 2>&1 surfaces auth errors. `cmd`
-    // defaults to the ordinary `llm` executable but is configuration data, so
-    // a user can select another compatible adapter and tests can install a
-    // hermetic one without a plugin- or harness-specific execution path.
+    // The CLI reads the prompt from stdin; its stderr (an auth error) is part
+    // of the reply. `cmd` defaults to the ordinary `llm` executable but is
+    // configuration data — words, no shell — so a user can select another
+    // compatible adapter and tests can install a hermetic one without a
+    // plugin- or harness-specific execution path.
     const configured = weft.config("cmd");
-    const cli = if (configured.len > 0) configured else "llm";
-    var cmd_buf: [2048]u8 = undefined;
-    // `{}` is the spooled prompt: the host writes it, names it, and deletes it.
-    const cmd = std.fmt.bufPrint(&cmd_buf, "{s} < {{}} 2>&1", .{cli}) catch return;
-    weft.procSpool(cmd, prompt_store[0..n], buf, 0);
+    var words: weft.Argv = .{};
+    const argv = weft.argvWords(if (configured.len > 0) configured else "llm", &words);
+    if (words.full or argv.len == 0) return weft.echo("llm: the configured command is empty or too long");
+    output.show(argv, buf, "llm-reply", .{ .input = prompt_store[0..n], .want_err = true });
 }
 
 /// Ask with the prompt given as arg0.
@@ -73,5 +78,5 @@ fn askLine() void {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .describe = describeExtra }).exportAll();
+    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra }).exportAll();
 }

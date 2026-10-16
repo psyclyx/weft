@@ -433,7 +433,6 @@ const guests = [_]Guest{
     // The `wl_proc_spool` gate's guest: proc+timer only, so the door's promise
     // ("a subprocess gets a real file, the guest gets no fs perm") is proven by
     // a guest that genuinely holds none.
-    .{ .name = "spool", .import = "guest_spool_wasm", .install = false },
     // `wl_exec`'s gate guest: the same `{proc, timer}` set, proving the three
     // facts the fill doors could not carry (status, stderr, an argument that
     // is one argument) and that the spool contract survives the move to argv.
@@ -484,10 +483,10 @@ const guests = [_]Guest{
     .{ .name = "fmt", .import = "guest_fmt_wasm", .install = true },
     .{ .name = "buffers", .import = "guest_buffers_wasm", .install = true },
     .{ .name = "dashboard", .import = "guest_dashboard_wasm", .install = true },
-    .{ .name = "modes", .import = "guest_modes_wasm", .install = true },
+    .{ .name = "modes", .import = "guest_modes_wasm", .install = true, .libraries = &.{.output} },
     .{ .name = "snippets", .import = "guest_snippets_wasm", .install = true },
-    .{ .name = "direnv", .import = "guest_direnv_wasm", .install = true },
-    .{ .name = "llm", .import = "guest_llm_wasm", .install = true },
+    .{ .name = "direnv", .import = "guest_direnv_wasm", .install = true, .libraries = &.{.output} },
+    .{ .name = "llm", .import = "guest_llm_wasm", .install = true, .libraries = &.{.output} },
     .{ .name = "console", .import = "guest_console_wasm", .install = true },
     .{ .name = "repl", .import = "guest_repl_wasm", .install = true },
     .{ .name = "net", .import = "guest_net_wasm", .install = true },

@@ -183,6 +183,32 @@ pub fn projectLines(
     return true;
 }
 
+/// Open a build that APPENDS to the named buffer's committed projection: its
+/// nodes follow the committed ones and its commit writes only their text, at
+/// the end, leaving the cursor where it was. What a stream of rows uses, so
+/// each batch costs what it is rather than everything before it.
+pub fn extend(buffer: []const u8) ?Builder {
+    if (e.wl_proj_extend(p(buffer.ptr), @intCast(buffer.len)) != 0) return null;
+    return .{};
+}
+
+/// `projectLines` for a stream: APPEND `lines` (each a whole line, without its
+/// newline) as one node per line, `emit` numbering them on from `first` —
+/// the count of rows already published. False when there is no such buffer.
+pub fn appendLines(
+    buffer: []const u8,
+    lines: []const []const u8,
+    first: usize,
+    comptime Ctx: type,
+    ctx: Ctx,
+    comptime emit: fn (Builder, Ctx, usize, []const u8) void,
+) bool {
+    const b = extend(buffer) orelse return false;
+    for (lines, 0..) |line, i| emit(b, ctx, first + i, line);
+    _ = b.commit();
+    return true;
+}
+
 var key_scratch: [1024]u8 = undefined;
 
 /// The key of the innermost row the cursor is on, or null for no row. This is

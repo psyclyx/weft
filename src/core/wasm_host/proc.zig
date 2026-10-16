@@ -44,7 +44,11 @@ const ShellJob = struct {
     buffer: Buffers.Ref,
     name: []u8,
     target: Document.EventAnchor,
-    cmd: []u8, // the shell command line
+    /// The command's argv (one block, sliced; owned). No shell unless asked
+    /// for: `shell.insert-output` asks, because what it was given IS a shell
+    /// line.
+    argv_block: []u8,
+    argv: [][]const u8,
     /// Where the child runs, captured at spawn (`doc/place.md`). Null is the
     /// `.process` place: inherit the editor's own directory. Owned; freed with
     /// the rest of the job.
@@ -133,6 +137,7 @@ pub fn spawnBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i3
     };
     defer gpa.free(cmd);
     const duplex = args[3] & 1 != 0;
+    const merge_stderr = args[3] & 2 != 0;
     // `ProcStream.start` dups the cwd it is given, so this one is ours to free.
     const at = shared.resolveSpawnAtCtx(ctx, gpa);
     defer switch (at) {
@@ -151,7 +156,7 @@ pub fn spawnBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i3
     const spawn_env = shared.resolveSpawnEnvCtx(ctx, gpa);
     var env_owned = true;
     defer if (env_owned) if (spawn_env) |owned_env| owned_env.block.deinit(gpa);
-    const s = proc_stream.ProcStream.start(gpa, pool, cmd, cwd, spawn_env orelse r.environ, .{ .duplex = duplex }) catch {
+    const s = proc_stream.ProcStream.start(gpa, pool, cmd, cwd, spawn_env orelse r.environ, .{ .duplex = duplex, .merge_stderr = merge_stderr }) catch {
         results[0] = -1;
         return;
     };
@@ -199,6 +204,15 @@ pub fn readBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32
     results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(cap), buf[0..n]) catch 0);
 }
 
+/// `procCloseInput(handle)`: end the child's input (EOF on its stdin), after
+/// what was sent.
+pub fn closeInputBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const s = streamAt(d.resources, args[0]) orelse return;
+    s.closeInput();
+}
+
 /// `procStatus(handle) -> i32`: the child's exit code once it has exited
 /// (-1: by signal, or it never ran); -2 while it runs; -3 for no such stream.
 /// Reading an exit is hearing it: `on_poll` stops being raised for it.
@@ -238,6 +252,7 @@ pub const hProcSpawn = wasmDoor(spawnBody, .proc);
 pub const hProcSend = wasmDoor(sendBody, null);
 pub const hProcRead = wasmDoor(readBody, null);
 pub const hProcStatus = wasmDoor(statusBody, null);
+pub const hProcCloseInput = wasmDoor(closeInputBody, null);
 pub const hProcClose = wasmDoor(closeBody, null);
 
 /// The plugin-plane proc surface as DATA: per door, the ONE body both
@@ -261,6 +276,7 @@ pub const doors = .{
     .{ .name = "proc_send", .body = sendBody, .wl = hProcSend, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, .proc) },
     .{ .name = "proc_read", .body = readBody, .wl = hProcRead, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, .proc) },
     .{ .name = "proc_status", .body = statusBody, .wl = hProcStatus, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, null) },
+    .{ .name = "proc_close_input", .body = closeInputBody, .wl = hProcCloseInput, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, null) },
     .{ .name = "proc_close", .body = closeBody, .wl = hProcClose, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, null) },
 };
 
@@ -404,9 +420,15 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     if (!requirePerm(p, caller, .timer)) return;
     const loop = p.loop orelse return;
     const gpa = p.gpa;
-    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    var cmd_owned = true;
-    defer if (cmd_owned) gpa.free(cmd);
+    const block = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    var block_owned = true;
+    defer if (block_owned) gpa.free(block);
+    const argc: usize = @intCast(@max(args[2], 0));
+    if (argc == 0 or argc > 4096) return;
+    const argv = splitArgv(gpa, block, argc) orelse return;
+    var argv_owned = true;
+    defer if (argv_owned) gpa.free(argv);
+    if (argv[0].len == 0) return;
     const active_ctx = p.activeCtx();
     const buffer = active_ctx.entry() orelse return;
     const editor = buffer.textEditor() orelse return;
@@ -441,13 +463,15 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
         .buffer = buffer.ref(),
         .name = name,
         .target = target,
-        .cmd = cmd,
+        .argv_block = block,
+        .argv = argv,
         .cwd = cwd,
         .environ = spawn_env,
     };
     cwd_owned = false;
     env_owned = false;
-    cmd_owned = false;
+    block_owned = false;
+    argv_owned = false;
     target_owned = false;
     job_owned = false;
     _ = loop.spawn(shellWork, job, .{ .ctx = job, .call = shellDeliver, .deinit = shellFree }) catch {
@@ -455,12 +479,12 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     };
 }
 
-/// Off-thread: run `/bin/sh -c <cmd>`, return stdout trimmed of a trailing
+/// Off-thread: run the argv, return stdout trimmed of a trailing
 /// newline. Failure yields empty (nothing inserted). Runs on the async pool
 /// worker — proc.run synchronous there, no frame block.
 fn shellWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     const job: *ShellJob = @ptrCast(@alignCast(ctx.?));
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = job.environ orelse shared.g_environ, .cwd = job.cwd }) catch return gpa.alloc(u8, 0);
+    var res = proc.run(gpa, job.argv, .{ .environ = job.environ orelse shared.g_environ, .cwd = job.cwd }) catch return gpa.alloc(u8, 0);
     defer res.deinit(gpa);
     return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
 }
@@ -486,267 +510,8 @@ fn shellFree(ctx: ?*anyopaque) void {
     if (job.cwd) |d| gpa.free(d);
     if (job.environ) |e| e.block.deinit(gpa);
     gpa.free(job.target.agent);
-    gpa.free(job.cmd);
-    gpa.destroy(job);
-}
-
-/// A deferred proc-to-buffer: run a command off-thread and fill the entry
-/// CAPTURED AT SPAWN with its output. `entry` is a generation-checked
-/// `Buffers.Ref`, not a name: nothing that happens while the command runs — a
-/// focus change, a same-named buffer opened later, the entry being closed and
-/// its slot reused — can redirect the result. A ref that no longer resolves
-/// drops the output with a note; it is never delivered anywhere else.
-/// `styler` fires the issuing plugin's `on_fill_token` with `token` once the
-/// text has landed, so a guest learns WHICH of its fills completed. The plugin
-/// pointer is safe to hold — plugins are resident for the app's life (the same
-/// residency `notifyActivate` relies on); it is only ever called on the normal
-/// delivery path, never at teardown.
-const ProcJob = struct {
-    gpa: Allocator,
-    buffers: *Buffers,
-    styler: *WasmPlugin, // fires on_fill_token after delivery (resident)
-    plugin: []u8, // authors the buffer content
-    entry: Buffers.Ref, // the target captured at spawn
-    token: u32, // the guest's opaque fill tag
-    cmd: []u8,
-    append: bool = false, // append the output (a console) vs replace (a view)
-    /// Where the child runs, captured at spawn. Null = the `.process` place.
-    /// Owned; freed with the job.
-    cwd: ?[]u8 = null,
-    /// A spool's input payload — the bytes the child reads from `{}`. Null for
-    /// the plain fill doors, which hand the child nothing. Owned.
-    input: ?[]u8 = null,
-    /// A spool's host-composed temp path. The guest never sees it, cannot name
-    /// it, and cannot keep it: `spoolWork` deletes it before returning, on
-    /// every path. Null for the plain fill doors. Owned.
-    tmp: ?[]u8 = null,
-    /// The environment the child runs with, captured at spawn. Null = the base
-    /// process environment (no overlay for this place). OWNED; freed with the job.
-    environ: ?std.process.Environ = null,
-};
-
-/// Which fill door a job came through. The three share one spawn body because
-/// they differ only in what happens to the output (replace/append) and whether
-/// the child is handed an input file.
-const Fill = enum {
-    /// `wl_proc_to_buffer`: stdout replaces the entry.
-    replace,
-    /// `wl_proc_append_buffer`: stdout is appended (a console log).
-    append,
-    /// `wl_proc_spool`: an input payload is written to a host-composed temp,
-    /// substituted for `{}`, and deleted afterwards; stdout replaces the entry.
-    spool,
-};
-
-/// Perm-gated (proc + timer): run `<cmd>` off the frame thread and replace the
-/// scratch buffer named `<name>` with its stdout, authored as this plugin's
-/// peer — the "tool output → a buffer" pattern (git status, grep, compile).
-/// The name is resolved HERE, once; `args[4]` is the fill token echoed back.
-pub fn hProcToBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, .replace);
-}
-
-/// Like `wl_proc_to_buffer` but APPENDS the output (a console/comint log) rather
-/// than replacing the buffer.
-pub fn hProcAppendBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, .append);
-}
-
-/// `wl_proc_spool(cmd, input, name, token)`: `wl_proc_to_buffer` plus an input
-/// payload. The host writes `input` to a temp file IT names, substitutes that
-/// path for `{}` in `cmd`, runs the command in the dispatching entry's place,
-/// fills `<name>` with stdout, and deletes the temp — whether the command
-/// succeeded or not.
-///
-/// This is the door a plugin uses when a subprocess needs its input as a real
-/// file (`git apply {}`, `git commit -F {}`, `llm < {}`). Perms are `proc +
-/// timer`, the same set the sibling fill doors take, and deliberately NOT
-/// `fs_write`: the guest supplies bytes and a command, never a path, so it
-/// gains no ability to write anywhere it chooses (`doc/place.md` §4.2).
-pub fn hProcSpool(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, .spool);
-}
-
-/// A monotonic tag so two spools in flight never share a path; the pid keeps
-/// two editors on one machine apart.
-var spool_counter: usize = 0;
-
-/// The shared spawn for all three fill doors: gate, resolve the target ONCE,
-/// and hand the job a ref plus the guest's token.
-fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, kind: Fill) void {
-    if (!requirePerm(p, caller, .proc)) return;
-    if (!requirePerm(p, caller, .timer)) return;
-    const loop = p.loop orelse return;
-    const gpa = p.gpa;
-    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    var cmd_owned = true;
-    defer if (cmd_owned) gpa.free(cmd);
-    // A spool's input payload sits between the command and the buffer name, so
-    // the shared tail — `(name, name_len, token)` — starts one pair later.
-    const input: ?[]u8 = if (kind == .spool)
-        (caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return)
-    else
-        null;
-    var input_owned = true;
-    defer if (input_owned) if (input) |b| gpa.free(b);
-    const tail: usize = if (kind == .spool) 4 else 2;
-    const name = caller.readMemory(gpa, @intCast(args[tail]), @intCast(args[tail + 1])) catch return;
-    defer gpa.free(name);
-    // The guest names the COMMAND; the host names the FILE. Composed here, on
-    // the frame thread, so the path exists nowhere the guest can reach it.
-    const tmp: ?[]u8 = if (kind == .spool) blk: {
-        spool_counter += 1;
-        break :blk std.fmt.allocPrint(gpa, "/tmp/weft-spool-{d}-{d}", .{ std.c.getpid(), spool_counter }) catch return;
-    } else null;
-    var tmp_owned = true;
-    defer if (tmp_owned) if (tmp) |b| gpa.free(b);
-    const buffers = p.activeCtx().buffers;
-    // ONE reading of "where", used for two things that must not disagree: the
-    // directory the child runs in, and the place the output entry is ABOUT.
-    // Read before the target exists, so it is the DISPATCHING entry's place and
-    // not the tool entry's own inherited copy.
-    const spawn_place = p.activeCtx().place();
-    const at = shared.resolveSpawnAt(p, gpa);
-    const cwd: ?[]u8 = switch (at) {
-        .inherit => null,
-        .at => |dir| dir,
-        .refused => |why| {
-            shared.noteSpawnRefusal(p.activeCtx(), p.name, why);
-            return;
-        },
-    };
-    var cwd_owned = true;
-    defer if (cwd_owned) if (cwd) |d| gpa.free(d);
-    // Same place, same door: WHERE the child runs and WITH WHAT.
-    const spawn_env = shared.resolveSpawnEnv(p, gpa);
-    var env_owned = true;
-    defer if (env_owned) if (spawn_env) |e| e.block.deinit(gpa);
-    const target = ensureFillTarget(gpa, buffers, name) orelse return;
-    // Re-target a REUSED tool entry: running grep again from another project
-    // makes `*grep*` about the new place from this moment on. A fresh entry
-    // already inherited the same value; saying it explicitly covers both.
-    buffers.setPlace(target.id, spawn_place);
-    const plugin = gpa.dupe(u8, p.name) catch return;
-    var plugin_owned = true;
-    defer if (plugin_owned) gpa.free(plugin);
-    const job = gpa.create(ProcJob) catch return;
-    job.* = .{
-        .gpa = gpa,
-        .buffers = buffers,
-        .styler = p,
-        .plugin = plugin,
-        .entry = target,
-        .token = @bitCast(args[tail + 2]),
-        .cmd = cmd,
-        .append = kind == .append,
-        .cwd = cwd,
-        .environ = spawn_env,
-        .input = input,
-        .tmp = tmp,
-    };
-    cmd_owned = false;
-    plugin_owned = false;
-    cwd_owned = false;
-    env_owned = false;
-    input_owned = false;
-    tmp_owned = false;
-    _ = loop.spawn(procWork, job, .{ .ctx = job, .call = procDeliver, .deinit = procFree }) catch procFree(job);
-}
-
-/// Find-or-create the named entry and capture its identity. A buffer proc
-/// CREATES is a plain tool sink (grep/make output) → read-only. A PRE-created
-/// one keeps whatever the plugin declared (a projection marks itself read-only
-/// via weft.readOnly; an editable one like *git-commit* stays writable) — so
-/// create-branch marks, find-branch doesn't.
-fn ensureFillTarget(gpa: Allocator, bufs: *Buffers, name: []const u8) ?Buffers.Ref {
-    if (bufs.findByName(name)) |id| return (bufs.get(id) orelse return null).ref();
-    const nb = bufs.get(bufs.create(gpa, name) catch return null) orelse return null;
-    nb.read_only = Buffers.produced;
-    return nb.ref();
-}
-
-fn procWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
-    const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
-    if (job.tmp) |tmp| return spoolWork(gpa, job, tmp);
-    return runCapture(gpa, job.cmd, job.cwd, job.environ);
-}
-
-/// A spool's off-thread body: land the input in the host-composed temp, hand
-/// the child its path through `{}`, and DELETE IT ON EVERY WAY OUT — the write
-/// failing, the substitution failing, the spawn failing, the command exiting
-/// non-zero, and the ordinary success. The `defer` is the whole point: there is
-/// no early return that can leave the file behind, so a failed effect never
-/// litters and never leaves stale bytes for the next run to pick up.
-fn spoolWork(gpa: Allocator, job: *ProcJob, tmp: []const u8) anyerror![]u8 {
-    defer file.deleteFile(gpa, tmp);
-    file.writeBytes(gpa, tmp, job.input orelse &.{}) catch return gpa.alloc(u8, 0);
-    const cmd = std.mem.replaceOwned(u8, gpa, job.cmd, "{}", tmp) catch return gpa.alloc(u8, 0);
-    defer gpa.free(cmd);
-    return runCapture(gpa, cmd, job.cwd, job.environ);
-}
-
-/// Run `cmd` through the shell in `cwd` and return its stdout, trimmed of a
-/// trailing newline. A spawn failure yields empty rather than erroring — the
-/// fill lands as "the command said nothing", which is what a missing tool is.
-fn runCapture(gpa: Allocator, cmd: []const u8, cwd: ?[]const u8, environ: ?std.process.Environ) anyerror![]u8 {
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = environ orelse shared.g_environ, .cwd = cwd }) catch return gpa.alloc(u8, 0);
-    defer res.deinit(gpa);
-    return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
-}
-
-/// Frame-thread delivery: resolve the entry captured at spawn and fill it,
-/// authored as the plugin peer (grade-gated). What is active or focused never
-/// enters into it — an entry closed while the command ran drops its output.
-fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
-    const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
-    const out = result orelse return;
-    const gpa = job.gpa;
-    const b = job.buffers.resolve(job.entry) orelse {
-        std.log.info("proc: '{s}' output dropped — its target entry closed while the command ran", .{job.plugin});
-        return;
-    };
-    const editor = b.textEditor() orelse return;
-    const doc = &editor.doc;
-    const end = editor.text().byteLen();
-    if (job.append) {
-        // Append below the existing content (a console log), separated by a
-        // newline once there is prior output.
-        if (end > 0) {
-            const sep = std.fmt.allocPrint(gpa, "\n{s}", .{out}) catch return;
-            defer gpa.free(sep);
-            command.produceInto(gpa, &job.buffers.notices, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = sep }}) catch {};
-        } else {
-            command.produceInto(gpa, &job.buffers.notices, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = out }}) catch {};
-        }
-    } else {
-        command.produceInto(gpa, &job.buffers.notices, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = out }}) catch {};
-    }
-
-    // The text has landed: tell the issuing plugin WHICH fill it was, so it can
-    // parse/paint it (git's model, grep's coloring). The entry is BOUND for the
-    // call, so the guest's ambient read/edit/style doors mean this entry — the
-    // guest never asks what is active, and a focus change cannot misdirect it.
-    // A plugin without `on_fill_token` is a no-op.
-    const ctx_bound = job.styler.activeCtx();
-    const prev = ctx_bound.bindEntry(job.entry);
-    defer _ = ctx_bound.bindEntry(prev);
-    contract.callOptionalExport("on_fill_token", job.styler, .{@as(i32, @bitCast(job.token))}) catch {}; // MissingExport → skip
-}
-
-fn procFree(ctx: ?*anyopaque) void {
-    const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
-    const gpa = job.gpa;
-    gpa.free(job.plugin);
-    if (job.cwd) |d| gpa.free(d);
-    if (job.environ) |e| e.block.deinit(gpa);
-    if (job.input) |b| gpa.free(b);
-    // The FILE is `spoolWork`'s to remove; this frees only the path string.
-    // A job torn down before it ever ran never created the file at all.
-    if (job.tmp) |b| gpa.free(b);
-    gpa.free(job.cmd);
+    gpa.free(job.argv_block);
+    gpa.free(job.argv);
     gpa.destroy(job);
 }
 
@@ -794,6 +559,13 @@ const ExecJob = struct {
     /// the spool contract, argv-shaped. Null when the guest sent none.
     input: ?[]u8 = null,
     tmp: ?[]u8 = null,
+    /// The PLACE the command was issued in (or the place of the buffer `at`
+    /// named), pinned for its continuation as `command.run` pins a dispatch's:
+    /// what the continuation asks of "here" — a place's environment, where a
+    /// child runs — is where the command was run, not wherever focus has moved
+    /// since. Only the place: a continuation that opens or focuses a buffer of
+    /// its own still edits that buffer.
+    place: ?Buffers.Place = null,
 };
 
 var exec_counter: usize = 0;
@@ -863,6 +635,7 @@ pub fn hExec(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         .environ = spawn_env,
         .input = input,
         .tmp = tmp,
+        .place = execPlace(p, at_name),
     };
     block_owned = false;
     argv_owned = false;
@@ -905,6 +678,13 @@ fn splitArgv(gpa: Allocator, block: []const u8, argc: usize) ?[][]const u8 {
 /// The place the child runs in. `name` empty means the dispatching entry's,
 /// which is what every other proc door does; a named entry means THAT entry's
 /// place, which the host assigned and the guest cannot invent.
+/// The place an exec answers in: the buffer `at` names, else the dispatch's.
+fn execPlace(p: *WasmPlugin, name: []const u8) ?Buffers.Place {
+    const ctx = p.activeCtx();
+    if (name.len > 0) if (ctx.buffers.findByName(name)) |id| if (ctx.buffers.get(id)) |b| return b.place;
+    return ctx.place();
+}
+
 fn execSpawnAt(p: *WasmPlugin, gpa: Allocator, name: []const u8) shared.SpawnAt {
     if (name.len == 0) return shared.resolveSpawnAt(p, gpa);
     const ctx = p.activeCtx();
@@ -996,7 +776,7 @@ fn execDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
         resources.exec = null;
     }
 
-    // A DISPATCHING entry, unlike the fill door's `on_fill_token`.
+    // A DISPATCHING entry, unlike the background ones (`on_poll`, …).
     //
     // The classification in `wasm_host/commands.zig` splits host→guest entries
     // by whether a real head is behind the call, and every background one traps
@@ -1021,6 +801,11 @@ fn execDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     const saved_dispatch = job.styler.in_dispatch;
     job.styler.in_dispatch = true;
     defer job.styler.in_dispatch = saved_dispatch;
+    // In the place it was issued in (`ExecJob.place`), pinned as a dispatch's.
+    const ctx_pinned = job.styler.activeCtx();
+    const prev_place = ctx_pinned.dispatch_place;
+    if (job.place) |pl| ctx_pinned.dispatch_place = pl;
+    defer ctx_pinned.dispatch_place = prev_place;
     contract.callOptionalExport("on_exec", job.styler, .{@as(i32, @bitCast(job.token))}) catch {}; // MissingExport → skip
 }
 
@@ -1080,7 +865,11 @@ const FilterJob = struct {
     plugin: []u8,
     start: Document.EventAnchor,
     end: Document.EventAnchor,
-    cmd: []u8, // contains "{}" → the temp path
+    /// The filter's argv (one block, sliced; owned). A `{}` in an argument
+    /// stands for the temp file the host names — a path of `[a-z0-9/-]` only,
+    /// so it can be spliced even into an `sh -c` script's text.
+    argv_block: []u8,
+    argv: [][]const u8,
     content: []u8, // the captured input (owned)
     tmp: []u8,
     /// Where the filter command runs. A formatter finds its config by walking
@@ -1105,16 +894,22 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     if (!requirePerm(p, caller, .timer)) return;
     const loop = p.loop orelse return;
     const gpa = p.gpa;
-    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    var cmd_owned = true;
-    defer if (cmd_owned) gpa.free(cmd);
+    const block = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    var block_owned = true;
+    defer if (block_owned) gpa.free(block);
+    const argc: usize = @intCast(@max(args[2], 0));
+    if (argc == 0 or argc > 4096) return;
+    const argv = splitArgv(gpa, block, argc) orelse return;
+    var argv_owned = true;
+    defer if (argv_owned) gpa.free(argv);
+    if (argv[0].len == 0) return;
     const active_ctx = p.activeCtx();
     const buffer = active_ctx.entry() orelse return;
     const editor = buffer.textEditor() orelse return;
     const rope = editor.text();
     const len = rope.byteLen();
-    const s = @min(@as(usize, @intCast(args[2])), len);
-    const e = @min(@as(usize, @intCast(args[3])), len);
+    const s = @min(@as(usize, @intCast(args[3])), len);
+    const e = @min(@as(usize, @intCast(args[4])), len);
     if (e < s) return;
     const content = gpa.alloc(u8, e - s) catch return;
     var content_owned = true;
@@ -1159,7 +954,8 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         .plugin = plugin,
         .start = start,
         .end = end,
-        .cmd = cmd,
+        .argv_block = block,
+        .argv = argv,
         .content = content,
         .tmp = tmp,
         .cwd = cwd,
@@ -1167,7 +963,8 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     };
     cwd_owned = false;
     env_owned = false;
-    cmd_owned = false;
+    block_owned = false;
+    argv_owned = false;
     content_owned = false;
     start_owned = false;
     end_owned = false;
@@ -1182,9 +979,17 @@ fn filterWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     // failure return the ORIGINAL content, so the range is replaced with an
     // identical copy — never corrupted or emptied.
     file.writeBytes(gpa, job.tmp, job.content) catch return gpa.dupe(u8, job.content);
-    const cmd = std.mem.replaceOwned(u8, gpa, job.cmd, "{}", job.tmp) catch return gpa.dupe(u8, job.content);
-    defer gpa.free(cmd);
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = job.environ orelse shared.g_environ, .cwd = job.cwd }) catch {
+    // The argv as given, `{}` standing for the file. No shell unless the
+    // caller asked for one (`sh -c <script>`).
+    const argv = gpa.alloc([]const u8, job.argv.len) catch return gpa.dupe(u8, job.content);
+    defer gpa.free(argv);
+    var filled: usize = 0;
+    defer for (argv[0..filled]) |arg| gpa.free(arg);
+    for (job.argv, argv) |arg, *out| {
+        out.* = std.mem.replaceOwned(u8, gpa, arg, "{}", job.tmp) catch return gpa.dupe(u8, job.content);
+        filled += 1;
+    }
+    var res = proc.run(gpa, argv, .{ .environ = job.environ orelse shared.g_environ, .cwd = job.cwd }) catch {
         file.deleteFile(gpa, job.tmp);
         return gpa.dupe(u8, job.content);
     };
@@ -1215,7 +1020,8 @@ fn filterFree(ctx: ?*anyopaque) void {
     if (job.environ) |e| e.block.deinit(gpa);
     gpa.free(job.start.agent);
     gpa.free(job.end.agent);
-    gpa.free(job.cmd);
+    gpa.free(job.argv_block);
+    gpa.free(job.argv);
     gpa.free(job.content);
     gpa.free(job.tmp);
     gpa.destroy(job);

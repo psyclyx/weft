@@ -210,6 +210,9 @@ pub const View = struct {
     /// leaves the live projection alone.
     building: std.ArrayList(Node) = .empty,
     open: bool = false,
+    /// The open build ADDS to the committed tree (`beginExtend`) rather than
+    /// replacing it: what a stream appends, at the cost of what it appends.
+    extending: bool = false,
     /// Collapsed keys, owned. Survives a rebuild: this is the state git
     /// remembered in a fixed `[64][256]u8` and dropped past 64 with an echo.
     collapsed: std.StringHashMapUnmanaged(void) = .empty,
@@ -249,6 +252,17 @@ pub const View = struct {
         for (self.building.items) |*n| n.deinit(self.gpa);
         self.building.clearRetainingCapacity();
         self.open = true;
+        self.extending = false;
+    }
+
+    /// Start a build that APPENDS to the committed tree: its nodes follow the
+    /// committed ones, their ordinals continue from them, and a parent may be
+    /// a committed node. Its commit (`commitExtend`) lays out only the new
+    /// nodes — a stream of rows costs what each batch is, not everything
+    /// before it.
+    pub fn beginExtend(self: *View) void {
+        self.begin();
+        self.extending = true;
     }
 
     /// Add a node to the open build. Returns its ordinal, which is what a later
@@ -263,11 +277,13 @@ pub const View = struct {
         editable: ?Edit = null,
     }) !u32 {
         if (!self.open) return error.NoBuild;
+        // An extending build's ordinals continue from the committed tree.
+        const base: u32 = if (self.extending) @intCast(self.nodes.items.len) else 0;
         // A parent must already exist, so the tree cannot describe a cycle or
         // a forward reference — the ordering the renderer relies on, checked
         // rather than assumed.
         if (node.parent) |p| {
-            if (p >= self.building.items.len) return error.BadParent;
+            if (p >= base + self.building.items.len) return error.BadParent;
         }
         const key = try self.gpa.dupe(u8, node.key);
         errdefer self.gpa.free(key);
@@ -284,7 +300,7 @@ pub const View = struct {
             .focusable = node.focusable,
             .editable = node.editable,
         });
-        return @intCast(self.building.items.len - 1);
+        return base + @as(u32, @intCast(self.building.items.len - 1));
     }
 
     /// Style `[start,end)` of node `ordinal`'s own text.
@@ -302,8 +318,9 @@ pub const View = struct {
         key: []const u8,
     ) !void {
         if (!self.open) return error.NoBuild;
-        if (ordinal >= self.building.items.len) return error.BadNode;
-        const n = &self.building.items[ordinal];
+        const base: u32 = if (self.extending) @intCast(self.nodes.items.len) else 0;
+        if (ordinal < base or ordinal - base >= self.building.items.len) return error.BadNode;
+        const n = &self.building.items[ordinal - base];
         const lo = @min(start, n.text.len);
         const hi = @min(end, n.text.len);
         if (lo >= hi) return;
@@ -329,6 +346,43 @@ pub const View = struct {
         std.mem.swap(std.ArrayList(Node), &self.nodes, &self.building);
         self.revision +%= 1;
         return self.render();
+    }
+
+    /// Append the extending build to the committed tree and lay out ONLY the
+    /// new nodes, after the text already there. Returns where the new text
+    /// starts and the new text itself; the caller appends it to the document.
+    /// Ancestors (committed or new) widen to enclose their new descendants.
+    pub fn commitExtend(self: *View) !struct { at: usize, text: []const u8 } {
+        if (!self.open or !self.extending) return error.NoBuild;
+        self.open = false;
+        self.extending = false;
+        const first = self.nodes.items.len;
+        const at = self.text.items.len;
+        try self.nodes.ensureUnusedCapacity(self.gpa, self.building.items.len);
+        for (self.building.items) |n| self.nodes.appendAssumeCapacity(n);
+        self.building.clearRetainingCapacity(); // moved, not freed
+        for (self.nodes.items[first..]) |*n| {
+            n.start = self.text.items.len;
+            if (n.text.len > 0) {
+                try self.text.appendSlice(self.gpa, n.text);
+                if (n.text[n.text.len - 1] != '\n') try self.text.append(self.gpa, '\n');
+            }
+            n.body = self.text.items.len;
+            n.end = self.text.items.len;
+        }
+        // Each new node widens its ancestors, up the chain while they grow.
+        for (first..self.nodes.items.len) |i| {
+            const child_end = self.nodes.items[i].end;
+            var up = self.nodes.items[i].parent;
+            while (up) |pi| {
+                const parent = &self.nodes.items[pi];
+                if (parent.end >= child_end) break;
+                parent.end = child_end;
+                up = parent.parent;
+            }
+        }
+        self.revision +%= 1;
+        return .{ .at = at, .text = self.text.items[at..] };
     }
 
     /// Lay the tree out. A node contributes its own text, then its children's,

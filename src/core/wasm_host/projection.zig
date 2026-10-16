@@ -52,6 +52,25 @@ pub fn hProjBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     results[0] = 0;
 }
 
+/// `wl_proj_extend(name, len) -> i32`: open a build that APPENDS to the named
+/// buffer's committed projection (`View.beginExtend`) — a stream's next rows.
+/// Its commit writes only the new rows' text, at the end. 0, or -1 for no
+/// such buffer.
+pub fn hProjExtend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = -1;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(name);
+    const buffers = p.activeCtx().buffers;
+    const id = buffers.findByName(name) orelse return;
+    const entry = buffers.get(id) orelse return;
+    const view = viewFor(p, entry) orelse return;
+    view.beginExtend();
+    p.proj_building = entry.ref();
+    results[0] = 0;
+}
+
 /// The entry whose projection has a build open. A build is not concurrent, so
 /// this is unambiguous, and it is a generation-checked `Ref` rather than a
 /// pointer: an entry closed mid-build resolves to nothing instead of to
@@ -254,7 +273,36 @@ pub fn hProjCommit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     results[0] = -1;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const open = openBuild(p) orelse return;
-    results[0] = repaint(p, open.entry, open.view, .commit) orelse -1;
+    results[0] = (if (open.view.extending) extend(p, open.entry, open.view) else repaint(p, open.entry, open.view, .commit)) orelse -1;
+}
+
+/// An extending build's commit: the new rows' text appended to the document
+/// (a producer's insert at the end — the cost of the rows, not of what was
+/// there), the layers repainted, and the cursor left where it was: rows
+/// arriving below must not move a reader.
+fn extend(p: *WasmPlugin, entry: *Buffers.Buffer, view: *projection.View) ?i32 {
+    const gpa = p.gpa;
+    const editor = entry.textEditor() orelse return null;
+    const doc = &editor.doc;
+    // Whether the reader is on a row a verb acts on. One who is stays there;
+    // one who is not (on a preamble line, or in an empty buffer) lands on the
+    // first such row when it arrives — what a whole commit does on a fill.
+    const on_subject = view.subjectAt(editor.cursorOffset()) != null;
+    const first = view.nodes.items.len;
+    const added = view.commitExtend() catch return null;
+    const end = editor.text().byteLen();
+    command.produceInto(gpa, &p.activeCtx().buffers.notices, doc, .plugin, p.name, &.{
+        .{ .range = .{ .start = end, .end = end }, .bytes = added.text },
+    }) catch return null;
+    paintStyles(p, view, doc, editor.text().byteLen());
+    paintFolds(p, view, doc);
+    anchorEditableRows(view, doc);
+    if (!on_subject) for (view.nodes.items[first..]) |*n| {
+        if (!n.focusable) continue;
+        editor.placeCursor(@min(n.restingOffset(null), editor.text().byteLen()));
+        break;
+    };
+    return @bitCast(view.revision);
 }
 
 /// Whether a repaint swaps a NEW tree in or re-lays the one already committed.

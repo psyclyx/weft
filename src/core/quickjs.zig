@@ -38,6 +38,7 @@ const fs_gate = @import("wasm_host/fs.zig");
 /// reason one layer over: a JS plugin runs inside `quickjs.wasm`, so it must
 /// not be able to reach a proc door shaped differently from the one every
 /// other guest gets (doc/place.md §4.1a).
+const append_door = @import("wasm_host/append.zig");
 const proc_doors = @import("wasm_host/proc.zig");
 const declare_doors = @import("wasm_host/declare.zig");
 const edit_doors = @import("wasm_host/edit.zig");
@@ -246,6 +247,7 @@ pub const plugin_handlers = .{
     .{ .name = "qjs_proc_send", .handler = cProcSend },
     .{ .name = "qjs_proc_read", .handler = cProcRead },
     .{ .name = "qjs_proc_status", .handler = cProcStatus },
+    .{ .name = "qjs_proc_close_input", .handler = cProcCloseInput },
     .{ .name = "qjs_proc_close", .handler = cProcClose },
     .{ .name = "qjs_buffer_append", .handler = cBufferAppend },
     .{ .name = "qjs_buffer_fold", .handler = cBufferFold },
@@ -878,6 +880,7 @@ const cProcSpawn = jsDoor(proc_doors.spawnBody, .proc);
 const cProcSend = jsDoor(proc_doors.sendBody, .proc);
 const cProcRead = jsDoor(proc_doors.readBody, .proc);
 const cProcStatus = jsDoor(proc_doors.statusBody, null);
+const cProcCloseInput = jsDoor(proc_doors.closeInputBody, null);
 const cProcClose = jsDoor(proc_doors.closeBody, null);
 
 // The read/motion surface, one body each in `wasm_host/edit.zig`. A JS plugin
@@ -925,42 +928,6 @@ pub const cMacroRecording = jsDoor(history_doors.macroRecordingBody, null);
 /// The CRDT peer JS-plugin transcript/tool-buffer output authors as.
 const transcript_peer = "agent-ui";
 
-/// Append `text` to the end of the buffer named `name` (created if absent),
-/// authored as a fixed tool peer — the streamed-transcript path, targeting a
-/// buffer by name so it need not be focused (mirrors repl_session.drain).
-fn appendNamed(ctx: *command.Context, gpa: Allocator, name: []const u8, text: []const u8, class: u8) void {
-    const bufs = ctx.buffers;
-    const b = bufs.get(bufs.ensureNamed(gpa, name) catch return) orelse return;
-    const ed = b.textEditor() orelse return;
-    const doc = &ed.doc;
-    const start = ed.text().byteLen();
-    command.produceInto(gpa, &ctx.buffers.notices, doc, .plugin, transcript_peer, &.{.{ .range = .{ .start = start, .end = start }, .bytes = text }}) catch return;
-    if (class != 0) paintStyle(ctx, gpa, doc, start, start + text.len, class);
-}
-
-/// Paint `[start, end)` with StyleClass `class` on `doc`'s styles feed, growing
-/// the class-per-byte bulk to the buffer's new length and PRESERVING prior
-/// classes (so a streamed transcript keeps each chunk's color). The styles
-/// layer is claimed once (find, else claim) and republished with the extended
-/// array — the whole-buffer bulk the view paints from.
-fn paintStyle(ctx: *command.Context, gpa: Allocator, doc: *@import("Document.zig"), start: usize, end: usize, class: u8) void {
-    const total = end; // the append put the new end here
-    const layer = ctx.caps.layers.find(doc, "styles") orelse
-        (ctx.caps.layers.claim(gpa, doc, "styles", .local, transcript_peer) catch return);
-    const classes = gpa.alloc(u8, total) catch return;
-    defer gpa.free(classes);
-    @memset(classes, 0);
-    if (layer.bulk) |b0| {
-        const keep = @min(b0.classes.len, total);
-        @memcpy(classes[0..keep], b0.classes[0..keep]);
-    }
-    const s = @min(start, total);
-    @memset(classes[s..total], class);
-    const version = doc.version(gpa) catch return;
-    defer gpa.free(version);
-    layer.publishBulk(gpa, version, 0, classes) catch {};
-}
-
 /// Find the buffer named `name` (created if absent), or null on failure.
 fn namedBuffer(ctx: *command.Context, gpa: Allocator, name: []const u8) ?*Buffers.Buffer {
     var it = ctx.buffers.iterator();
@@ -1005,16 +972,7 @@ fn cBufferLen(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     results[0] = @intCast((b.textEditor() orelse return).text().byteLen());
 }
 
-fn cBufferAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
-    const gpa = self.gpa;
-    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer gpa.free(name);
-    const text = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
-    defer gpa.free(text);
-    appendNamed(self.bridge.activeCtx(), gpa, name, text, @truncate(@as(u32, @bitCast(args[4]))));
-}
+const cBufferAppend = jsDoor(append_door.appendBody, null);
 
 /// weft.transcriptEntry(name, role, text): begin a new entry in this
 /// plugin's conversation for `name` (minted on first use —

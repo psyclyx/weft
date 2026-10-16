@@ -813,7 +813,9 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // The minimal agent adapter is exercised with a hermetic CLI selected
     // through its ordinary plugin config. This drives its real fs-write + proc
     // path and produces the same *llm* tool buffer as a user's `llm` binary.
-    try ed.setConfig("llm", "cmd", "sed 's/^/assistant: /'");
+    const adapter = try h.ShCommand.init(gpa, "exec sed 's/^/assistant: /'\n");
+    defer adapter.deinit(gpa);
+    try ed.setConfig("llm", "cmd", adapter.command);
     ed.runStr("llm.ask", "demo prompt");
     try t.expect(drainToolContains(&ed, "*llm*", "assistant: demo prompt"));
     proj.capture(&ed, "spine-llm-agent");
@@ -1645,7 +1647,9 @@ test "e2e/session: two LLM asks in flight land in their own conversations" {
 
     // A hermetic adapter that answers slowly enough for the second ask to be
     // issued while the first is still running — real overlap, not a sequence.
-    try ed.setConfig("llm", "cmd", "sh -c 'sleep 0.3; exec sed \"s/^/assistant: /\"'");
+    const adapter = try h.ShCommand.init(gpa, "sleep 0.3; exec sed 's/^/assistant: /'\n");
+    defer adapter.deinit(gpa);
+    try ed.setConfig("llm", "cmd", adapter.command);
     ed.runStr("llm.ask", "first prompt");
     ed.runStr("llm.ask", "second prompt");
 
@@ -2516,4 +2520,25 @@ test "e2e/place: a second project gets its own REPL, and neither captures the ot
         defer gpa.free(first);
         try t.expect(std.mem.indexOf(u8, first, "from-b") == null);
     }
+}
+
+// `modes.run` runs a file with its language's runner. It used to splice the
+// path into a shell line (`sh {}`), so a file whose name held a space or a
+// quote ran something else, or nothing. Its runner is an argv now, and the
+// path is one argument whatever it contains; the output streams into *run*.
+test "e2e/run: a file whose name has a space and a quote runs as itself" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+
+    try core.file.writeBytes(gpa, "run it's here.sh", "echo ran-as-itself\n");
+    ed.runStr("file.open", "run it's here.sh");
+    ed.run("modes.run");
+    try t.expect(drainToolContains(&ed, "*run*", "ran-as-itself"));
 }

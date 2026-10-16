@@ -35,5 +35,6 @@ comptime {
 /// it used to be a slice into the shim's shared arg scratch that any other read
 /// door would have overwritten underneath us.
 fn insertShell(cmd: []const u8) void {
-    weft.shellInsert(cmd);
+    // What was given IS a shell line, so the shell is asked for.
+    weft.shellInsert(&.{ "sh", "-c", cmd });
 }

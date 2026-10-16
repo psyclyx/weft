@@ -61,7 +61,7 @@
 //! perms `{proc, timer}` — NO filesystem capability at all, which for the most
 //! privileged plugin in the tree is the whole point of `doc/place.md` §4.2.
 //! The three things git hands a subprocess on disk — a synthesized patch, a
-//! draft's message, a rebase plan — go through `weft.procSpool`, which writes
+//! draft's message, a rebase plan — go through `weft.exec`'s input, which writes
 //! them to a temp the HOST names and removes; git names no path it writes and
 //! cleans up nothing. The two things it PROBES for — is this project a git
 //! repository, is a rebase mid-flight — go through `weft.placeHas`, which
@@ -371,9 +371,9 @@ const entries: [cmds.len]weft.CommandEntry = blk: {
 };
 
 comptime {
-    // `{proc, timer}` and nothing else — the set `direnv` and `spool` have.
+    // `{proc, timer}` and nothing else — the set `direnv` has.
     // Every file git hands a subprocess is spooled by the host
-    // (`weft.procSpool`), and every path it used to PROBE is inside the place
+    // (`weft.exec`'s input), and every path it used to PROBE is inside the place
     // it already dispatches in (`weft.placeHas`), so there is no filesystem
     // question left for a grant to answer. `wasm_abi/tests.zig` asserts the
     // absence of both fs capabilities, so a regrant is loud.
@@ -577,7 +577,7 @@ fn onViewFilled(style: model.ViewStyle) void {
 
 /// A buffer took focus. One offer table is live for the `git` tool identity,
 /// so it has to describe the repository the user is now looking at — this is
-/// the routing entry for focus, exactly as `on_fill_token` is for a delivery.
+/// the routing entry for focus, exactly as an exec continuation's bound entry is for a delivery.
 fn on_activate() callconv(.c) void {
     if (focusedSession()) |s| model.Repos.routed = s;
 }

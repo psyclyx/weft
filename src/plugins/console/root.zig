@@ -1,7 +1,8 @@
 //! console — command consoles (design §6.3, comint-flavored), a `.wasm` plugin
 //! (perms `{proc, timer}`). `console.open` opens a console buffer; typing a
-//! command and running `console.send` appends its output below via the native
-//! `proc` APPEND surface. This is the STATELESS end of the REPL story — each
+//! command and running `console.send` runs it (`sh -c`: what was typed IS a
+//! shell line) and streams its output below as it is written (`weft.spawn`,
+//! `weft.bufferAppend`). This is the STATELESS end of the REPL story — each
 //! line is an independent command. A stateful REPL (python -i, nREPL, keeping
 //! session state) is the `repl` plugin's persistent interactive-proc session.
 //!
@@ -16,6 +17,35 @@ const weft = @import("weft");
 /// no other state (each line is an independent command).
 var consoles: weft.Instances(void) = .{};
 var cmd_buf: [1 << 12]u8 = undefined;
+
+/// One send's run: which log it appends to, and whether it has written yet
+/// (its first output starts on a line of its own).
+const Run = struct {
+    log: [128]u8 = undefined,
+    log_len: usize = 0,
+    started: bool = false,
+
+    fn name(self: *const Run) []const u8 {
+        return self.log[0..self.log_len];
+    }
+};
+
+/// The run's output, appended to its console's log as the command writes it.
+const Output = struct {
+    pub fn chunk(run: *Run, bytes: []const u8) void {
+        if (!run.started) {
+            run.started = true;
+            weft.bufferAppend(run.name(), "\n", 0);
+        }
+        weft.bufferAppend(run.name(), bytes, 0);
+    }
+
+    pub fn exit(run: *Run, code: i32, stderr: []const u8) void {
+        _ = code;
+        _ = stderr;
+        weft.allocator.destroy(run);
+    }
+};
 
 /// `params` is the command's argument shape, written the way a person reads
 /// it back (`describeCommand`): the palette shows it beside the row, the `:`
@@ -60,7 +90,17 @@ fn send() void {
     if (line.len == 0) return;
     const n = @min(line.len, cmd_buf.len);
     @memcpy(cmd_buf[0..n], line[0..n]); // copy — the read scratch is reused below
-    weft.procAppendBuffer(cmd_buf[0..n], slot.name(), 0);
+    const log = slot.name();
+    const run = weft.allocator.create(Run) catch return;
+    run.* = .{};
+    run.log_len = @min(log.len, run.log.len);
+    @memcpy(run.log[0..run.log_len], log[0..run.log_len]);
+    // A typed line is a shell line by design: the shell is asked for, not
+    // implied. Its stderr is part of what it said.
+    if (weft.spawnWith(*Run, run, .{ .argv = &.{ "sh", "-c", cmd_buf[0..n] }, .merge_stderr = true }, Output) == null) {
+        weft.allocator.destroy(run);
+        weft.echo("console: the command could not be started");
+    }
 }
 
 comptime {

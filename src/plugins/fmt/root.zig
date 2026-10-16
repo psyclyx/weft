@@ -48,16 +48,21 @@ const formatters = [_]struct { ext: []const u8, cmd: []const u8 }{
 fn formatBuffer() void {
     const path = weft.path() orelse return;
     inline for (formatters) |f| {
-        if (std.mem.endsWith(u8, path, f.ext))
-            return weft.procFilter(f.cmd, .{ .start = 0, .end = weft.byteLen() });
+        if (std.mem.endsWith(u8, path, f.ext)) {
+            // Words, no shell: `{}` is the host's temp file, one argument.
+            var words: weft.Argv = .{};
+            return weft.procFilter(weft.argvWords(f.cmd, &words), .{ .start = 0, .end = weft.byteLen() });
+        }
     }
 }
 
-/// Filter the selection (or the whole buffer) through arg0 as a shell command.
+/// Filter the selection (or the whole buffer) through arg0 as a shell command
+/// (`{}` is the file holding the text). What was typed IS a shell line, so the
+/// shell is asked for: `sh -c <it>`.
 fn filter() void {
     const cmd = weft.argStr(0) orelse return;
     const r = weft.selection() orelse weft.Range{ .start = 0, .end = weft.byteLen() };
-    weft.procFilter(cmd, r);
+    weft.procFilter(&.{ "sh", "-c", cmd }, r);
 }
 
 comptime {

@@ -97,6 +97,8 @@ __attribute__((import_module("weft"), import_name("qjs_proc_send")))
 extern void host_proc_send(int handle, const char *ptr, int len);
 __attribute__((import_module("weft"), import_name("qjs_proc_read")))
 extern int host_proc_read(int handle, int stream, char *out, int cap);
+__attribute__((import_module("weft"), import_name("qjs_proc_close_input")))
+extern void host_proc_close_input(int handle);
 __attribute__((import_module("weft"), import_name("qjs_proc_status")))
 extern int host_proc_status(int handle);
 __attribute__((import_module("weft"), import_name("qjs_proc_close")))
@@ -1097,6 +1099,16 @@ static JSValue js_proc_spawn(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt32(ctx, h);
 }
 
+// weft.procCloseInput(handle): end the child's input (EOF on its stdin).
+static JSValue js_proc_close_input(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    int h;
+    JS_ToInt32(ctx, &h, argv[0]);
+    host_proc_close_input(h);
+    return JS_UNDEFINED;
+}
+
 // weft.procStatus(handle) -> the exit code once the child has exited (-1 by
 // signal, or it never ran), null while it runs.
 static JSValue js_proc_status(JSContext *ctx, JSValueConst this_val,
@@ -1849,6 +1861,7 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "procRead", JS_NewCFunction(g_ctx, js_proc_read, "procRead", 1));
     JS_SetPropertyStr(g_ctx, weft, "procClose", JS_NewCFunction(g_ctx, js_proc_close, "procClose", 1));
     JS_SetPropertyStr(g_ctx, weft, "procStatus", JS_NewCFunction(g_ctx, js_proc_status, "procStatus", 1));
+    JS_SetPropertyStr(g_ctx, weft, "procCloseInput", JS_NewCFunction(g_ctx, js_proc_close_input, "procCloseInput", 1));
     JS_SetPropertyStr(g_ctx, weft, "bufferAppend", JS_NewCFunction(g_ctx, js_buffer_append, "bufferAppend", 2));
     JS_SetPropertyStr(g_ctx, weft, "bufferFold", JS_NewCFunction(g_ctx, js_buffer_fold, "bufferFold", 3));
     JS_SetPropertyStr(g_ctx, weft, "bufferLen", JS_NewCFunction(g_ctx, js_buffer_len, "bufferLen", 1));
