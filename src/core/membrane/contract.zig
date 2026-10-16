@@ -222,6 +222,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_buffer_name", .handler = buffers.hBufferName },
     .{ .name = "wl_buffer_active", .handler = buffers.hBufferActive },
     .{ .name = "wl_buffer_readonly", .handler = buffers.hBufferReadonly },
+    .{ .name = "wl_buffer_docked", .handler = buffers.hBufferDocked },
     .{ .name = "wl_buffer_path", .handler = buffers.hBufferPath },
     .{ .name = "wl_buffer_dirty", .handler = buffers.hBufferDirty },
     .{ .name = "wl_buffer_lang", .handler = buffers.hBufferLang },
@@ -283,6 +284,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_activate_path", .handler = activation.hActivatePath },
     .{ .name = "wl_signal_subscribe", .handler = activation.hSignalSubscribe },
     .{ .name = "wl_signal_emit", .handler = activation.hSignalEmit },
+    .{ .name = "wl_signal_emit_after", .handler = activation.hSignalEmitAfter },
 
     // ── tool.zig — projection ownership ─────────────────────────────────
     .{ .name = "wl_tool_backing", .handler = tool.hToolBacking },
@@ -409,6 +411,8 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_semantic_fs_capabilities", .handler = semantic_fs.hCapabilities },
     .{ .name = "wl_semantic_fs_list", .handler = semantic_fs.hList },
     .{ .name = "wl_semantic_fs_apply", .handler = semantic_fs.hApply },
+    .{ .name = "wl_semantic_fs_watch", .handler = semantic_fs.hWatch },
+    .{ .name = "wl_semantic_fs_changed", .handler = semantic_fs.hChanged },
 
     // ── slot.zig — D2's generic, schema-directed membrane verbs ────────
     .{ .name = "wl_slot_declare", .handler = slot.hSlotDeclare },
@@ -646,10 +650,13 @@ const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_semantic_fs_capabilities", .perm = .fs_read }, // semantic_fs.zig hCapabilities: .fs_read
     .{ .name = "wl_semantic_fs_list", .perm = .fs_read }, // semantic_fs.zig hList: .fs_read
     .{ .name = "wl_semantic_fs_apply", .perm = .fs_write }, // semantic_fs.zig hApply: .fs_write
+    .{ .name = "wl_semantic_fs_watch", .perm = .fs_read }, // semantic_fs.zig hWatch: .fs_read
+    .{ .name = "wl_semantic_fs_changed", .perm = .fs_read }, // semantic_fs.zig hChanged: .fs_read
     .{ .name = "wl_semantic_transfer_capture", .perm = .fs_read }, // transfer_attachment.zig hCapture: .fs_read
     .{ .name = "wl_env_publish", .perm = .env }, // env.zig hEnvPublish: .env
     .{ .name = "wl_clipboard_set", .perm = .clipboard }, // clipboard.zig hClipboardSet: wasmDoor gate .clipboard
     .{ .name = "wl_clipboard_get", .perm = .clipboard }, // clipboard.zig hClipboardGet: wasmDoor gate .clipboard
+    .{ .name = "wl_signal_emit_after", .perm = .timer }, // activation.zig hSignalEmitAfter: .timer
 };
 
 test "membrane contract: table .perm metadata agrees with the handlers' actual requirePerm gates" {

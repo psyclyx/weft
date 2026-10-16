@@ -1,10 +1,10 @@
 //! Platform-selected font-file provider facade.
 //!
 //! Text shaping consumes bytes and does not know how a platform resolves a
-//! family name. The build supplies one implementation module here; Linux uses
-//! fontconfig, while unsupported targets return no optional face and let the
-//! caller use its embedded mono fallback. A CoreText implementation can replace
-//! the provider on Darwin without changing `weft_text`, `View`, or `FaceSet`.
+//! family name. The build supplies one implementation module here — fontconfig
+//! on Linux, CoreText on macOS — and a family neither resolves leaves the
+//! caller on its embedded mono fallback, without `weft_text`, `View`, or
+//! `FaceSet` knowing which platform answered.
 
 const std = @import("std");
 const contract = @import("contract");

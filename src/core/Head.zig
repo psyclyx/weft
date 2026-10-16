@@ -136,6 +136,14 @@ view_range: ?ViewRange = null,
 /// without core holding a keymap that knows it is one.
 key_serial: u32 = 0,
 
+/// A person's live keystroke TYPED text into the active entry's text document
+/// since the last frame boundary — the commit path's fact, set by dispatch
+/// (never for a dot-repeat or macro replaying keys, never for a paste or any
+/// other command that inserts, never for a field of a listing). The app turns
+/// it into the `input.typed` signal at the boundary and clears it; what typing
+/// should SET OFF (completion popping up, say) is a listener's business.
+typed: bool = false,
+
 /// What the last undo step this head began ran, as `step.zig` identifies it
 /// (mode and command) — how a `run` mode knows the next keystroke continues
 /// the same run. Zero before the first.

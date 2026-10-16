@@ -274,12 +274,12 @@ test "e2e/ide: the grammar edits like a conventional editor, one undo unit per o
     ed.press("C-Home", "");
     ed.chord("S-Down S-Down");
     ed.press("Tab", "\t");
-    try expectText(ed, "  1\n  two\nthree\n");
+    try expectText(ed, "    1\n    two\nthree\n");
     try t.expect(selected(ed) != null);
     ed.press("ISO_Left_Tab", "");
     try expectText(ed, "1\ntwo\nthree\n");
     ed.press("Tab", "\t");
-    try expectText(ed, "  1\n  two\nthree\n");
+    try expectText(ed, "    1\n    two\nthree\n");
     ed.press("C-z", "");
     try expectText(ed, "1\ntwo\nthree\n");
 
@@ -553,10 +553,11 @@ test "e2e/ide: a live REPL is a key of the context — the event names it, a pre
     try t.expect(std.mem.indexOf(u8, runStr(ed, &buf, "offerwatch.keys", &.{}), "repl.session") == null);
 
     // Explain and the keypress read the same freshly synced table: both say
-    // the config's provider runs it, and running it sends the line.
+    // the provider config/code.js declares runs it, and running it sends
+    // the line.
     const why = core.intent.explain(ed.ctx, &arms);
     try t.expect(why == .ready);
-    try t.expectEqualStrings("config", why.ready.provider);
+    try t.expectEqualStrings("import:code", why.ready.provider);
     try t.expect(offered(ed, "plugin.code.send-to-repl"));
     var refusal: [256]u8 = undefined;
     try t.expect(ed.ctx.intent.?.invokeNamed(ed.ctx, "plugin.code.send-to-repl", &refusal) == .invoked);
@@ -868,7 +869,7 @@ test "e2e/ide: moves and line edits act at every selection, and Escape collapses
     try t.expectEqual(Span{ .start = 11, .end = 17 }, selected(ed).?);
     // Tab indents both lines (not the one between), as one undo unit.
     ed.press("Tab", "\t");
-    try expectText(ed, "  foo x;\nbar\n  foo y;\n");
+    try expectText(ed, "    foo x;\nbar\n    foo y;\n");
     ed.press("C-z", "");
     try expectText(ed, "foo x;\nbar\nfoo y;\n");
 

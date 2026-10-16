@@ -114,7 +114,7 @@ pub const Session = struct {
     }
 
     fn shutdownConn(s: *Session) void {
-        _ = std.os.linux.shutdown(s.conn.fd(), 2); // SHUT_RDWR — unblocks recv
+        _ = std.c.shutdown(s.conn.fd(), std.c.SHUT.RDWR); // unblocks recv
     }
 
     fn readLoop(s: *Session) void {

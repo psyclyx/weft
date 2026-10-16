@@ -369,14 +369,16 @@ test "proc: cwd runs the child in the given directory" {
     defer pool.deinit();
 
     // `pwd -P` in an explicit cwd reports that dir, not weft's. /tmp is a
-    // stable, always-present absolute dir (resolve symlinks so macos /tmp
-    // → /private/tmp doesn't trip the compare — Linux CI is the target here).
+    // stable, always-present absolute dir — `pwd -P` resolves it, so the
+    // compare does too (macOS's /tmp is a link to /private/tmp).
+    var tmp_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const tmp = std.mem.sliceTo(std.c.realpath("/tmp", &tmp_buf) orelse return error.SkipZigTest, 0);
     var proc = try Proc.spawn(gpa, pool, &.{ "/bin/sh", "-c", "pwd -P" }, .{ .cwd = "/tmp" });
     defer proc.deinit();
     var res = try (try pollToEnd(&proc, 1_000_000));
     defer res.deinit(gpa);
     const out = std.mem.trimEnd(u8, res.stdout, "\n");
-    try t.expectEqualStrings("/tmp", out);
+    try t.expectEqualStrings(tmp, out);
 
     // null cwd (the default) inherits weft's cwd — not "/tmp" (unless weft is
     // literally in /tmp, which the test runner is not).
@@ -384,7 +386,7 @@ test "proc: cwd runs the child in the given directory" {
     defer p2.deinit();
     var r2 = try (try pollToEnd(&p2, 1_000_000));
     defer r2.deinit(gpa);
-    try t.expect(!std.mem.eql(u8, std.mem.trimEnd(u8, r2.stdout, "\n"), "/tmp"));
+    try t.expect(!std.mem.eql(u8, std.mem.trimEnd(u8, r2.stdout, "\n"), tmp));
 }
 
 test {

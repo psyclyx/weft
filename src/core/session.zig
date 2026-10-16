@@ -32,7 +32,9 @@
 //! socketpair) live in `session/tests.zig`.
 
 const std = @import("std");
-const linux = std.os.linux;
+const builtin = @import("builtin");
+const c = std.c;
+const posix_fd = @import("posix_fd.zig");
 
 // ── Curated re-exports ──────────────────────────────────────────────
 
@@ -74,15 +76,32 @@ pub const Conn = @import("session/Conn.zig");
 
 // ── TCP bootstrap (shared by editor and agent) ──────────────────────
 
+/// Every socket weft makes is close-on-exec (a launched tool must not hold a
+/// peer's connection open) and, on Darwin, `SO_NOSIGPIPE`. Sockets are
+/// written with plain `write(2)`, which raises SIGPIPE on a peer that hung
+/// up; while a `std.Io.Threaded` lives (main's does, for the process's life)
+/// its handler absorbs that and the write answers EPIPE. Darwin has no
+/// `MSG_NOSIGNAL` but does have the per-socket option, so there a broken
+/// socket answers EPIPE with or without that handler. Best effort — a
+/// refused option leaves a working socket.
+fn ownSocket(fd: i32) void {
+    _ = posix_fd.setCloexec(fd);
+    if (comptime builtin.os.tag.isDarwin()) {
+        const one: c_int = 1;
+        _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.NOSIGPIPE, &one, @sizeOf(c_int));
+    }
+}
+
 pub fn tcpListener(port: u16) !i32 {
-    const fd_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
-    if (linux.errno(fd_rc) != .SUCCESS) return error.Socket;
-    const fd: i32 = @intCast(fd_rc);
-    var one: i32 = 1;
-    _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, @ptrCast(&one), 4);
-    var addr: linux.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = 0 };
-    if (linux.errno(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) != .SUCCESS) return error.Bind;
-    if (linux.errno(linux.listen(fd, 8)) != .SUCCESS) return error.Listen;
+    const fd = c.socket(c.AF.INET, c.SOCK.STREAM, 0);
+    if (fd < 0) return error.Socket;
+    errdefer _ = c.close(fd);
+    ownSocket(fd);
+    const one: c_int = 1;
+    _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.REUSEADDR, &one, @sizeOf(c_int));
+    var addr: c.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = 0 };
+    if (c.bind(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.in)) != 0) return error.Bind;
+    if (c.listen(fd, 8) != 0) return error.Listen;
     return fd;
 }
 
@@ -91,35 +110,41 @@ pub fn tcpListener(port: u16) !i32 {
 /// the endpoint remains owned by the listener, while callers can advertise
 /// the resolved port without reaching into platform socket details.
 pub fn tcpListenerPort(listener: i32) !u16 {
-    var addr: linux.sockaddr.in = undefined;
-    var addr_len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
-    if (linux.errno(linux.getsockname(listener, @ptrCast(&addr), &addr_len)) != .SUCCESS)
+    var addr: c.sockaddr.in = undefined;
+    var addr_len: c.socklen_t = @sizeOf(c.sockaddr.in);
+    if (c.getsockname(listener, @ptrCast(&addr), &addr_len) != 0)
         return error.SocketName;
     return std.mem.bigToNative(u16, addr.port);
 }
 
 pub fn tcpAccept(listener: i32) !i32 {
-    const conn_rc = linux.accept4(listener, null, null, 0);
-    if (linux.errno(conn_rc) != .SUCCESS) return error.Accept;
-    return @intCast(conn_rc);
+    const conn = c.accept(listener, null, null);
+    if (conn < 0) return error.Accept;
+    ownSocket(conn);
+    return conn;
 }
 
 /// Single-peer convenience (editor pairing): accept one, close the
 /// listener.
 pub fn tcpListen(port: u16) !i32 {
     const listener = try tcpListener(port);
-    defer _ = linux.close(listener);
+    defer _ = c.close(listener);
     return tcpAccept(listener);
+}
+
+/// A connected pair of local stream sockets (AF_UNIX) — an in-process
+/// stand-in for a TCP connection, owned like every other socket here.
+pub fn unixSocketPair() ![2]i32 {
+    var fds: [2]i32 = undefined;
+    if (c.socketpair(c.AF.UNIX, c.SOCK.STREAM, 0, &fds) != 0) return error.SocketPair;
+    for (fds) |fd| ownSocket(fd);
+    return fds;
 }
 
 /// How long a TCP connect may take before we give up. Bounds every
 /// connect path (boot, runtime, reconnect) so an unreachable host can
 /// never wedge the caller — the editor's frame thread included.
 pub const connect_timeout_ms: i32 = 8000;
-
-/// O_NONBLOCK as a file-status flag (Linux x86_64/arm64); numerically the
-/// same as SOCK.NONBLOCK, which is why socket(...|SOCK.NONBLOCK) sets it.
-const o_nonblock: usize = 0o4000;
 
 pub fn tcpConnect(hostport: []const u8) !i32 {
     const colon = std.mem.lastIndexOfScalar(u8, hostport, ':') orelse return error.BadAddress;
@@ -134,32 +159,32 @@ pub fn tcpConnect(hostport: []const u8) !i32 {
     }
     // Non-blocking connect + a bounded poll, so a dead host times out
     // instead of blocking indefinitely in the connect syscall.
-    const fd_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.NONBLOCK, 0);
-    if (linux.errno(fd_rc) != .SUCCESS) return error.Socket;
-    const fd: i32 = @intCast(fd_rc);
-    errdefer _ = linux.close(fd);
-    var addr: linux.sockaddr.in = .{
+    const fd = c.socket(c.AF.INET, c.SOCK.STREAM, 0);
+    if (fd < 0) return error.Socket;
+    errdefer _ = c.close(fd);
+    ownSocket(fd);
+    if (!posix_fd.setNonblocking(fd, true)) return error.Socket;
+    var addr: c.sockaddr.in = .{
         .port = std.mem.nativeToBig(u16, port),
         .addr = std.mem.bytesToValue(u32, &octets),
     };
-    switch (linux.errno(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in)))) {
+    switch (c.errno(c.connect(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.in)))) {
         .SUCCESS => {}, // connected immediately (e.g. localhost)
         .INPROGRESS, .INTR, .AGAIN => {
             // Wait until writable (or the deadline), then read SO_ERROR.
-            var pfd: linux.pollfd = .{ .fd = fd, .events = linux.POLL.OUT, .revents = 0 };
-            const prc = linux.poll(@ptrCast(&pfd), 1, connect_timeout_ms);
-            if (linux.errno(prc) != .SUCCESS) return error.Connect;
+            var pfd = [1]c.pollfd{.{ .fd = fd, .events = c.POLL.OUT, .revents = 0 }};
+            const prc = c.poll(&pfd, 1, connect_timeout_ms);
+            if (prc < 0) return error.Connect;
             if (prc == 0) return error.ConnectTimeout;
-            var sockerr: i32 = 0;
-            var len: linux.socklen_t = @sizeOf(i32);
-            _ = linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.ERROR, @ptrCast(&sockerr), &len);
+            var sockerr: c_int = 0;
+            var len: c.socklen_t = @sizeOf(c_int);
+            _ = c.getsockopt(fd, c.SOL.SOCKET, c.SO.ERROR, &sockerr, &len);
             if (sockerr != 0) return error.Connect;
         },
         else => return error.Connect,
     }
     // Back to blocking: the reader/writer threads expect blocking I/O.
-    const flags = linux.fcntl(fd, linux.F.GETFL, 0);
-    _ = linux.fcntl(fd, linux.F.SETFL, flags & ~o_nonblock);
+    _ = posix_fd.setNonblocking(fd, false);
     return fd;
 }
 

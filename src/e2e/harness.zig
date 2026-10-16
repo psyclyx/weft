@@ -2,9 +2,9 @@
 //! the way a person does: boot the real config (or load plugins), press keys
 //! through the keymap (so bound keys, chords, and modes behave exactly as in the
 //! app), type text, run commands, and observe the rendered surface + disk. The
-//! authoritative two-editor spine renders with standard headless Vulkan (no
-//! WSI/Wayland); smaller geometry tests retain a CPU target. PPM artifacts live
-//! under `.zig-cache/tmp/`.
+//! authoritative two-editor spine renders with the build's standard headless
+//! GPU target (Vulkan or OpenGL; no window system); smaller geometry tests
+//! retain a CPU target. PPM artifacts live under `.zig-cache/tmp/`.
 //!
 //! The point (per the design brief): approach a task as "the natural way to do
 //! X in weft is to press Y". If Y doesn't exist, is bound weird, or is more
@@ -41,7 +41,7 @@ const app_collab = weft.app.collab;
 const app_collab_cmds = weft.app.collab_cmds;
 const app_application = weft.app.application;
 const app_render_memory = weft.app.render_memory;
-const app_headless_vulkan = weft.app.headless_vulkan;
+const app_headless = weft.app.headless;
 pub const region = weft.region;
 
 // Re-exports so the per-concern test files can alias what they need from this
@@ -64,7 +64,7 @@ const InputObserver = struct {
     }
 };
 
-/// The authoritative editor capture canvas. The production frame, Vulkan
+/// The authoritative editor capture canvas. The production frame, GPU
 /// target, readback, ordinary PPMs, and each half of the demo video all use
 /// this size. Keep the aspect ratio stable while giving the recorded editor
 /// enough pixels for text and plugin surfaces to remain legible.
@@ -99,6 +99,19 @@ pub const acp_js = weft.acp_js;
 /// plugin-host locals (engine/loop/plugins). Driving the real Session — not a
 /// look-alike — is why completion / hover / goto-def work without the harness
 /// re-wiring anything; a new capability the app gains is here for free.
+/// The plugin loop's clock in this harness. Its timers are DELAYS a plugin
+/// asked for — a debounce before completion pops up — and on the wall clock a
+/// delay races every `settle`: whether a popup is showing when a test presses
+/// Tab would be a matter of how busy the box was. So the clock only moves
+/// when a test says (`Editor.advanceClock`): a delay never elapses by
+/// accident, and a timer due now (zero delay) still fires on the next wake.
+/// Nothing else reads it — process streams and syntax parses keep real time.
+pub var loop_clock_ns: u64 = 0;
+
+fn loopNow() u64 {
+    return loop_clock_ns;
+}
+
 pub const Editor = struct {
     gpa: Allocator,
     pool: *core.task.Pool,
@@ -133,9 +146,9 @@ pub const Editor = struct {
     /// target. Tests and recorders only receive its finished framebuffer.
     render: app_render_memory.RenderState = undefined,
     memory_render_live: bool = false,
-    /// Standard headless Vulkan target + the selected production renderer.
-    /// Bound by the authoritative two-editor spine; never imports Wayland.
-    vulkan_head: ?*app_headless_vulkan.Head = null,
+    /// Standard headless GPU target + the selected production renderer.
+    /// Bound by the authoritative two-editor spine; never imports a platform.
+    gpu_head: ?*app_headless.Head = null,
     application: app_application.Application = undefined,
     frame_known_peers: core.known_peers.KnownPeers = undefined,
     frame_conn: ?core.session.Conn = null,
@@ -190,12 +203,12 @@ pub const Editor = struct {
         self.frame_partial_state = null;
         self.frame_noted_host_fp = null;
         self.input_observer = null;
-        self.vulkan_head = null;
+        self.gpu_head = null;
         self.gestures = .{};
         self.pointer_ms = 0;
         self.pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
         self.engine = try core.wasm.Engine.init(gpa);
-        self.loop = core.async_loop.Loop.init(gpa, self.pool, core.task.nowNs);
+        self.loop = core.async_loop.Loop.init(gpa, self.pool, loopNow);
 
         // Stand up the REAL app state, in main()'s construction order: Providers'
         // registries first (Session's capability consumers bind onto them), the
@@ -265,7 +278,7 @@ pub const Editor = struct {
 
     pub fn deinit(self: *Editor) void {
         const gpa = self.gpa;
-        if (self.vulkan_head) |head| {
+        if (self.gpu_head) |head| {
             head.deinit();
             gpa.destroy(head);
         } else if (self.memory_render_live) {
@@ -441,9 +454,9 @@ pub const Editor = struct {
     /// measured, it does not soften it. Off-thread work is deliberately
     /// excluded, exactly as it already was.
     fn threadCpuNs() u64 {
-        var ts: std.os.linux.timespec = undefined;
-        const rc = std.os.linux.clock_gettime(.THREAD_CPUTIME_ID, &ts);
-        if (std.os.linux.errno(rc) != .SUCCESS) return core.task.nowNs();
+        var ts: std.c.timespec = undefined;
+        const rc = std.c.clock_gettime(.THREAD_CPUTIME_ID, &ts);
+        if (std.c.errno(rc) != .SUCCESS) return core.task.nowNs();
         return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
     }
 
@@ -731,6 +744,14 @@ pub const Editor = struct {
         }
     }
 
+    /// Move the plugin loop's clock (`loop_clock_ns`) on by `ms`, then run one
+    /// application wake — so every plugin timer due by then (a debounce, a
+    /// `signalEmitAfter`) fires and is heard, exactly once, in a known order.
+    pub fn advanceClock(self: *Editor, ms: u64) void {
+        loop_clock_ns += ms * std.time.ns_per_ms;
+        _ = self.advanceAt(core.task.nowNs(), false) catch {};
+    }
+
     /// Advance complete application wakes while background work converges.
     /// This deliberately has no private inventory of async producers: picker,
     /// menu, plugins, backing state, activation, layout, and rendering advance
@@ -744,7 +765,7 @@ pub const Editor = struct {
     }
 
     fn advanceAt(self: *Editor, frame_start: u64, force_rebuild: bool) !app_application.Application.AdvanceResult {
-        if (self.vulkan_head) |head| {
+        if (self.gpu_head) |head| {
             return self.application.advance(&head.render, .{
                 .frame_start = frame_start,
                 .fb = .{ app_w, app_h },
@@ -957,7 +978,7 @@ pub const Editor = struct {
     /// frame geometry deliberately) instead of the fixed `app_w`/`app_h`
     /// `snapshot`/`snapshotPanes` use.
     pub fn ensureView(self: *Editor) !*view_mod.View {
-        if (self.vulkan_head) |head| return &head.render.fb.view;
+        if (self.gpu_head) |head| return &head.render.fb.view;
         return &self.render.fb.view;
     }
 
@@ -994,18 +1015,33 @@ pub const Editor = struct {
         return self.win_layout.count();
     }
 
+    /// Number of EDITING panes: those no named viewport owns. A split is one
+    /// more of these; a config's docked chrome (sidebar, toolbar, menubar) is
+    /// none of them, so a test about splitting does not count the config's
+    /// furniture.
+    pub fn editingPaneCount(self: *Editor) usize {
+        var n: usize = 0;
+        self.win_layout.eachPane(&n, struct {
+            fn visit(count: *usize, pane: *window_layout.Pane) void {
+                if (pane.viewport == null) count.* += 1;
+            }
+        }.visit);
+        return n;
+    }
+
     /// Cut this editor over to the selected production renderer on a standard
-    /// offscreen Vulkan image. There is no surface, swapchain, WSI extension,
+    /// standard offscreen target (`gfx.headless`: a Vulkan image or a GL context
+    /// with no drawable). There is no surface, swapchain, window-system binding,
     /// compositor, or platform event pump involved.
-    pub fn enableHeadlessVulkan(self: *Editor) !void {
-        if (self.vulkan_head != null) return;
-        const head = try self.gpa.create(app_headless_vulkan.Head);
+    pub fn enableHeadlessGpu(self: *Editor) !void {
+        if (self.gpu_head != null) return;
+        const head = try self.gpa.create(app_headless.Head);
         errdefer self.gpa.destroy(head);
         try head.init(self.gpa, app_w, app_h, weft.font_provider.defaultMono(), app_em, self.buffers.active_id);
         errdefer head.deinit();
         self.render.deinit();
         self.memory_render_live = false;
-        self.vulkan_head = head;
+        self.gpu_head = head;
         self.win_layout = &head.render.fb.win_layout;
         self.application.bindTarget(self.win_layout, &head.render.fb.view);
     }
@@ -1013,18 +1049,18 @@ pub const Editor = struct {
     /// Build and submit the whole editor frame without waiting for readback.
     /// The paired recorder submits both peers before resolving either fence.
     pub fn submitHeadlessFrameAt(self: *Editor, frame_start: u64) !void {
-        const head = self.vulkan_head orelse return error.HeadlessVulkanNotEnabled;
+        const head = self.gpu_head orelse return error.HeadlessGpuNotEnabled;
         _ = try self.advanceAt(frame_start, true);
         var attempts: usize = 0;
         while (attempts < 10_000) : (attempts += 1) {
             if (try head.render.present(head.ctx, .{ app_w, app_h }, frame_start, false)) return;
             std.Thread.yield() catch {};
         }
-        return error.VulkanSubmitDeferred;
+        return error.GpuSubmitDeferred;
     }
 
     pub fn readHeadlessFrame(self: *Editor) ![]u8 {
-        const head = self.vulkan_head orelse return error.HeadlessVulkanNotEnabled;
+        const head = self.gpu_head orelse return error.HeadlessGpuNotEnabled;
         return head.ctx.readFrame(self.gpa);
     }
 
@@ -1034,7 +1070,7 @@ pub const Editor = struct {
     /// The returned pixels are copied from the active frame target and owned by
     /// the caller.
     pub fn renderCompositeAt(self: *Editor, frame_start: u64) ![]u8 {
-        if (self.vulkan_head != null) {
+        if (self.gpu_head != null) {
             try self.submitHeadlessFrameAt(frame_start);
             return self.readHeadlessFrame();
         }
@@ -1239,27 +1275,25 @@ pub const TestHead = struct {
 // Identities are generated in memory for this participant only; no user key
 // store is loaded or modified.
 
-const linux = std.os.linux;
+const libc = std.c;
 
-pub fn socketPair() ![2]i32 {
-    var fds: [2]i32 = undefined;
-    const rc = linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds);
-    if (linux.errno(rc) != .SUCCESS) return error.SocketPair;
-    return fds;
-}
+pub const socketPair = session.unixSocketPair;
 
 /// Sleep for roughly `us` microseconds of wall-clock — enough to let each
-/// session's reader/writer threads make progress. A raw nanosleep, like
+/// session's reader/writer threads make progress. libc's nanosleep, like
 /// watch.zig's `napMs`: `std.Thread.sleep` left std in 0.16, and a yield-spin
 /// would hold a core the readers need (every caller waits hundreds of
 /// microseconds or more, so nanosleep's granularity is ample).
 pub fn napUs(us: u64) void {
     const ns = us * std.time.ns_per_us;
-    var req: linux.timespec = .{
+    var req: libc.timespec = .{
         .sec = @intCast(ns / std.time.ns_per_s),
         .nsec = @intCast(ns % std.time.ns_per_s),
     };
-    while (linux.errno(linux.nanosleep(&req, &req)) == .INTR) {}
+    while (true) {
+        const rc = libc.nanosleep(&req, &req);
+        if (rc == 0 or libc.errno(rc) != .INTR) return;
+    }
 }
 
 /// A two-peer, in-process collab pair binding two editors' active documents.
@@ -1311,17 +1345,17 @@ pub const Loopback = struct {
         // connection, and Session owns the blocking connected fds thereafter.
         self.listener = try session.tcpListener(0);
         errdefer {
-            _ = linux.close(self.listener);
+            _ = libc.close(self.listener);
             self.listener = -1;
         }
         const port = try session.tcpListenerPort(self.listener);
         const hostport = try std.fmt.allocPrint(gpa, "127.0.0.1:{d}", .{port});
         defer gpa.free(hostport);
         const peer_fd = try session.tcpConnect(hostport);
-        errdefer _ = linux.close(peer_fd);
+        errdefer _ = libc.close(peer_fd);
         const host_fd = try session.tcpAccept(self.listener);
-        errdefer _ = linux.close(host_fd);
-        _ = linux.close(self.listener);
+        errdefer _ = libc.close(host_fd);
+        _ = libc.close(self.listener);
         self.listener = -1;
         self.host_fd = .{ .fd = host_fd };
         self.peer_fd = .{ .fd = peer_fd };
@@ -1392,7 +1426,7 @@ pub const Loopback = struct {
 
     pub fn deinit(self: *Loopback) void {
         if (self.listener >= 0) {
-            _ = linux.close(self.listener);
+            _ = libc.close(self.listener);
             self.listener = -1;
         }
         self.host_ed.frame_collab_session = null;
@@ -1735,13 +1769,12 @@ fn putUvarint(out: *std.ArrayList(u8), gpa: Allocator, value: usize) !void {
 }
 
 // This Zig's std dropped ambient process-cwd mutation (part of the `std.Io`
-// migration — see the gap note below), so the project harness reaches the raw
-// Linux syscalls directly, exactly as session.zig reaches `linux.socket*`.
+// migration — see the gap note below), so the project harness reaches libc's
+// getcwd/chdir directly, exactly as session.zig reaches libc's sockets.
 pub fn getCwdAlloc(gpa: Allocator) ![]u8 {
     var buf: [4096]u8 = undefined;
-    const rc = linux.getcwd(&buf, buf.len);
-    if (@as(isize, @bitCast(rc)) < 0) return error.GetCwd;
-    return gpa.dupe(u8, std.mem.sliceTo(buf[0..rc], 0));
+    const cwd = libc.getcwd(&buf, buf.len) orelse return error.GetCwd;
+    return gpa.dupe(u8, std.mem.sliceTo(cwd, 0));
 }
 
 pub fn chdirTo(path: []const u8) !void {
@@ -1749,8 +1782,7 @@ pub fn chdirTo(path: []const u8) !void {
     if (path.len >= buf.len) return error.NameTooLong;
     @memcpy(buf[0..path.len], path);
     buf[path.len] = 0;
-    const rc = linux.chdir(@as([*:0]const u8, @ptrCast(&buf)));
-    if (@as(isize, @bitCast(rc)) < 0) return error.Chdir;
+    if (libc.chdir(buf[0..path.len :0].ptr) != 0) return error.Chdir;
 }
 
 // libc mkdtemp: create a unique 0700 directory from a `…XXXXXX` template (mutated
@@ -2035,8 +2067,8 @@ pub const Project = struct {
     /// Bind the two existing test screens to one capture clock. The caller
     /// owns both Editors and must keep them alive until Project.deinit.
     pub fn bindDemoScreens(self: *Project, left: *Editor, right: *Editor) !void {
-        try left.enableHeadlessVulkan();
-        try right.enableHeadlessVulkan();
+        try left.enableHeadlessGpu();
+        try right.enableHeadlessGpu();
         self.demo_left = left;
         self.demo_right = right;
         if (self.demoEnabled()) {
@@ -2137,7 +2169,7 @@ pub const Project = struct {
         // Both renders happen inside this one capture operation. There is no
         // per-screen timer: the pair shares one logical frame timestamp.
         const frame_start = core.task.nowNs();
-        if (left.vulkan_head != null and right.vulkan_head != null) {
+        if (left.gpu_head != null and right.gpu_head != null) {
             try left.submitHeadlessFrameAt(frame_start);
             right.submitHeadlessFrameAt(frame_start) catch |err| {
                 const orphan = try left.readHeadlessFrame();
@@ -2145,12 +2177,12 @@ pub const Project = struct {
                 return err;
             };
         }
-        const left_pixels = if (left.vulkan_head != null)
+        const left_pixels = if (left.gpu_head != null)
             try left.readHeadlessFrame()
         else
             try left.renderCompositeAt(frame_start);
         defer self.gpa.free(left_pixels);
-        const right_pixels = if (right.vulkan_head != null)
+        const right_pixels = if (right.gpu_head != null)
             try right.readHeadlessFrame()
         else
             try right.renderCompositeAt(frame_start);
@@ -2529,13 +2561,17 @@ pub fn whichKeyShows(ed: *Editor, needle: []const u8) bool {
 }
 
 /// Author a file the way a person does: open it (adopts the path), enter
-/// insert, type the body, escape, save, and drive the save to disk. The natural
-/// motion — `open` then `i…Esc` then `save`. Assumes a normal-editing resting
-/// mode (call before entering any tool buffer, so no tool mode swallows typing).
+/// insert, PASTE the body, escape, save, and drive the save to disk. The
+/// natural motion — `open` then `i…Esc` then `save`. Pasted, not typed: the
+/// body is finished text, indentation and closing brackets included, and a
+/// person typing it key by key would have auto-indent and autopair writing
+/// half of it for them (`ed.typeText` is that, where a test means it).
+/// Assumes a normal-editing resting mode (call before entering any tool
+/// buffer, so no tool mode swallows typing).
 pub fn authorFile(ed: *Editor, name: []const u8, body: []const u8) void {
     ed.runStr("file.open", name);
     ed.press("i", "");
-    ed.typeText(body);
+    ed.runStr("edit.insert-text", body);
     ed.press("Escape", "");
     ed.run("file.save");
     ed.waitSave();
@@ -2888,4 +2924,5 @@ fn registerGrammars(rt: *core.syntax.Runtime, gpa: Allocator) !void {
     try rt.add(gpa, .{ .extensions = ".nix", .grammar = "nix", .symbol = "tree_sitter_nix" });
     try rt.add(gpa, .{ .extensions = ".js,.jsx,.mjs,.cjs", .grammar = "javascript", .symbol = "tree_sitter_javascript", .outline = q("javascript-outline") });
     try rt.add(gpa, .{ .extensions = ".html,.htm", .grammar = "html", .symbol = "tree_sitter_html" });
+    try rt.add(gpa, .{ .extensions = ".go", .grammar = "go", .symbol = "tree_sitter_go", .outline = q("go-outline") });
 }

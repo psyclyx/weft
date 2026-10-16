@@ -15,22 +15,19 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
-const linux = std.os.linux;
+const futex = @import("futex.zig");
 const scheduler = @import("scheduler.zig");
 
-// Parking uses the raw Linux futex (weft is Wayland/Linux-native;
-// std.Thread.Futex is gone in 0.16 and the std.Io replacement would drag
-// an Io instance through the ABI for two syscalls). Waking never blocks;
-// waiting happens only on worker threads.
+// Parking is the kernel's word-wait (`futex.zig`: futex(2) on Linux,
+// __ulock on Darwin; std.Thread.Futex is gone in 0.16 and the std.Io
+// replacement would drag an Io instance through the ABI for two syscalls).
+// Waking never blocks; waiting happens only on worker threads.
 fn futexWait(word: *const std.atomic.Value(u32), expected: u32) void {
-    // EAGAIN (value changed) and EINTR both mean "recheck" — the caller
-    // loops on the queue regardless.
-    _ = linux.futex_4arg(&word.raw, .{ .cmd = .WAIT, .private = true }, expected, null);
+    // A changed value, a signal, a spurious wake: all mean "recheck" — the
+    // caller loops on the queue regardless.
+    futex.wait(word, expected, null);
 }
 
-/// `max_waiters` must be ≤ maxInt(i32): the kernel takes a *signed*
-/// count, and a negative one wakes exactly one waiter instead of all
-/// (found the hard way — three parked workers, one wake, a hung join).
 /// Futex mutex (std.Thread.Mutex left std in 0.16). Short critical
 /// sections between a few threads; never on the input hot section.
 pub const Mutex = struct {
@@ -60,12 +57,12 @@ pub const Gate = struct {
 
     pub fn open(self: *Gate) void {
         self.state.store(1, .release);
-        futexWake(&self.state, std.math.maxInt(i32));
+        futexWake(&self.state, futex.all);
     }
 };
 
-fn futexWake(word: *const std.atomic.Value(u32), max_waiters: i32) void {
-    _ = linux.futex_3arg(&word.raw, .{ .cmd = .WAKE, .private = true }, @intCast(max_waiters));
+fn futexWake(word: *const std.atomic.Value(u32), max_waiters: u32) void {
+    futex.wake(word, max_waiters);
 }
 
 // ── Hot-section fence (Debug) ───────────────────────────────────────
@@ -173,8 +170,8 @@ pub const Pool = struct {
     /// Optional scheduler wake-fd (doc/contextual-workspace-architecture.md
     /// §7): signaled once after any task completes, so `core/scheduler.zig`
     /// learns "a pool task finished" without polling every handle every
-    /// wake. Coalesced by construction (an eventfd counter, not a per-task
-    /// message) — a burst of completions between two scheduler steps
+    /// wake. Coalesced by construction (a `scheduler.newWakeFd`, not a
+    /// per-task message) — a burst of completions between two scheduler steps
     /// collapses to one wake, which is exactly right (the caller still has
     /// to poll every handle to find out WHICH ones finished; this is only
     /// "go look").
@@ -218,7 +215,7 @@ pub const Pool = struct {
     fn stop(self: *Pool) void {
         self.shutdown.store(true, .release);
         _ = self.wake.fetchAdd(1, .release);
-        futexWake(&self.wake, std.math.maxInt(i32));
+        futexWake(&self.wake, futex.all);
     }
 
     /// Blocks (joins workers AND residents) — shutdown only, never the hot
@@ -672,14 +669,15 @@ test "pool: a resident that ignores its signal is named, and the pool leaks inst
     while (!pool.residents.items[0].exited.load(.acquire)) std.Thread.yield() catch {};
 }
 
-/// Monotonic clock: a RAW syscall (`linux.clock_gettime` — no libc, so no
-/// vDSO fast path either; this is a real syscall, not the ~free vDSO call
-/// glibc's `clock_gettime` would resolve to) — chosen over `std.Io`'s clock
-/// so hot-path/measurement call sites don't have to carry an `Io` instance
-/// for a timestamp. Still cheap relative to anything it might be timing.
+/// Monotonic clock: libc's `clock_gettime(CLOCK_MONOTONIC)` (glibc answers
+/// it from the vDSO, Darwin from the commpage — neither enters the kernel)
+/// — chosen over `std.Io`'s clock so hot-path/measurement call sites don't
+/// have to carry an `Io` instance for a timestamp. Darwin's MONOTONIC keeps
+/// counting across sleep where Linux's pauses; nothing here measures
+/// across a suspend, so the difference is unobservable.
 pub fn nowNs() u64 {
-    var ts: linux.timespec = undefined;
-    const rc = linux.clock_gettime(.MONOTONIC, &ts);
-    assert(linux.errno(rc) == .SUCCESS); // CLOCK_MONOTONIC is always supported on Linux
+    var ts: std.c.timespec = undefined;
+    const rc = std.c.clock_gettime(.MONOTONIC, &ts);
+    assert(std.c.errno(rc) == .SUCCESS); // CLOCK_MONOTONIC exists on every supported OS (macOS ≥ 10.12)
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }

@@ -231,6 +231,7 @@ fn on_activate() callconv(.c) void {
     weft.decorateClear();
     const s = ensureActive() orelse return;
     if (!s.conn.live or !s.ready) return;
+    publishTriggers(s);
     if (!syncDoc(s)) return;
     flushArmed(s);
     paintDiagnostics(s);
@@ -510,11 +511,13 @@ fn dispatch(s: *Session, msg: rpc.Value) void {
         if (id == s.init_id and !s.ready) {
             s.ready = true;
             s.conn.notify("initialized", "{}");
+            keepTriggers(s, obj.get("result"));
             // Only the session whose document is in front of us may open it —
             // otherwise the handshake would didOpen someone else's buffer.
             if (lookupActive() == s) {
                 _ = syncDoc(s); // didOpen the active doc → diagnostics start flowing
                 flushArmed(s);
+                publishTriggers(s);
             }
             return;
         }
@@ -988,6 +991,41 @@ fn contentsText(c: rpc.Value) []const u8 {
         .array => |a| if (a.items.len > 0) contentsText(a.items[0]) else "",
         else => "",
     };
+}
+
+/// Keep what `initialize` said opens completion
+/// (`capabilities.completionProvider.triggerCharacters`), one byte per
+/// trigger: its last, the one typed last (`Session.triggers`).
+fn keepTriggers(s: *Session, result: ?rpc.Value) void {
+    const caps = field(result orelse return, "capabilities") orelse return;
+    const provider = field(caps, "completionProvider") orelse return;
+    const list = field(provider, "triggerCharacters") orelse return;
+    if (list != .array) return;
+    var bytes: std.ArrayList(u8) = .empty;
+    for (list.array.items) |t| {
+        if (t != .string or t.string.len == 0) continue;
+        const b = t.string[t.string.len - 1];
+        if (std.mem.indexOfScalar(u8, bytes.items, b) != null) continue;
+        bytes.append(weft.allocator, b) catch break;
+    }
+    const kept = bytes.toOwnedSlice(weft.allocator) catch {
+        bytes.deinit(weft.allocator);
+        return;
+    };
+    weft.allocator.free(s.triggers);
+    s.triggers = kept;
+}
+
+fn field(v: rpc.Value, name: []const u8) ?rpc.Value {
+    return if (v == .object) v.object.get(name) else null;
+}
+
+/// Say, on the entry in front of us, which characters this server's
+/// completion opens on — a context key (`lsp.trigger-characters`) any
+/// auto-trigger may read, and core reads nothing into. Called where the
+/// session and the active entry are known to match.
+fn publishTriggers(s: *const Session) void {
+    weft.contextSet("lsp.trigger-characters", s.triggers, .entry) catch {};
 }
 
 fn asInt(v: rpc.Value) ?i64 {

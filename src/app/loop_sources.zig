@@ -25,7 +25,7 @@
 const std = @import("std");
 const core = @import("weft_core");
 const scheduler = core.scheduler;
-const wayland = @import("weft_platform").wayland;
+const platform = @import("weft_platform");
 const cursor_config = @import("cursor_config.zig");
 const frame = @import("frame.zig");
 const collab = @import("collab.zig");
@@ -42,12 +42,31 @@ pub fn noopFdReady(ctx: ?*anyopaque, readable: bool, writable: bool) void {
     _ = writable;
 }
 
+/// The local filesystem provider's watch descriptor is readable (a directory
+/// a plugin watches changed): fold what it queued into the watches, so the
+/// wake's body finds them ready (`wasm_host.notifyPollIfReady`). Draining
+/// here, not only in the body, is what keeps a level-triggered descriptor
+/// from waking the loop again for events no watch is polled for.
+pub fn fsWatchReady(ctx: ?*anyopaque, readable: bool, writable: bool) void {
+    _ = readable;
+    _ = writable;
+    const provider: *@import("weft_fs_platform").Provider = @ptrCast(@alignCast(ctx.?));
+    provider.pumpWatches();
+}
+
+/// The scheduler's blocking wait, delegated to the platform window
+/// (`Scheduler.waiter`): Wayland polls, Cocoa waits in its event loop.
+pub fn platformWait(ctx: *anyopaque, fds: []std.posix.pollfd, timeout_ms: i32) usize {
+    const w: *platform.Window = @ptrCast(@alignCast(ctx));
+    return w.wait(fds, timeout_ms);
+}
+
 // ── 1. Key repeat — old site: wayland.zig's `emitKeyRepeats`, clock-polled
 // inside `pumpEvents`, correct only because vsync called it every ~16ms. ──
 
 pub fn keyRepeatDue(ctx: ?*anyopaque, now: u64) ?u64 {
     _ = now;
-    const w: *wayland.Window = @ptrCast(@alignCast(ctx.?));
+    const w: *platform.Window = @ptrCast(@alignCast(ctx.?));
     return w.repeatDueNs();
 }
 

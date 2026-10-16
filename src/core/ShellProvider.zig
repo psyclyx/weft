@@ -287,9 +287,8 @@ test "shell provider: lists, observes, reads and derives children by path, and r
     try tmp.dir.createDirPath(io, "sub");
     try tmp.dir.writeFile(io, .{ .sub_path = "sub/b.txt", .data = "bee\n" });
     var cwd_buf: [4096]u8 = undefined;
-    const rc = std.os.linux.getcwd(&cwd_buf, cwd_buf.len);
-    try t.expect(@as(isize, @bitCast(rc)) > 0);
-    const cwd = std.mem.sliceTo(cwd_buf[0..rc], 0);
+    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.GetCwd;
+    const cwd = std.mem.sliceTo(cwd_ptr, 0);
     const root_path = try std.fmt.allocPrint(gpa, "{s}/.zig-cache/tmp/{s}", .{ cwd, tmp.sub_path });
     defer gpa.free(root_path);
 

@@ -389,10 +389,11 @@ fn arg() ?weft.Range {
     return weft.rangeEnds(weft.argRange(0) orelse return null);
 }
 
-/// Tab: indent a selection's lines; at a caret, the floor's tab.
+/// Tab: indent a selection's lines; at a caret, what Tab means here (the
+/// `edit.tab` action: an indent step where a provider says, else a tab).
 fn indent() void {
     const r = arg() orelse return;
-    if (r.start == r.end) return weft.run("edit.insert-tab");
+    if (r.start == r.end) return weft.run("edit.tab");
     if (weft.anchorRange(r)) |h| weft.runRangeArg("indent.increase", h);
 }
 /// S-Tab: dedent the selection's lines, or the caret's line.
@@ -470,10 +471,19 @@ fn deleteLine() void {
     weft.edit(r, "");
 }
 
-/// C-Return / C-S-Return: a fresh line below / above the caret's line, at
-/// that line's indent, wherever the caret sat on it — the caret on it.
+/// C-Return / C-S-Return: a fresh line below / above the caret's line,
+/// wherever the caret sat on it — the caret on it. Below is a line break at
+/// the line's end, above one at the end of the line before: the
+/// `edit.break-line` action either way, so whatever provides it here
+/// (indentation carried over, a step deeper after an opener) says where the
+/// new line's text starts. The first line has no line before it, so a line
+/// opened above it copies its indent.
 fn openLine(below: bool) void {
     const at = arg() orelse return;
+    if (below or at.start > 0) {
+        place(caret(if (below) at.start else at.start - 1));
+        return weft.run("edit.break-line");
+    }
     const l = weft.lineAt(at.start);
     const line = weft.slice(l.start, l.end);
     var indent_len: usize = 0;
@@ -753,6 +763,13 @@ fn initExtra() void {
         .{ .key = "C-z", .arms = &.{ "std.history.undo", "edit.undo" } },
         .{ .key = "C-S-z", .arms = &.{ "std.history.redo", "edit.redo" } },
         .{ .key = "C-y", .arms = &.{ "std.history.redo", "edit.redo" } },
+        // The same words under ⌘, a Mac's keys for them (super, `s-`). Elsewhere
+        // the super key rarely reaches a window, so binding both costs nothing.
+        .{ .key = "s-c", .arms = &.{ "std.transfer.yank", "ide.copy" } },
+        .{ .key = "s-x", .arms = &.{ "std.transfer.delete-to-register", "ide.cut" } },
+        .{ .key = "s-v", .arms = &.{ "std.transfer.paste", "ide.paste" } },
+        .{ .key = "s-z", .arms = &.{ "std.history.undo", "edit.undo" } },
+        .{ .key = "S-s-z", .arms = &.{ "std.history.redo", "edit.redo" } },
     };
     for (intended) |b| weft.bindKeys("ide", b.key, b.arms);
     // Up a level in a listing: Alt+Up (Explorer, VS Code; Finder's Cmd+Up).
@@ -784,6 +801,7 @@ fn initExtra() void {
         .{ "C-Home", "ide.doc-start" },                      .{ "C-End", "ide.doc-end" },
         .{ "C-S-Home", "ide.select-doc-start" },             .{ "C-S-End", "ide.select-doc-end" },
         .{ "C-a", "ide.select-all" },                        .{ "S-Tab", "ide.dedent" },
+        .{ "s-a", "ide.select-all" },                        .{ "s-slash", "comment.toggle-selection" },
         .{ "ISO_Left_Tab", "ide.dedent" },                   .{ "C-slash", "comment.toggle-selection" },
         .{ "M-Up", "ide.move-line-up" },                     .{ "M-Down", "ide.move-line-down" },
         .{ "C-S-k", "ide.delete-line" },                     .{ "C-Return", "ide.open-below" },

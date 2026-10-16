@@ -215,7 +215,7 @@ test "e2e/menubar: a click drops File beneath its title — rows in order, rules
     const file = try menu(ed);
     // What a conventional File menu holds: no plumbing (remembering a
     // project, saying where its root is), no second row for one act.
-    try expectPanel(file, "New File | Open File… Open… Open Recent… Browse Remote Files… | Save Save As… | Close Editor Close Without Saving | Notes | Quit Quit Without Saving");
+    try expectPanel(file, "New File | Open File… Open… Open Recent… Browse Remote Files… | Save Save All Save As… | Close Editor Close Without Saving | Notes | Quit Quit Without Saving");
     // The key that runs each row in the editor, as ide.js binds it.
     try expectKeys(file, "Save", "C-s");
     try expectKeys(file, "Save As…", "C-S-s");
@@ -320,9 +320,9 @@ test "e2e/menubar: under config.js with the fragment, the same File menu shows v
     try expectKeys(file, "Save As…", "SPC f S");
     try expectKeys(file, "Open File…", "SPC SPC");
     try expectKeys(file, "Save", "C-s");
-    // Text chrome, the config's style: a clean cell box.
-    try t.expectEqual(h.view.chrome.Style.text, (try ed.ensureView()).chrome);
-    shot(&app, "menubar-file-text");
+    // Widget chrome, the config's style: a shadowed, rounded menu.
+    try t.expectEqual(h.view.chrome.Style.widget, (try ed.ensureView()).chrome);
+    shot(&app, "menubar-file-widget");
     ed.press("Escape", "");
     ed.press("Escape", "");
     try t.expect(ed.head.interactions.active() == null);
@@ -367,7 +367,7 @@ test "e2e/menubar: a config that relabels a command keeps the place menus.js gav
     try t.expect(row(file, "Close Editor") == null);
     var buf: [4096]u8 = undefined;
     const got = chrome.panelText(&buf, file);
-    if (std.mem.indexOf(u8, got, "| Sichern | Verwerfen |") == null) {
+    if (std.mem.indexOf(u8, got, "| Sichern Save All | Verwerfen |") == null) {
         std.debug.print("[e2e/menubar] menu: '{s}'\n", .{got});
         return error.TestUnexpectedMenu;
     }

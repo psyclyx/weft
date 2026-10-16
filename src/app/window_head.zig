@@ -1,6 +1,6 @@
 //! WindowHead — the first-party in-process client that owns the window
-//! (Platform: `platform/wayland.zig`'s `Window`), the GPU device + swapchain
-//! (`gfx/context.zig`'s `Context`), and the renderer (`app/render.zig`'s
+//! (Platform: `weft_platform.Window` — Wayland or Cocoa), the GPU target
+//! (`gfx.context.Context` — a Vulkan swapchain or an OpenGL window context), and the renderer (`app/render.zig`'s
 //! `RenderState`) — W0b's "window-head" (doc/extensibility-native-surface.md):
 //! rendering.md P5's "bundled scene client" lineage, generalized to own the
 //! platform attachment itself rather than just drawing into one.
@@ -47,7 +47,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const wayland = @import("weft_platform").wayland;
+const platform = @import("weft_platform");
 const Context = @import("weft_gfx").context.Context;
 const render_mod = @import("render.zig");
 const dispatch = @import("dispatch.zig");
@@ -55,7 +55,7 @@ const core = @import("weft_core");
 const command = core.command;
 
 pub const WindowHead = struct {
-    window: *wayland.Window,
+    window: *platform.Window,
     ctx: *Context,
     render: render_mod.RenderState,
     /// This window-head's in-process client identity — named "window-head"
@@ -82,13 +82,10 @@ pub const WindowHead = struct {
         em: f32,
         active_id: core.Buffers.Id,
     ) !void {
-        self.window = try wayland.Window.init(width, height, "weft", "dev.psyclyx.weft");
+        self.window = try platform.Window.init(width, height, "weft", "dev.psyclyx.weft");
         errdefer self.window.deinit();
         const fb = self.window.framebufferSize();
-        self.ctx = try Context.init(gpa, .{
-            .display = self.window.display,
-            .surface = self.window.surface,
-        }, fb[0], fb[1], "weft");
+        self.ctx = try Context.init(gpa, self.window.surfaceSource(), fb[0], fb[1], "weft");
         errdefer self.ctx.deinit();
         try self.render.init(gpa, self.ctx, font_bytes, em, active_id);
         // First-party: self-grants every perm at construction — see module
@@ -116,7 +113,7 @@ pub const WindowHead = struct {
     /// always reading `self.client.active_ctx`, since a `app.swap-system` may
     /// have repointed which system `main()`'s `cmd_ctx` targets by the time
     /// this runs — see `core/System.zig`'s `Host.swap`).
-    pub fn dispatchKey(self: *WindowHead, ctx: *command.Context, ev: wayland.KeyEvent) !void {
+    pub fn dispatchKey(self: *WindowHead, ctx: *command.Context, ev: platform.KeyEvent) !void {
         const prior = self.client.beginDispatch();
         defer self.client.endDispatch(prior);
         return dispatch.dispatchKey(ctx, ev);
@@ -129,11 +126,11 @@ pub const WindowHead = struct {
     pub fn clipboardBackend(self: *WindowHead) core.Clipboard.Backend {
         const Adapter = struct {
             fn text(context: *anyopaque) []const u8 {
-                const w: *wayland.Window = @ptrCast(@alignCast(context));
+                const w: *platform.Window = @ptrCast(@alignCast(context));
                 return w.clipboardText();
             }
             fn set(context: *anyopaque, bytes: []const u8) void {
-                const w: *wayland.Window = @ptrCast(@alignCast(context));
+                const w: *platform.Window = @ptrCast(@alignCast(context));
                 w.clipboardSet(bytes);
             }
         };
@@ -143,7 +140,7 @@ pub const WindowHead = struct {
     /// The pointer twin of `dispatchKey`: scale the event from surface to
     /// framebuffer pixels (the platform owns the scale), then hand it to the
     /// application under this head's identity.
-    pub fn dispatchPointer(self: *WindowHead, app: *@import("application.zig").Application, ev: wayland.PointerEvent) !void {
+    pub fn dispatchPointer(self: *WindowHead, app: *@import("application.zig").Application, ev: platform.PointerEvent) !void {
         const prior = self.client.beginDispatch();
         defer self.client.endDispatch(prior);
         const scale: f64 = @floatFromInt(self.window.bufferScale());

@@ -156,7 +156,7 @@ pub const KnownPeers = struct {
         if (path.len < zbuf.len) {
             @memcpy(zbuf[0..path.len], path);
             zbuf[path.len] = 0;
-            _ = std.os.linux.fchmodat(std.os.linux.AT.FDCWD, zbuf[0..path.len :0].ptr, 0o600);
+            _ = std.c.fchmodat(std.c.AT.FDCWD, zbuf[0..path.len :0].ptr, 0o600, 0);
         }
     }
 };

@@ -167,7 +167,7 @@ const t = std.testing;
 pub fn testDir(gpa: Allocator, name: []const u8) ![]u8 {
     const base = stateDir(gpa).?;
     defer gpa.free(base);
-    return std.fmt.allocPrint(gpa, "{s}/t-{s}-{d}", .{ base, name, std.os.linux.getpid() });
+    return std.fmt.allocPrint(gpa, "{s}/t-{s}-{d}", .{ base, name, std.c.getpid() });
 }
 
 /// Drop a `testDir` once its contents are gone. Best-effort: a directory

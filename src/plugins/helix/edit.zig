@@ -440,14 +440,24 @@ pub fn insertAt(where: Entry) void {
     enterInsert();
 }
 
-/// `o` / `O`: open a line below (above) the selection, indented like its
-/// own, and type there. A structured view answers the insertion intention (a
-/// new row) instead.
+/// `o` / `O`: open a line below (above) the selection and type there. A
+/// structured view answers the insertion intention (a new row) instead.
+///
+/// Below is a line break at the end of the selection's last line, above one
+/// at the end of the line before its first: the `edit.break-line` action
+/// either way, so whatever provides it here (indentation carried over, a step
+/// deeper after an opener) says where the new line's text starts. The first
+/// line has no line before it, so a line opened above it copies its indent.
 pub fn openLine(below: bool) void {
     if (weft.invokeIntention(if (below) "std.editing.insert-after" else "std.editing.insert-before") == .invoked) return enterInsert();
     if (!onText()) return enterInsert();
     const r = sel.span(sel.get());
     const at = if (below) weft.lineAt(@max(r.start, r.end -| 1)).end else weft.lineAt(r.start).start;
+    if (below or at > 0) {
+        sel.put(sel.caret(if (below) at else at - 1));
+        weft.run("edit.break-line");
+        return enterInsert();
+    }
     const l = weft.lineAt(r.start);
     const line = weft.slice(l.start, l.end);
     var indent: usize = 0;

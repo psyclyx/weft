@@ -161,15 +161,18 @@ test "e2e/pointer: a click in an unfocused pane focuses it and acts there" {
     ed.run("window.split-right");
     ed.applyWindow();
     try openFile(ed, "right.txt", "right pane text\n");
-    try t.expectEqual(@as(usize, 2), ed.paneCount());
+    try t.expectEqual(@as(usize, 2), ed.editingPaneCount());
     const right_entry = ed.buffers.active_id;
     try t.expect(right_entry != left_entry);
 
-    // Find the pane that is NOT focused, from the last frame's geometry.
+    // Find the editing pane that is NOT focused, from the last frame's
+    // geometry — not a config's docked chrome (sidebar, toolbar).
     const view = try ed.ensureView();
     const focused = window_layout.headFocus(ed.win_layout, ed.head);
     var other: ?u32 = null;
     for (view.pane_maps[0..view.pane_map_count]) |m| {
+        const node = ed.win_layout.paneById(m.pane) orelse continue;
+        if (node.pane().viewport != null) continue;
         if (m.pane != focused.pane().id) other = m.pane;
     }
     const pane = other orelse return error.NoUnfocusedPane;

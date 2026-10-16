@@ -108,6 +108,11 @@ closed: std.ArrayList(u64) = .empty,
 /// publishes grids hears that one of its entries went (a terminal's tab
 /// closed), so it can end what fed it. Compared, never interpreted.
 grid_closes: u32 = 0,
+/// A command waiting for saves to land (`file.when-saved`, `unsaved.zig`),
+/// or null. The frame runs or drops it once they settle.
+after_saves: ?@import("unsaved.zig").AfterSaves = null,
+/// The `app.unsaved` listing, rebuilt per call and borrowed until the next.
+unsaved_listing: std.ArrayList(u8) = .empty,
 
 pub const parked_cap = 16;
 
@@ -521,6 +526,8 @@ pub fn deinit(self: *Buffers, gpa: Allocator) void {
     self.parked.deinit(gpa);
     self.documents.deinit(gpa);
     self.closed.deinit(gpa);
+    if (self.after_saves) |*waiting| waiting.deinit(gpa);
+    self.unsaved_listing.deinit(gpa);
     gpa.free(self.user_agent);
     gpa.free(self.default_mode);
     for (&self.posture_modes.values) |mode| gpa.free(mode);
@@ -1022,24 +1029,34 @@ pub fn withEntry(
 /// The head's mode as a borrow found it. A borrow (a presentation into another
 /// viewport, closing a background entry) that comes back to the entry it left
 /// hands the head back EXACTLY as it was — a picker's `pick`, a menu, a
-/// pending operator — not the resting mode switching back to that entry would
-/// restore: the toolbar presenting its strip must not close the palette
-/// someone is typing into. A borrow that ends somewhere else leaves the mode
-/// that entry's switch set.
+/// pending operator, a chord typed halfway (`SPC` waiting on which-key) — not
+/// the resting mode switching back to that entry would restore: the toolbar
+/// presenting its strip must not close the palette someone is typing into, nor
+/// drop the leader they just pressed. A borrow that ends somewhere else leaves
+/// the mode that entry's switch set.
 const KeptMode = struct {
     home: Id,
     mode: ?[]u8,
+    pending: ?[]u8,
 
     fn restore(self: *KeptMode, gpa: Allocator, buffers: *Buffers, head: *Head) void {
+        defer if (self.pending) |p| gpa.free(p);
         const mode = self.mode orelse return;
         defer gpa.free(mode);
-        if (buffers.active_id != self.home or std.mem.eql(u8, head.mode, mode)) return;
-        head.setModeRaw(gpa, mode) catch {};
+        if (buffers.active_id != self.home) return;
+        // Setting the mode abandons the pending chord, so the chord goes back
+        // after it.
+        if (!std.mem.eql(u8, head.mode, mode)) head.setModeRaw(gpa, mode) catch {};
+        if (self.pending) |p| if (!std.mem.eql(u8, head.pending, p)) head.setPending(gpa, p) catch {};
     }
 };
 
 fn keepMode(gpa: Allocator, buffers: *const Buffers, head: *const Head) KeptMode {
-    return .{ .home = buffers.active_id, .mode = gpa.dupe(u8, head.mode) catch null };
+    return .{
+        .home = buffers.active_id,
+        .mode = gpa.dupe(u8, head.mode) catch null,
+        .pending = gpa.dupe(u8, head.pending) catch null,
+    };
 }
 
 /// Run `f(args)` with `head`'s jump recording muted: whatever entry switches

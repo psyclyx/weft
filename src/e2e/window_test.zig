@@ -171,7 +171,7 @@ test "e2e/sidebar: a config fragment docks a files sidebar, and Return opens in 
     // The layout phase realizes declared viewports — an ordinary application
     // wake, not a harness-selectable operation.
     ed.applyWindow();
-    try t.expectEqual(@as(usize, 2), ed.paneCount());
+    try t.expectEqual(@as(usize, 1), ed.editingPaneCount()); // the sidebar docks beside the one editing pane
     const panel = ed.win_layout.dockedPanel(.left) orelse return error.NoSidebar;
     const primary = ed.win_layout.primaryPane() orelse return error.NoPrimaryPane;
     try t.expect(panel != primary);
@@ -220,7 +220,7 @@ test "e2e/sidebar: a config fragment docks a files sidebar, and Return opens in 
     // a companion viewport that answer is the primary pane.
     ed.press("Return", "");
     ed.applyWindow();
-    try t.expectEqual(@as(usize, 2), ed.paneCount());
+    try t.expectEqual(@as(usize, 1), ed.editingPaneCount()); // opened INTO the primary pane, not a new one
 
     const opened = primary.pane().buffer_id;
     try t.expect(opened != editor_entry);

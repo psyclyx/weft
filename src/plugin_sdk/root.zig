@@ -1475,6 +1475,12 @@ pub fn bufferActive(i: usize) bool {
 pub fn bufferReadOnly(i: usize) bool {
     return e.wl_buffer_readonly(@intCast(i)) != 0;
 }
+/// Whether the `i`-th buffer is what a docked viewport holds — a sidebar's
+/// listing, a toolbar's strip — rather than a document. A buffer switcher
+/// lists documents; the same listing opened in a pane is one.
+pub fn bufferDocked(i: usize) bool {
+    return e.wl_buffer_docked(@intCast(i)) != 0;
+}
 /// The `i`-th buffer's file backing, or null when nothing backs it (a
 /// scratch, a projection, an entry holding no text). Lands in the shared read
 /// scratch — copy it out before the next read call.
@@ -2070,6 +2076,24 @@ pub fn signalSubscribe(name: []const u8) ?u32 {
 pub fn signalEmit(name: []const u8) void {
     _ = e.wl_signal_emit(p(name.ptr), @intCast(name.len));
 }
+/// Raise `name` once `ms` milliseconds have passed — a timer that arrives as
+/// a signal (`on_signal`), so a plugin listening for its own name hears it
+/// like any other. Raising the same name again before it fires MOVES it, so
+/// calling this on every keystroke is a debounce; `signalCancel` drops it.
+/// Needs `requestPerm(.timer)`.
+pub fn signalEmitAfter(name: []const u8, ms: u32) void {
+    _ = e.wl_signal_emit_after(p(name.ptr), @intCast(name.len), @intCast(@min(ms, std.math.maxInt(i32))));
+}
+/// Drop a pending `signalEmitAfter` of `name`, if one is pending.
+pub fn signalCancel(name: []const u8) void {
+    _ = e.wl_signal_emit_after(p(name.ptr), @intCast(name.len), -1);
+}
+/// The signal core raises at the frame boundary after a person's live
+/// keystroke typed text into the active text document — not a dot-repeat or
+/// macro replaying keys, not a paste, not a listing's field. Subscribe to it
+/// (`signalSubscribe`) to react to typing; the cursor and the text before it
+/// are what was typed.
+pub const typed_signal = "input.typed";
 /// The `i`-th capture of the last `query`/`nodeChildren` (name/kind into
 /// `scratch`), or null.
 pub fn queryCapture(i: usize) ?Capture {
@@ -2989,7 +3013,7 @@ pub fn placeRoot() []const u8 {
 /// (`doc/place.md` §4.2). Same four answers as `fsExists`, and NO permission:
 /// it reveals strictly less than `placeRoot`, which already hands you the
 /// directory, and it cannot escape the place (the host resolves it beneath the
-/// place root with `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`).
+/// place root by `RootedFs`'s no-follow walk: no `..` out, no symlinks).
 ///
 /// This is what "is this project a git repository", "is there an `.envrc`
 /// here", "is a rebase mid-flight" ask, and it is the reason neither `git` nor
@@ -3323,6 +3347,23 @@ pub fn semanticFsList(gpa: std.mem.Allocator, target: semantic.target.Ref, revis
         if (result_len > bytes.len) return error.Failed;
         return fs_codec.decodeListing(gpa, bytes[0..result_len]);
     }
+}
+
+/// Hear about changes on disk to the directory a live target revision lists
+/// (`on`), or stop (`!on`; not watched is not an error). A change raises
+/// `on_poll`; `semanticFsChanged` then says which watched directory it was.
+/// Only this host's own directories are watched: another authority answers
+/// `error.Unsupported`, and its listing is re-read only when asked.
+pub fn semanticFsWatch(target: semantic.target.Ref, revision: u64, on: bool) SemanticFsError!void {
+    const wire = target.toWire();
+    try semanticFsError(e.wl_semantic_fs_watch(wire.authority, wire.slot, wire.generation, semanticFsRevisionLow(revision), semanticFsRevisionHigh(revision), @intFromBool(on)));
+}
+
+/// Whether the watched directory of this target revision changed since it
+/// was last asked — asking clears it. False when it is not watched.
+pub fn semanticFsChanged(target: semantic.target.Ref, revision: u64) bool {
+    const wire = target.toWire();
+    return e.wl_semantic_fs_changed(wire.authority, wire.slot, wire.generation, semanticFsRevisionLow(revision), semanticFsRevisionHigh(revision)) == 1;
 }
 
 /// Apply a canonical typed plan against the exact target revision.  Cross-root

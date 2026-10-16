@@ -239,7 +239,7 @@ fn hoverInteraction(ctx: *core.command.Context) bool {
 fn dispatchGesture(ctx: *core.command.Context, mods: Pointer.Mods, name: []const u8) !bool {
     if (name.len == 0) return false;
     var spec_buf: [48]u8 = undefined;
-    const spec = core.Keymap.keyspec(&spec_buf, mods.ctrl, mods.alt, mods.shift, name);
+    const spec = core.Keymap.keyspec(&spec_buf, mods.ctrl, mods.alt, mods.shift, mods.logo, name);
     try dispatch.dispatchSpec(ctx, spec, .none);
     return true;
 }

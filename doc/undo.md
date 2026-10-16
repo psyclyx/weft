@@ -40,7 +40,12 @@ and core names no mode and no grammar. What falls out:
 A cut closes the open unit of every text entry, so a step that edits several
 entries is one step in each. `edit.seal-undo` remains as an explicit cut in
 the middle of a step, for a command that means one; nothing needs it to end a
-step.
+step. A command that means one only where the grammar cuts per run of a
+command reads the rule back with `weft.callString("mode.undo-step")`: the
+indent plugin makes an auto-indent its own step under `run` (undo right after
+Return takes the indent and leaves the line break, as Emacs's electric
+indent does) and never under `continue` or `command`, where it would split
+`o…Esc`.
 
 ## 2. History is a tree
 

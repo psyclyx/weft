@@ -25,7 +25,6 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const linux = std.os.linux;
 
 const session = @import("session.zig");
 const ShellFs = @import("ShellFs.zig");
@@ -239,12 +238,7 @@ pub const Loci = struct {
 
 const t = std.testing;
 
-fn socketPair() ![2]i32 {
-    var fds: [2]i32 = undefined;
-    const rc = linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds);
-    if (linux.errno(rc) != .SUCCESS) return error.SocketPair;
-    return fds;
-}
+const socketPair = session.unixSocketPair;
 
 test "locus: here sentinel is index 0, tier .here, always connected" {
     const gpa = t.allocator;
@@ -295,13 +289,13 @@ test "locus: a peer is its fingerprint — rebinding the connection, or Conn.reb
     var link_a: session.FdLink = .{ .fd = fds_a[0] };
     const sa = try session.Session.create(gpa, link_a.link(), .server, "tok", .own, null);
     defer sa.destroy();
-    defer _ = linux.close(fds_a[1]);
+    defer _ = std.c.close(fds_a[1]);
 
     const fds_b = try socketPair();
     var link_b: session.FdLink = .{ .fd = fds_b[0] };
     const sb = try session.Session.create(gpa, link_b.link(), .server, "tok", .own, null);
     defer sb.destroy();
-    defer _ = linux.close(fds_b[1]);
+    defer _ = std.c.close(fds_b[1]);
 
     var first = try session.Conn.init(gpa, sa, "peer", .client);
     defer first.deinit();

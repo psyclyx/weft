@@ -11,3 +11,4 @@ weft.run("syntax.add-grammar", ".lua", "lua", "tree_sitter_lua", "", query("lua-
 weft.run("syntax.add-grammar", ".nix", "nix", "tree_sitter_nix");
 weft.run("syntax.add-grammar", ".js,.jsx,.mjs,.cjs", "javascript", "tree_sitter_javascript", "", query("javascript-outline"));
 weft.run("syntax.add-grammar", ".html,.htm", "html", "tree_sitter_html");
+weft.run("syntax.add-grammar", ".go", "go", "tree_sitter_go", "", query("go-outline"));

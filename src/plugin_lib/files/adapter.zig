@@ -86,6 +86,17 @@ pub const Plugin = struct {
         for (self.sessions.items) |session| session.revealWork();
     }
 
+    /// Something this plugin holds is ready (export `on_poll` to here): the
+    /// only such thing is a watched directory that changed on disk. Each
+    /// listing that saw one re-reads ONCE, however many of its directories
+    /// changed and however often — the draft-keeping refresh, so a pending
+    /// rename survives whatever arrived behind it.
+    pub fn poll(self: *Plugin) void {
+        for (self.sessions.items) |session| {
+            if (session.changedOnDisk()) session.refresh(false) catch {};
+        }
+    }
+
     /// The wasm instance owns guest memory wholesale; host teardown revokes
     /// views, fields, targets, handlers, relations, and attachments by owner.
     /// This method is useful to native wasm tests that explicitly invoke the
@@ -142,6 +153,11 @@ pub const Plugin = struct {
         }
         for (self.sessions.items) |session| {
             if (session.target.eql(request.value.target) and session.target_revision == request.value.revision) {
+                // Opening a directory shows what it holds NOW: a retained
+                // listing (the sidebar's, from an earlier frame) re-reads the
+                // disk first. The refresh keeps a draft — a pending rename
+                // stays — so this costs a listing, never someone's edit.
+                session.refresh(false) catch {};
                 _ = weft.semanticTargetHandlerOpenView(session.view_ref);
                 return;
             }
@@ -358,6 +374,9 @@ pub const Session = struct {
     /// listing does not grow (and re-read on refresh) every folder the
     /// editor ever visited.
     reveal_opened: std.ArrayList(files.NodeId) = .empty,
+    /// The directories this view shows, as watched (`syncWatches`): its own
+    /// and every row folded open. A change to one re-reads the listing.
+    watched: std.ArrayList(semantic.target.Located) = .empty,
 
     fn init(plugin: *Plugin, target: semantic.target.Ref, target_revision: u64, directory: fs.target.Directory) Session {
         return .{
@@ -388,9 +407,54 @@ pub const Session = struct {
         self.controller = .init(self.plugin.gpa, &self.draft, self.view_ref);
         self.loaded = true;
         self.retireRowTargets();
+        self.syncWatches();
+    }
+
+    /// Watch exactly the directories the view shows: its own, and each
+    /// expanded row's (through that row's own target). Best effort — a
+    /// directory that cannot be watched (another host's) is re-read only
+    /// when asked, as before.
+    fn syncWatches(self: *Session) void {
+        const gpa = self.plugin.gpa;
+        var want: std.ArrayList(semantic.target.Located) = .empty;
+        defer want.deinit(gpa);
+        want.append(gpa, .{ .target = self.target, .revision = self.target_revision }) catch return;
+        for (self.draft.rows.items) |row| {
+            if (!row.expanded) continue;
+            const located = self.rowTarget(row.id) orelse continue;
+            want.append(gpa, located) catch return;
+        }
+        var index: usize = 0;
+        while (index < self.watched.items.len) {
+            const held = self.watched.items[index];
+            if (containsLocated(want.items, held)) {
+                index += 1;
+                continue;
+            }
+            weft.semanticFsWatch(held.target, held.revision, false) catch {};
+            _ = self.watched.swapRemove(index);
+        }
+        for (want.items) |located| {
+            if (containsLocated(self.watched.items, located)) continue;
+            self.watched.ensureUnusedCapacity(gpa, 1) catch return;
+            weft.semanticFsWatch(located.target, located.revision, true) catch continue;
+            self.watched.appendAssumeCapacity(located);
+        }
+    }
+
+    /// Whether any directory this view shows changed on disk since last
+    /// asked. Asks every one: asking is what clears each.
+    fn changedOnDisk(self: *Session) bool {
+        var changed = false;
+        for (self.watched.items) |held| {
+            if (weft.semanticFsChanged(held.target, held.revision)) changed = true;
+        }
+        return changed;
     }
 
     fn deinit(self: *Session) void {
+        for (self.watched.items) |held| weft.semanticFsWatch(held.target, held.revision, false) catch {};
+        self.watched.deinit(self.plugin.gpa);
         if (self.loaded) {
             self.controller.deinit();
             _ = weft.semanticViewClose(self.view_ref);
@@ -971,6 +1035,9 @@ pub const Session = struct {
         for (self.fields.items[0..old_fields_len]) |*field| field.revision +|= 1;
         self.pruneFields();
         self.retireRowTargets();
+        // What is folded open may have moved, and a re-listed row's target
+        // may be a new one.
+        self.syncWatches();
     }
 
     fn prepareFields(self: *Session, draft: *const files.Model) !void {
@@ -1231,6 +1298,11 @@ fn parseMode(bytes: []const u8) !u32 {
     }
     if (value > 0o7777) return error.InvalidMode;
     return value;
+}
+
+fn containsLocated(list: []const semantic.target.Located, want: semantic.target.Located) bool {
+    for (list) |held| if (held.target.eql(want.target) and held.revision == want.revision) return true;
+    return false;
 }
 
 fn respondOutcome(outcome: semantic.action.Outcome) !void {

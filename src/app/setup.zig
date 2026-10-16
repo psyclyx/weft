@@ -25,6 +25,7 @@ pub fn registerCapabilityConsumers(
     grammars: *core.syntax.Runtime,
 ) !void {
     _ = try commands.bind(gpa, "complete.show", completion_ui.commandSpec());
+    _ = try commands.bind(gpa, "complete.show-inline", completion_ui.inlineCommandSpec());
     // Grammars are data: builtins seeded, config extends via command.
     _ = try commands.bind(gpa, "syntax.add-grammar", providers.grammarAddCommand(grammars));
 }

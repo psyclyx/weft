@@ -1089,8 +1089,11 @@ fn openBelow() void {
         enterInsert();
         return;
     }
+    // A line break at the line's end — the `edit.break-line` action, so
+    // whatever provides it here (indentation carried over, a step deeper
+    // after an opener) says where the new line's text starts.
     weft.jump(lineEndOff());
-    weft.run("edit.insert-newline");
+    weft.run("edit.break-line");
     enterInsert();
 }
 fn openAbove() void {
@@ -1098,9 +1101,18 @@ fn openAbove() void {
         enterInsert();
         return;
     }
-    weft.jump(lineStartOff());
-    weft.run("edit.insert-newline");
-    weft.run("cursor.up");
+    // A line above is a line break at the end of the line before it — what
+    // that line leads to is where the new one's text starts. The first line
+    // has none before it: break at its start and step up.
+    const start = lineStartOff();
+    if (start > 0) {
+        weft.jump(start - 1);
+        weft.run("edit.break-line");
+    } else {
+        weft.jump(start);
+        weft.run("edit.insert-newline");
+        weft.run("cursor.up");
+    }
     enterInsert();
 }
 fn appendLine() void {

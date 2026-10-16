@@ -126,10 +126,11 @@ pub const Group = enum {
 /// deny as unchanged in W0a, so this field documents today's real gates, it
 /// doesn't add new ones. `proc_timer` names the one recurring COMBINATION
 /// this codebase actually checks: every `perm_timer` check in wasm_host/
-/// proc.zig and sessions.zig is paired with `perm_proc`, and `timer` never
-/// gates alone — modeled honestly as the pair it always is, rather than
-/// bolting on a multi-perm field for a case that doesn't otherwise exist.
-pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer, env, clipboard };
+/// proc.zig and sessions.zig is paired with `perm_proc` — modeled honestly
+/// as the pair it always is, rather than bolting on a multi-perm field for a
+/// case that doesn't otherwise exist. `timer` alone gates the one door that
+/// is ONLY a timer (`wl_signal_emit_after`).
+pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer, env, clipboard, timer };
 
 pub const Entry = struct {
     /// The `weft.<name>` import name — matches the guest's `extern "weft" fn
@@ -320,6 +321,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_buffer_name", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .buffers, .doc = "the `i`-th open buffer's name, into guest memory" },
     .{ .name = "wl_buffer_active", .params = &.{.u32}, .results = &.{.u32}, .group = .buffers, .doc = "whether the `i`-th buffer is the active one" },
     .{ .name = "wl_buffer_readonly", .params = &.{.u32}, .results = &.{.u32}, .group = .buffers, .doc = "whether the `i`-th buffer is read-only" },
+    .{ .name = "wl_buffer_docked", .params = &.{.u32}, .results = &.{.u32}, .group = .buffers, .doc = "whether the `i`-th buffer is what a docked viewport holds (a sidebar's listing, a toolbar) rather than a document" },
     .{ .name = "wl_buffer_path", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .buffers, .doc = "the `i`-th buffer's file backing, into guest memory, or -1 when nothing backs it" },
     .{ .name = "wl_buffer_dirty", .params = &.{.u32}, .results = &.{.i32}, .group = .buffers, .doc = "whether the `i`-th buffer holds edits its file never received; -1 when unanswerable (a projection is never dirty)" },
     .{ .name = "wl_buffer_lang", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .buffers, .doc = "the `i`-th buffer's language (`action.langOfName`: an extension sans dot), into guest memory" },
@@ -381,6 +383,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_activate_path", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .activation, .doc = "the path of the buffer taking focus (host→guest activation, borrowed)" },
     .{ .name = "wl_signal_subscribe", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .activation, .doc = "hear a named signal as `on_signal(id)`; returns the id, -1 refused" },
     .{ .name = "wl_signal_emit", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .activation, .doc = "raise a named signal for every listener, delivered at the next frame boundary" },
+    .{ .name = "wl_signal_emit_after", .params = &.{ .u32, .u32, .i32 }, .results = &.{.i32}, .group = .activation, .perm = .timer, .operation = .{ .name = "legacy.wl_signal_emit" }, .doc = "raise a named signal once `ms` have passed (a pending one of the same name from this plugin moves; a negative `ms` cancels it)" },
 
     // ── tool.zig — projection ownership ─────────────────────────────────
     .{ .name = "wl_tool_backing", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .tool, .doc = "mark the active buffer as this plugin's tool projection" },
@@ -506,6 +509,8 @@ pub const imports = [_]Entry{
     .{ .name = "wl_semantic_fs_capabilities", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "query provider capabilities for a live semantic target revision" },
     .{ .name = "wl_semantic_fs_list", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "list the filesystem directory attached to a live semantic target revision" },
     .{ .name = "wl_semantic_fs_apply", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_write, .doc = "apply a bounded typed filesystem plan against a live semantic target revision" },
+    .{ .name = "wl_semantic_fs_watch", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "watch (1) or stop watching (0) the directory a live semantic target revision lists; a change raises `on_poll`, and `wl_semantic_fs_changed` says which; local directories only (another authority: -3, not watched); 0 ok, negative a transport status" },
+    .{ .name = "wl_semantic_fs_changed", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "whether the watched directory of this target revision changed since last asked (1, and the flag clears) or not (0); -1 not watched" },
 
     // ── slot.zig — D2's generic, schema-directed membrane verbs ────────
     // (doc/d2-schema-payloads.md §3.2). These four carry `(SchemaRef
@@ -590,7 +595,7 @@ pub const exports = [_]Export{
     .{ .name = "on_pick_accept", .params = &.{.i32}, .results = &.{}, .required = true, .doc = "a fuzzy pick this plugin opened was accepted, tagged by pick_id" },
     .{ .name = "on_menu", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a menu mode this plugin owns was entered (1) or left (0)" },
     .{ .name = "on_activate", .params = &.{}, .results = &.{}, .required = false, .doc = "a buffer took focus (path readable via wl_activate_path during the call)" },
-    .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when something this plugin holds is ready — a raw proc stream or a pty with output pending, a pty whose child ended, a grid entry of its the last frame gave a new extent, or an entry holding a grid closed" },
+    .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when something this plugin holds is ready — a raw proc stream or a pty with output pending, a pty whose child ended, a grid entry of its the last frame gave a new extent, an entry holding a grid closed, or a directory it watches (wl_semantic_fs_watch) changed" },
     .{ .name = "on_signal", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a named signal this plugin subscribed to (by id) was raised; at the frame boundary, never inside a dispatch" },
     .{ .name = "on_context_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "keys of the head's primary context moved (entry, mode, offers, a published key…; wl_context_changed lists them); at most once per frame, after layout, never inside a dispatch" },
     .{ .name = "on_subject_changed", .params = &.{}, .results = &.{}, .required = false, .doc = "a subject this plugin watches (wl_subject_watch) reads differently; bound to the subject's entry for the call, so the document doors read it; at the frame boundary, once per moved subject, never inside a dispatch" },
@@ -633,9 +638,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 274;
+const max_import_count: usize = 278; // +1 wl_buffer_docked (a buffer switcher lists documents, not chrome), +1 wl_signal_emit_after (debounced signals), +2 wl_semantic_fs_watch + wl_semantic_fs_changed (a listing follows its directory on disk)
 const max_export_count: usize = 22;
-const max_semantic_operation_count: usize = 295;
+const max_semantic_operation_count: usize = 298; // +1 wl_buffer_docked, +2 wl_semantic_fs_watch + wl_semantic_fs_changed
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;
@@ -796,7 +801,7 @@ test "membrane contract data: ABI v1 owns twenty-one full callbacks and one mini
         try t.expect(found);
         for (legacy_callback_names[0..i]) |prior| try t.expect(!std.mem.eql(u8, name, prior));
     }
-    try t.expectEqual(@as(usize, 274), census.imports);
+    try t.expectEqual(@as(usize, 275), census.imports);
     try t.expectEqual(@as(usize, 22), census.exports);
     try t.expectEqual(@as(usize, 295), census.semantic_operations);
 }

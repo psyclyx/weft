@@ -2,7 +2,8 @@
 //! one-entry list; a fallback list of intentions is the general case,
 //! doc/configuration.md §5.2). The keymap never resolves a list — it hands
 //! it whole to dispatch. Pure string domain: a
-//! keyspec is `[C-][M-][S-]<xkb keysym name>`. Shift usually lives in
+//! keyspec is `[C-][M-][S-][s-]<xkb keysym name>` (`s-` is super: the logo
+//! key, ⌘ on a Mac — Emacs's spelling and order). Shift usually lives in
 //! the keysym (`a` vs `A`); the explicit `S-` is only for keys with no
 //! shifted keysym — `S-Return`, `S-Tab` (specials keep their names —
 //! `Escape`, `Tab`, `Return`).
@@ -165,6 +166,38 @@ granularities: std.StringArrayHashMapUnmanaged(Granularity) = .empty,
 /// (`undoStepOf`). Dispatch reads it wherever a keystroke runs something
 /// (`step.zig`); core names no mode and no grammar.
 undo_steps: std.StringArrayHashMapUnmanaged(UndoStep) = .empty,
+/// command → what of typing it hears: the TYPING HOOKS (`input.on-typing`,
+/// Emacs's `post-self-insert-hook` with its `electric-indent-chars` filter,
+/// and `input.on-typing-end`). After a key whose committed text the hook
+/// hears is dispatched in a mode that commits text, dispatch runs the
+/// command with that text; when a key takes the head OUT of such a mode —
+/// the typing ended — it runs each hook that asked for that with "".
+/// Whatever the key ran — the mode's commit or a bound command — the hook
+/// runs after it, so a plugin reacts to what was TYPED, never to text a
+/// paste or another plugin inserted. Not per mode: a hook says what it does
+/// with typing wherever typing happens, and its command decides where that
+/// applies (an entry's posture, its own config).
+typing_hooks: std.StringArrayHashMapUnmanaged(TypingHook) = .empty,
+
+/// What one typing hook hears (`typing_hooks`).
+pub const TypingHook = struct {
+    /// The characters whose typing runs it, one UTF-8 sequence each; ""
+    /// for any typed text; null for none.
+    chars: ?[]u8 = null,
+    /// Whether it runs, with "", when typing ends. Asked for and withdrawn
+    /// as the hook needs it, so a key leaving insert costs nothing when no
+    /// hook is waiting for one.
+    end: bool = false,
+
+    pub fn hears(self: TypingHook, text: []const u8) bool {
+        if (text.len == 0) return self.end;
+        const chars = self.chars orelse return false;
+        if (chars.len == 0) return true;
+        var it = (std.unicode.Utf8View.init(chars) catch return false).iterator();
+        while (it.nextCodepointSlice()) |c| if (std.mem.eql(u8, c, text)) return true;
+        return false;
+    }
+};
 
 /// What ONE undo step is while a head is in a mode — the grammar's
 /// declaration (`mode.set-undo-step <mode> command|continue|run`), read by
@@ -259,6 +292,11 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
     self.granularities.deinit(gpa);
     for (self.undo_steps.keys()) |k| gpa.free(k);
     self.undo_steps.deinit(gpa);
+    for (self.typing_hooks.keys(), self.typing_hooks.values()) |k, v| {
+        gpa.free(k);
+        if (v.chars) |c| gpa.free(c);
+    }
+    self.typing_hooks.deinit(gpa);
     // A keymap emptied and filled again is a change too, never a return to
     // a revision something derived from before.
     self.* = .{ .revision = self.revision +% 1 };
@@ -342,6 +380,34 @@ pub fn undoStepOf(self: *const Keymap, mode: []const u8) UndoStep {
         cur = self.parents.get(cur) orelse return .command;
     }
     return .command;
+}
+
+/// DECLARE that `command` hears the typing of the characters in `chars`
+/// ("" = any typed text, null = none). Declaring again replaces the filter.
+pub fn setTypingHook(self: *Keymap, gpa: Allocator, command: []const u8, chars: ?[]const u8) Allocator.Error!void {
+    const owned: ?[]u8 = if (chars) |c| try gpa.dupe(u8, c) else null;
+    errdefer if (owned) |o| gpa.free(o);
+    const hook = try self.typingHook(gpa, command);
+    if (hook.chars) |old| gpa.free(old);
+    hook.chars = owned;
+}
+
+/// DECLARE whether `command` hears the end of typing (`TypingHook.end`).
+pub fn setTypingEndHook(self: *Keymap, gpa: Allocator, command: []const u8, end: bool) Allocator.Error!void {
+    if (!end and !self.typing_hooks.contains(command)) return;
+    (try self.typingHook(gpa, command)).end = end;
+}
+
+fn typingHook(self: *Keymap, gpa: Allocator, command: []const u8) Allocator.Error!*TypingHook {
+    const gop = try self.typing_hooks.getOrPut(gpa, command);
+    if (!gop.found_existing) {
+        gop.key_ptr.* = gpa.dupe(u8, command) catch |err| {
+            self.typing_hooks.swapRemoveAt(gop.index);
+            return err;
+        };
+        gop.value_ptr.* = .{};
+    }
+    return gop.value_ptr;
 }
 
 /// Bind `keyspec` to `command` in `mode` at `priority`, owned by `owner`
@@ -816,7 +882,15 @@ pub const menu_nav_mode = "menu-nav";
 /// The complete binding arms for `key` in the hint navigation layer.
 /// Dispatch resolves these through the same action chain as ordinary keys.
 pub fn navBindings(self: *const Keymap, key: []const u8) ?[]const []const u8 {
-    const b = self.modes.getPtr(menu_nav_mode) orelse return null;
+    return self.layerArms(menu_nav_mode, key);
+}
+
+/// The arms `layer` binds `key` to in its OWN table — no fallback chain, no
+/// `global`. For a layer consulted ahead of the grammar (`menu-nav`, an
+/// inline pick's keys): a key it does not bind must fall through to the
+/// grammar untouched, and `global` is the grammar's to answer.
+pub fn layerArms(self: *const Keymap, layer: []const u8, key: []const u8) ?[]const []const u8 {
+    const b = self.modes.getPtr(layer) orelse return null;
     return if (b.get(key)) |e| e.commands else null;
 }
 
@@ -1025,7 +1099,7 @@ fn addCompletionsInto(self: *const Keymap, gpa: Allocator, mode: []const u8, pre
 /// is the BINDING-relevant shift only — held but not consumed to produce
 /// the keysym (so `Return`+Shift → "S-Return", while `a`+Shift is the
 /// keysym "A" with no S- prefix). The platform layer resolves that.
-pub fn keyspec(buf: []u8, ctrl: bool, alt: bool, shift: bool, keysym_name: []const u8) []const u8 {
+pub fn keyspec(buf: []u8, ctrl: bool, alt: bool, shift: bool, super: bool, keysym_name: []const u8) []const u8 {
     var i: usize = 0;
     if (ctrl) {
         @memcpy(buf[i..][0..2], "C-");
@@ -1037,6 +1111,10 @@ pub fn keyspec(buf: []u8, ctrl: bool, alt: bool, shift: bool, keysym_name: []con
     }
     if (shift) {
         @memcpy(buf[i..][0..2], "S-");
+        i += 2;
+    }
+    if (super) {
+        @memcpy(buf[i..][0..2], "s-");
         i += 2;
     }
     const n = @min(keysym_name.len, buf.len - i);
@@ -1165,8 +1243,8 @@ pub fn displayKey(self: *const Keymap, buf: []u8, key: []const u8) []const u8 {
 }
 
 /// Canonicalize a human keyspec (or space-joined sequence) into `buf`. Per
-/// token: leading `C-`/`M-`/`S-` modifier prefixes are re-emitted in the
-/// `C-M-S-` order `keyspec` composes at event time (so `S-C-x` and `C-S-x`
+/// token: leading `C-`/`M-`/`S-`/`s-` modifier prefixes are re-emitted in
+/// the `C-M-S-s-` order `keyspec` composes at event time (so `S-C-x` and `C-S-x`
 /// bind the same key), then the base maps via `baseName`. Falls back to the
 /// raw input if it doesn't fit.
 ///
@@ -1186,12 +1264,13 @@ pub fn normalizeKey(buf: []u8, key: []const u8) []const u8 {
         }
         first = false;
         var base = tok;
-        var mods: [3]bool = .{ false, false, false };
-        while (base.len >= 2 and base[1] == '-' and (base[0] == 'C' or base[0] == 'M' or base[0] == 'S')) {
-            mods[std.mem.indexOfScalar(u8, "CMS", base[0]).?] = true;
+        var mods: [4]bool = .{ false, false, false, false };
+        while (base.len >= 2 and base[1] == '-') {
+            const which = std.mem.indexOfScalar(u8, "CMSs", base[0]) orelse break;
+            mods[which] = true;
             base = base[2..];
         }
-        for (mods, "CMS") |on, m| if (on) {
+        for (mods, "CMSs") |on, m| if (on) {
             if (w + 2 > buf.len) return key;
             buf[w] = m;
             buf[w + 1] = '-';
@@ -1230,10 +1309,12 @@ test "keymap: modal binding, rebinding, keyspec composition" {
     try t.expectEqualStrings("custom-escape", km.lookup("insert", "Escape").?);
 
     var buf: [32]u8 = undefined;
-    try t.expectEqualStrings("C-M-x", keyspec(&buf, true, true, false, "x"));
-    try t.expectEqualStrings("Escape", keyspec(&buf, false, false, false, "Escape"));
-    try t.expectEqualStrings("S-Return", keyspec(&buf, false, false, true, "Return"));
-    try t.expectEqualStrings("C-M-S-Tab", keyspec(&buf, true, true, true, "Tab"));
+    try t.expectEqualStrings("C-M-x", keyspec(&buf, true, true, false, false, "x"));
+    try t.expectEqualStrings("Escape", keyspec(&buf, false, false, false, false, "Escape"));
+    try t.expectEqualStrings("S-Return", keyspec(&buf, false, false, true, false, "Return"));
+    try t.expectEqualStrings("C-M-S-Tab", keyspec(&buf, true, true, true, false, "Tab"));
+    try t.expectEqualStrings("s-c", keyspec(&buf, false, false, false, true, "c"));
+    try t.expectEqualStrings("C-S-s-z", keyspec(&buf, true, false, true, true, "z"));
 }
 
 test "keymap: layering is order-independent — higher priority always wins" {
@@ -1439,11 +1520,15 @@ test "keymap: keyspec normalization — config writes SPC : / C-x C-f, stores ca
     try t.expectEqualStrings("Escape", km.displayKey(&buf, "Escape"));
 }
 
-test "keymap: modifiers canonicalize to C-M-S- order, pointer gestures pass through" {
+test "keymap: modifiers canonicalize to C-M-S-s- order, pointer gestures pass through" {
     var buf: [256]u8 = undefined;
     try t.expectEqualStrings("C-S-x", normalizeKey(&buf, "S-C-x"));
     try t.expectEqualStrings("C-M-S-Tab", normalizeKey(&buf, "S-M-C-TAB"));
     try t.expectEqualStrings("C-minus", normalizeKey(&buf, "C--"));
+    // Super (`s-`, the logo key) sorts last, after shift.
+    try t.expectEqualStrings("C-s-x", normalizeKey(&buf, "s-C-x"));
+    try t.expectEqualStrings("S-s-Return", normalizeKey(&buf, "s-S-RET"));
+    try t.expectEqualStrings("s-minus", normalizeKey(&buf, "s--"));
 
     // The pointer grammar (`pointer.zig`): gestures are plain bases.
     try t.expectEqualStrings("mouse-1", normalizeKey(&buf, "mouse-1"));
@@ -1456,7 +1541,7 @@ test "keymap: modifiers canonicalize to C-M-S- order, pointer gestures pass thro
     // And they compose exactly as the shell spells them at event time, so a
     // config's `S-C-mouse-1` answers a ctrl+shift click.
     var ev: [32]u8 = undefined;
-    const spec = keyspec(&ev, true, false, true, "mouse-1");
+    const spec = keyspec(&ev, true, false, true, false, "mouse-1");
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);
@@ -1562,4 +1647,36 @@ test "keymap: the break-out chord is found through the fallback chain, and its p
     // A break-out bound globally applies under every mode.
     try km.bind(gpa, global_mode, "C-backslash", "mode.break-out", prio_plugin, "vim");
     try t.expectEqual(BreakOut.complete, km.breakOutMatch("anything", "C-backslash"));
+}
+
+test "keymap: a typing hook hears the characters it names, every text with an empty filter, and the end of typing when it asks" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.setTypingHook(gpa, "electric", "})]");
+    try km.setTypingHook(gpa, "everything", "");
+    // Declaring again replaces the filter rather than adding a second hook.
+    try km.setTypingHook(gpa, "electric", "}»");
+    try t.expectEqual(@as(usize, 2), km.typing_hooks.count());
+    const electric = km.typing_hooks.get("electric").?;
+    try t.expect(electric.hears("}"));
+    try t.expect(electric.hears("»"));
+    try t.expect(!electric.hears(")"));
+    // A text is heard only as ONE of the characters, never a run of them.
+    try t.expect(!electric.hears("}}"));
+    try t.expect(km.typing_hooks.get("everything").?.hears("x"));
+    // The end of typing only by a hook that asked, for as long as it asks.
+    try t.expect(!electric.hears(""));
+    try km.setTypingEndHook(gpa, "electric", true);
+    try t.expect(km.typing_hooks.get("electric").?.hears(""));
+    try t.expect(km.typing_hooks.get("electric").?.hears("}"));
+    try km.setTypingEndHook(gpa, "electric", false);
+    try t.expect(!km.typing_hooks.get("electric").?.hears(""));
+    // Withdrawing an end hook nothing declared adds nothing.
+    try km.setTypingEndHook(gpa, "nobody", false);
+    try t.expectEqual(@as(usize, 2), km.typing_hooks.count());
+    // A hook may hear only the end.
+    try km.setTypingEndHook(gpa, "tidy", true);
+    try t.expect(km.typing_hooks.get("tidy").?.hears(""));
+    try t.expect(!km.typing_hooks.get("tidy").?.hears("x"));
 }

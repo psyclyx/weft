@@ -64,9 +64,9 @@ fn pageUp() void {
 /// whole-mode peek, exactly where the clutter is.)
 fn isBaselineEdit(cmd: []const u8) bool {
     const floor = [_][]const u8{
-        "edit.insert-text",  "edit.insert-newline", "edit.insert-tab", "edit.delete-before",
-        "edit.delete-after", "cursor.left",         "cursor.right",    "cursor.up",
-        "cursor.down",
+        "edit.insert-text", "edit.insert-newline", "edit.insert-tab", "edit.delete-before",
+        "edit.break-line",  "edit.tab",            "edit.backspace",  "edit.delete-after",
+        "cursor.left",      "cursor.right",        "cursor.up",       "cursor.down",
     };
     for (floor) |c| if (std.mem.eql(u8, cmd, c)) return true;
     return false;

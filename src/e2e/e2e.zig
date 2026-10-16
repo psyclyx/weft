@@ -30,6 +30,7 @@ test {
     _ = @import("language_test.zig");
     _ = @import("grammar_test.zig");
     _ = @import("demolition_test.zig");
+    _ = @import("linux_only_test.zig");
     _ = @import("notes_test.zig");
     _ = @import("ide_test.zig");
     _ = @import("open_listing_test.zig");
@@ -51,4 +52,7 @@ test {
     _ = @import("command_identity_test.zig");
     _ = @import("status_test.zig");
     _ = @import("undo_test.zig");
+    _ = @import("quit_test.zig");
+    _ = @import("indent_test.zig");
+    _ = @import("completion_test.zig");
 }

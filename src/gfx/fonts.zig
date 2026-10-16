@@ -54,8 +54,8 @@ pub const FaceSet = struct {
         bytes[0] = try gpa.dupe(u8, mono_bytes);
         filled = 1;
 
-        // Sans family (ids 2‑5) from fontconfig; fall back to the mono
-        // bytes on any miss so markdown still renders (sans-less).
+        // Sans family (ids 2‑5) from the platform font provider; fall back
+        // to the mono bytes on any miss so markdown still renders (sans-less).
         const want = [_]struct { bold: bool, italic: bool }{
             .{ .bold = false, .italic = false },
             .{ .bold = true, .italic = false },

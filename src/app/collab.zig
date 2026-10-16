@@ -363,11 +363,11 @@ pub const Collab = struct {
         self.remote_publication = null;
         self.remote_locus = null;
         self.remote_attempted_session = null;
-        // Best-effort: a failed eventfd create (fd exhaustion) falls back to
+        // Best-effort: a failed wake-fd create (fd exhaustion) falls back to
         // the scheduler's bounded background-services poll rather than
         // making this infallible init fail the whole run over it.
         const conn_wake_fd = core.scheduler.newWakeFd() catch blk: {
-            std.log.warn("collab: could not create a wake eventfd — outbound sync falls back to poll-driven servicing", .{});
+            std.log.warn("collab: could not create a wake fd — outbound sync falls back to poll-driven servicing", .{});
             break :blk -1;
         };
         self.share_ctx = .{
@@ -931,7 +931,7 @@ pub fn applyIntents(
             }
             if (res) |fd| {
                 runtimeConnectFinish(gpa, cmd_ctx, sc, fd_link, fd, hp, token, user, my_identity) catch |err| {
-                    _ = std.os.linux.close(fd);
+                    _ = std.c.close(fd);
                     var buf: [96]u8 = undefined;
                     setEcho(echo, gpa, std.fmt.bufPrint(&buf, "connect failed: {t}", .{err}) catch "connect failed");
                 };

@@ -1,9 +1,10 @@
 //! CPU render target for display-free unit and geometry tests.
 //!
-//! This exercises the shared `FrameBuilder` without Vulkan and is useful for
+//! This exercises the shared `FrameBuilder` without a GPU and is useful for
 //! small tests that deliberately inspect geometry. It is not the authoritative
 //! E2E screenshot/video path: that binds the selected production renderer to
-//! `gfx/headless_vulkan.zig` and reads the completed offscreen GPU image.
+//! the build's offscreen GPU target (`gfx.headless`) and reads the completed
+//! frame.
 
 const std = @import("std");
 const core = @import("weft_core");

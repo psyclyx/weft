@@ -19,6 +19,7 @@
 weft.command("file.open", { menu: "File", group: "open", order: 5 });
 weft.command("file.browse-remote", { menu: "File", group: "open", order: 60 });
 weft.command("file.save", { menu: "File", group: "save", order: 10 });
+weft.command("file.save-all", { menu: "File", group: "save", order: 15 });
 weft.command("file.save-as", { menu: "File", group: "save", order: 20 });
 weft.command("buffer.close", { menu: "File", group: "close", order: 10 });
 weft.command("buffer.close-force", { menu: "File", group: "close", order: 20 });

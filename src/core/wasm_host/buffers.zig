@@ -63,6 +63,13 @@ pub fn isReadOnly(_: anytype, b: *Buffers.Buffer) bool {
     return b.read_only != null;
 }
 
+/// What a docked viewport holds (its chrome), not a document — the same rule
+/// the tab strip and `buffer.next` read (`viewport.Registry.isDocument`).
+pub fn isDocked(p: anytype, b: *Buffers.Buffer) bool {
+    const registry = p.activeCtx().viewports orelse return false;
+    return !registry.isDocument(b);
+}
+
 /// The entry's file backing — `edit.zig`'s `wl_path` generalized off the
 /// active entry. Null for an entry that holds no text, or holds text no file
 /// backs (a scratch, a projection).
@@ -173,6 +180,7 @@ pub const hBufferId = intDoor(idOf);
 pub const hBufferName = bytesDoor(nameOf);
 pub const hBufferActive = boolDoor(isActive);
 pub const hBufferReadonly = boolDoor(isReadOnly);
+pub const hBufferDocked = boolDoor(isDocked);
 pub const hBufferPath = bytesDoor(pathOf);
 pub const hBufferDirty = intDoor(dirtyOf);
 pub const hBufferLang = bytesDoor(langOf);

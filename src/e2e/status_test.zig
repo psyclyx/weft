@@ -267,7 +267,10 @@ test "e2e/status: a pane's own line still says where its entry stands" {
     try core.file.writeBytes(gpa, "m.txt", "hello\n");
     ed.runStr("file.open", "m.txt");
     ed.applyWindow();
-    try frame(&ed);
+    // Past the startup echo ("config.js loaded"): a brief message, which on
+    // a pane narrowed by the config's sidebar would crowd out the line's
+    // quieter chips. This is about what the line says once it has settled.
+    ed.gpa.free(try ed.renderCompositeAt(core.task.nowNs() + 30 * std.time.ns_per_s));
     const line = try lineOf(&ed, try primaryPane(&ed));
     errdefer line.print();
     try t.expect(hasBufferPos(&line));
@@ -465,4 +468,23 @@ test "e2e/status: every chrome style draws the bar" {
         var name: [32]u8 = undefined;
         shot(ed, std.fmt.bufPrint(&name, "ide-bar-{s}", .{style}) catch "ide-bar");
     }
+}
+
+test "e2e/status: the indentation segment says what the file uses — Tabs, or Spaces and the step" {
+    const gpa = t.allocator;
+    var app: IdeApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    ed.applyWindow();
+
+    try ide.openFile(ed, "main.go", "package main\n\nfunc main() {\n\tx := 1\n}\n");
+    _ = try awaitSegment(ed, try barPane(ed), "Tabs");
+    try ide.openFile(ed, "two.js", "if (a) {\n  b();\n}\n");
+    try t.expectEqualStrings("Spaces: 2", try awaitSegment(ed, try barPane(ed), "Spaces"));
+    // A click on it (its command) switches the buffer to tabs.
+    const line = try lineOf(ed, try barPane(ed));
+    try t.expectEqualStrings("indent.toggle-tabs", line.commands[line.find("Spaces: 2").?]);
+    ed.run("indent.toggle-tabs");
+    _ = try awaitSegment(ed, try barPane(ed), "Tabs");
 }

@@ -97,6 +97,12 @@ caret_anchor: ?usize = null,
 /// promotes the current query into it and clears the query; a further
 /// `pick.narrow` ANDs another facet; `pick.widen` clears it.
 narrow: std.ArrayList(u8) = .empty,
+/// Set while an INLINE pick is open (`types.InlineKeys`): the head kept its
+/// mode, and these layers get first refusal of its keys.
+inline_keys: ?types.InlineKeys = null,
+/// An inline pick's selection is a choice the person made: false until the
+/// selection is moved, and again whenever the query changes under it.
+chosen: bool = false,
 
 const Frec = struct { uses: u32, last: u64 };
 
@@ -191,6 +197,8 @@ fn clear(self: *Pick, gpa: Allocator) void {
     self.style = .orderless;
     self.narrow.deinit(gpa);
     self.narrow = .empty;
+    self.inline_keys = null;
+    self.chosen = false;
     gpa.free(self.prev_mode);
     self.prev_mode = &.{};
     self.active = false;
@@ -293,6 +301,21 @@ pub fn openWith(
     self.category = try gpa.dupe(u8, opts.category);
     for (entries) |e| try self.pushRow(gpa, e, ""); // static picks carry no info
     try self.refilter(gpa);
+    if (opts.inline_keys) |keys| {
+        // Inline: the keyboard stays the grammar's. No mode to enter, so none
+        // to restore — `prev_mode` stays empty, which is what tells
+        // `prepareClose` to leave the mode alone.
+        self.acceptor = acceptor;
+        self.style = opts.style;
+        self.source = opts.source;
+        self.query_epoch = 0;
+        self.source_epoch = 0;
+        self.last_query_ns = 0;
+        self.inline_keys = keys;
+        self.chosen = false;
+        self.active = true;
+        return;
+    }
     const prev = try gpa.dupe(u8, ctx.head.currentMode());
     errdefer gpa.free(prev);
     // mechanism-not-policy (task #19 item 3): Pick bypasses the keymap
@@ -479,7 +502,10 @@ pub fn appendItems(
     }
 }
 
-fn prepareClose(self: *Pick, ctx: *command.Context) ![]u8 {
+/// The mode to restore on close, owned — or null for an inline pick, which
+/// never left the head's mode and so has none to give back.
+fn prepareClose(self: *Pick, ctx: *command.Context) !?[]u8 {
+    if (self.inline_keys != null) return null;
     // mechanism-not-policy (task #19 item 3): Pick's own save/restore — see
     // `openWith`'s comment above for why this bypasses the door.
     // If the pick was opened from a menu (e.g. the palette from leader),
@@ -493,12 +519,48 @@ fn prepareClose(self: *Pick, ctx: *command.Context) ![]u8 {
     // Prepare the whole fallible transition before clearing the live picker.
     // Once clear commits, mode restore is an owned-pointer swap and cannot
     // strand a vanished picker in "pick" mode or lose its terminal event.
-    return ctx.gpa.dupe(u8, restore);
+    return try ctx.gpa.dupe(u8, restore);
 }
 
-fn commitClose(self: *Pick, ctx: *command.Context, owned_restore: []u8) void {
+fn commitClose(self: *Pick, ctx: *command.Context, owned_restore: ?[]u8) void {
     self.clear(ctx.gpa);
-    ctx.head.setModeRawOwned(ctx.gpa, owned_restore);
+    if (owned_restore) |restore| ctx.head.setModeRawOwned(ctx.gpa, restore);
+}
+
+/// Whether this pick holds the keyboard ("pick" mode). An inline pick is
+/// open without holding it.
+pub fn holdsKeys(self: *const Pick) bool {
+    return self.active and self.inline_keys == null;
+}
+
+/// The keymap layers dispatch offers a key to before the grammar, in order —
+/// null unless an inline pick is open AND showing rows: one with nothing to
+/// show takes no key, so Tab still indents beside a list nobody can see.
+pub fn keyLayers(self: *const Pick) ?[2]?[]const u8 {
+    const keys = self.inline_keys orelse return null;
+    if (!self.active or self.filtered.items.len == 0) return null;
+    return .{ if (self.chosen) keys.chosen else null, keys.base };
+}
+
+/// Replace an inline pick's query with `text` — the caller owns what the
+/// query MEANS (completion: the word being typed, read back off the buffer)
+/// — and refilter. Un-chooses the selection: the person is typing again.
+/// Returns whether the query changed.
+pub fn setQuery(self: *Pick, gpa: Allocator, text: []const u8) !bool {
+    if (!self.active or std.mem.eql(u8, self.query.items, text)) return false;
+    self.query.clearRetainingCapacity();
+    try self.query.appendSlice(gpa, text);
+    self.queryChanged();
+    self.chosen = false;
+    try self.refilter(gpa);
+    return true;
+}
+
+/// Whether a row is selected at all: always for an ordinary pick with rows,
+/// only once chosen for an inline one.
+fn hasSelection(self: *const Pick) bool {
+    if (self.filtered.items.len == 0) return false;
+    return self.inline_keys == null or self.chosen;
 }
 
 /// Dismiss a live picker through its ordinary lifecycle: close its source and
@@ -570,7 +632,7 @@ fn refilter(self: *Pick, gpa: Allocator) !void {
 
 /// Current choice's text, if any.
 pub fn selection(self: *const Pick) ?[]const u8 {
-    if (self.filtered.items.len == 0) return null;
+    if (!self.hasSelection()) return null;
     return self.items.items[self.filtered.items[self.selected]];
 }
 
@@ -582,7 +644,7 @@ pub fn docOf(self: *const Pick, filtered_index: usize) []const u8 {
 /// The info body (documentation) of the currently-selected row, or "" — what the
 /// side info popup shows next to a completion list.
 pub fn selectedInfo(self: *const Pick) []const u8 {
-    if (self.filtered.items.len == 0 or self.selected >= self.filtered.items.len) return "";
+    if (!self.hasSelection() or self.selected >= self.filtered.items.len) return "";
     const idx = self.filtered.items[self.selected];
     if (idx >= self.infos.items.len) return "";
     return self.infos.items[idx];
@@ -639,7 +701,7 @@ fn buildCaretSurface(self: *const Pick, scratch: Allocator, off: usize, max_rows
             if (ann.len > 0) surf.addSpanCol(scratch, ann, .annotation, 2);
         }
     }
-    surf.end(scratch, self.selected - start);
+    surf.end(scratch, if (self.hasSelection()) self.selected - start else null);
     surf.anchor = off;
     surf.setInfo(scratch, self.selectedInfo());
     return surf;
@@ -779,7 +841,11 @@ fn cNext(ctx: *command.Context, args: struct {}) anyerror!Value {
     _ = args;
     const p = pickOf(ctx);
     if (p.active and p.filtered.items.len > 0) {
-        p.selected = (p.selected + 1) % p.filtered.items.len;
+        // An inline pick's first move CHOOSES, starting at the top.
+        if (p.inline_keys != null and !p.chosen) {
+            p.chosen = true;
+            p.selected = 0;
+        } else p.selected = (p.selected + 1) % p.filtered.items.len;
     }
     return .nil;
 }
@@ -788,7 +854,11 @@ fn cPrev(ctx: *command.Context, args: struct {}) anyerror!Value {
     _ = args;
     const p = pickOf(ctx);
     if (p.active and p.filtered.items.len > 0) {
-        p.selected = (p.selected + p.filtered.items.len - 1) % p.filtered.items.len;
+        // …and backwards, from the bottom.
+        if (p.inline_keys != null and !p.chosen) {
+            p.chosen = true;
+            p.selected = p.filtered.items.len - 1;
+        } else p.selected = (p.selected + p.filtered.items.len - 1) % p.filtered.items.len;
     }
     return .nil;
 }
@@ -1408,6 +1478,51 @@ test "pick: async source — poll folds, onQuery on change, close once" {
     _ = try cCancel(ctx, .{});
     try t.expectEqual(@as(usize, 1), fake.closes);
     try t.expect(!env.head.pick.active);
+}
+
+test "pick: an inline pick leaves the mode, chooses nothing until moved, and gives the keys back with no rows" {
+    const gpa = t.allocator;
+    var env: TestEnv = undefined;
+    try TestEnv.init(gpa, &env);
+    defer env.deinit(gpa);
+    var sink: Sink = .{};
+    defer sink.got.deinit(gpa);
+    const ctx = &env.ctx;
+    const p = &env.head.pick;
+
+    try env.head.setModeRaw(gpa, "insert");
+    try p.openWith(ctx, "complete", &.{
+        .{ .text = "alpha" }, .{ .text = "alpine" }, .{ .text = "beta" },
+    }, .{ .handler = Sink.accept, .data = &sink }, .{
+        .inline_keys = .{ .base = "layer", .chosen = "layer-chosen" },
+    });
+    // Open without taking the keyboard: the mode is the grammar's still.
+    try t.expectEqualStrings("insert", env.head.currentMode());
+    try t.expect(!p.holdsKeys());
+    // Nothing preselected, so only the base layer answers.
+    try t.expect(p.selection() == null);
+    try t.expect(p.keyLayers().?[0] == null);
+    try t.expectEqualStrings("layer", p.keyLayers().?[1].?);
+
+    // The first move CHOOSES (the top row); the chosen layer comes first now.
+    _ = try cNext(ctx, .{});
+    try t.expectEqualStrings("alpha", p.selection().?);
+    try t.expectEqualStrings("layer-chosen", p.keyLayers().?[0].?);
+    // Typing on un-chooses; a query nothing matches takes no key at all.
+    try t.expect(try p.setQuery(gpa, "alp"));
+    try t.expect(p.selection() == null);
+    try t.expect(try p.setQuery(gpa, "zz"));
+    try t.expect(p.keyLayers() == null);
+    // From the bottom, backwards.
+    _ = try p.setQuery(gpa, "al");
+    _ = try cPrev(ctx, .{});
+    try t.expectEqualStrings("alpine", p.selection().?);
+
+    // Closing leaves the mode where it is — there was none to restore.
+    try env.head.setModeRaw(gpa, "insert-other");
+    try p.dismiss(ctx);
+    try t.expect(sink.cancelled);
+    try t.expectEqualStrings("insert-other", env.head.currentMode());
 }
 
 // ── Annotation ──────────────────────────────────────────────────────

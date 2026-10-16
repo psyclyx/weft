@@ -2528,17 +2528,17 @@ test "net_session: streams a socket into a buffer, teardown clean" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    const linux = std.os.linux;
+    const libc = std.c;
     var fds: [2]i32 = undefined;
-    if (linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds)) != .SUCCESS) return;
+    if (libc.socketpair(libc.AF.UNIX, libc.SOCK.STREAM, 0, &fds) != 0) return;
     var peer_open = true;
     defer if (peer_open) {
-        _ = linux.close(fds[1]);
+        _ = libc.close(fds[1]);
     };
 
     const s = try net_session.Session.startFd(gpa, env.pool, &env.ctx, "netplug", "*net*", fds[0]);
     // The "server" end writes; the reader streams it into *net* via drain.
-    _ = linux.write(fds[1], "net-ok", 6);
+    _ = libc.write(fds[1], "net-ok", 6);
     const buf = blk: {
         var rounds: usize = 0;
         while (rounds < 5_000_000) : (rounds += 1) {
@@ -2553,7 +2553,7 @@ test "net_session: streams a socket into a buffer, teardown clean" {
     };
     // deinit shuts fds[0] + joins the reader + closes — no hang, no leak.
     s.deinit();
-    _ = linux.close(fds[1]);
+    _ = libc.close(fds[1]);
     peer_open = false;
     try t.expect(buf != null);
     const str = try buf.?.textEditor().?.text().toOwnedSlice(gpa);
@@ -2888,7 +2888,7 @@ test "wasm plugin: a symlink cannot walk into the machinery a plugin may not nam
     defer gpa.free(targetz);
     const linkz = try std.fmt.allocPrintSentinel(gpa, "{s}/looks-innocent", .{dir}, 0);
     defer gpa.free(linkz);
-    if (std.os.linux.errno(std.os.linux.symlinkat(targetz.ptr, std.os.linux.AT.FDCWD, linkz.ptr)) != .SUCCESS)
+    if (std.c.symlink(targetz.ptr, linkz.ptr) != 0)
         return error.SkipZigTest;
 
     try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "fs-limit.read", &.{.{ .string = linkz }}));

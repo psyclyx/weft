@@ -29,13 +29,6 @@ pub const kv_file = @import("kv_file.zig");
 pub const proc = @import("proc.zig");
 pub const subbuffer = @import("subbuffer.zig");
 pub const register = @import("register.zig");
-/// BUILT AHEAD, NOT YET WIRED. The local tier of `fs.watch` (inotify): 387
-/// lines, 3 tests, and nothing in this tree calls it — core does not import it
-/// and no consumer names `core.watch`. It stays exported because this line is
-/// its ONLY reachability: prune it and the code and its tests leave the build
-/// entirely. Kept visible rather than quietly dropped, because "unwired" and
-/// "unwanted" are different claims and only the author can make the second.
-pub const watch = @import("watch.zig");
 pub const Editor = @import("Editor.zig");
 /// A text entry as a frame reads it, at one revision (doc/model.md §2.7).
 pub const TextSnapshot = @import("TextSnapshot.zig");
@@ -98,6 +91,9 @@ pub const flash = @import("flash.zig");
 /// A head's position history and its travel (C-o/C-i), anchored so entries
 /// survive edits.
 pub const jumplist = @import("jumplist.zig");
+/// Unsaved work across every entry: quitting, save-all, and running a command
+/// once the saves in flight land.
+pub const unsaved = @import("unsaved.zig");
 pub const designation = @import("designation.zig");
 /// A head's system clipboard: an in-memory store, or the platform's once the
 /// shell installs a backend.
@@ -176,5 +172,8 @@ test {
     _ = @import("container.zig");
     _ = @import("repl_session.zig");
     _ = @import("pty.zig");
+    _ = @import("futex.zig");
+    _ = @import("child_status.zig");
+    _ = @import("posix_fd.zig");
     _ = @import("grid.zig");
 }

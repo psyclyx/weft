@@ -605,6 +605,34 @@ test "editor: insert-text through the edit door types at every selection, and re
     try expectEdText(gpa, ed, "x y");
 }
 
+test "editor: the typing keys are actions whose floor is the bare character, and seal-undo cuts after the edit before it" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try testHost(gpa, &host);
+    defer host.deinit(gpa);
+    const ed = host.editor();
+
+    // No provider says more: Return's break is a newline, Tab a tab,
+    // Backspace one character.
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "a" }});
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.break-line", &.{});
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.tab", &.{});
+    try expectEdText(gpa, ed, "a\n\t");
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.backspace", &.{});
+    try expectEdText(gpa, ed, "a\n");
+
+    // A seal right after an edit closes the unit WITH that edit in it: undo
+    // takes back what came after, and only that.
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.seal-undo", &.{});
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.insert-text", &.{.{ .string = "b" }});
+    _ = try core.command.run(&host.commands, &host.ctx, "edit.undo", &.{});
+    try expectEdText(gpa, ed, "a\n");
+
+    // The rule a mode no grammar declared for reads back as `command`.
+    const rule = try core.command.run(&host.commands, &host.ctx, "mode.undo-step", &.{});
+    try t.expectEqualStrings("command", rule.string);
+}
+
 test "editor: vertical movement with goal column, utf-8 safe" {
     const gpa = t.allocator;
     var pool = try task.Pool.init(gpa, .{ .threads = 1 });
@@ -1836,6 +1864,7 @@ test "syntax: outline queries name what a first-identifier walk got wrong" {
     try rt.add(gpa, .{ .extensions = ".zig", .grammar = "zig", .symbol = "tree_sitter_zig", .outline = weftQuery("zig-outline") });
     try rt.add(gpa, .{ .extensions = ".lua", .grammar = "lua", .symbol = "tree_sitter_lua", .outline = weftQuery("lua-outline") });
     try rt.add(gpa, .{ .extensions = ".js", .grammar = "javascript", .symbol = "tree_sitter_javascript", .outline = weftQuery("javascript-outline") });
+    try rt.add(gpa, .{ .extensions = ".go", .grammar = "go", .symbol = "tree_sitter_go", .outline = weftQuery("go-outline") });
 
     const Case = struct { path: []const u8, src: []const u8, want: []const []const u8 };
     const cases = [_]Case{
@@ -1876,6 +1905,31 @@ test "syntax: outline queries name what a first-identifier walk got wrong" {
             \\let plain = 1;
             ,
             .want = &.{ "f", "C", "m", "g" },
+        },
+        // A method is named by its field identifier, not its receiver; each
+        // member of a grouped declaration is its own entry; locals are not.
+        .{
+            .path = "a.go",
+            .src =
+            \\package p
+            \\const Max = 3
+            \\var (
+            \\    a = 1
+            \\    b = 2
+            \\)
+            \\type (
+            \\    Point struct{ X int }
+            \\    Shape interface{ Area() int }
+            \\)
+            \\type ID = int
+            \\func (p Point) Area() int {
+            \\    const local = 1
+            \\    type inner int
+            \\    return local
+            \\}
+            \\func main() {}
+            ,
+            .want = &.{ "Max", "a", "b", "Point", "Shape", "Area", "ID", "Area", "main" },
         },
     };
 

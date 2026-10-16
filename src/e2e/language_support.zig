@@ -11,6 +11,7 @@ pub const cases = [_]Case{
     .{ .name = "nix", .path = "flake.nix", .source = "{ description = \"weft\"; }\n" },
     .{ .name = "javascript", .path = "app.js", .source = "function greet() { return 1; }\n" },
     .{ .name = "html", .path = "index.html", .source = "<!doctype html>\n<title>weft demo</title>\n" },
+    .{ .name = "go", .path = "main.go", .source = "package main\n\nfunc main() {}\n" },
 };
 
 pub fn attachedSyntax(ed: *h.Editor) ?*h.core.syntax.Syntax {
@@ -67,7 +68,9 @@ pub fn authorAndCheckSyntax(ed: *h.Editor, c: Case) !void {
 /// the proc membrane; only the peer implementation is a test double, activation
 /// and Caps routing are production paths. `tag` names this peer in its marker
 /// files, its pid file and the completion item it answers with, so two peers
-/// running at once are told apart by what they say rather than by hope.
+/// running at once are told apart by what they say rather than by hope. Like
+/// a real server for a language with members, it says `.` opens completion
+/// (`triggerCharacters`), which is what auto-completion keys off.
 pub const Peer = struct {
     tag: []const u8,
     command: []u8,
@@ -126,7 +129,7 @@ pub const Peer = struct {
             \\    if ($method eq "textDocument/completion") { open(my $comp, ">>", ".lsp-$tag-completion") or die; print $comp "x"; close $comp; }
             \\    my $result = {};
             \\    if ($method eq "initialize") {
-            \\        $result = { capabilities => { completionProvider => {} } };
+            \\        $result = { capabilities => { completionProvider => { triggerCharacters => ["."] } } };
             \\    } elsif ($method eq "textDocument/completion") {
             \\        my $item = "hermetic_${tag}${where}_completion";
             \\        $result = { items => [{ label => $item, insertText => $item }] };

@@ -1,10 +1,11 @@
 //! peer_fs — the `.peer` filesystem wire protocol + server (design Part D).
 //!
 //! A collab HOST serves a shared project root to a connected client: LIST /
-//! READ / WRITE / STAT, confined by `rooted_fs` (openat2, so a client can never
-//! escape the shared root), and gated by a per-connection `Grant` that defaults
-//! to DENY. This addresses the round-2 findings that the old blob channel had
-//! no arbitrary-path/list/write ops, no confinement, and no write precondition:
+//! READ / WRITE / STAT, confined by `rooted_fs` (a no-follow `openat` walk from
+//! a held root fd, so a client can never escape the shared root), and gated by
+//! a per-connection `Grant` that defaults to DENY. This addresses the round-2
+//! findings that the old blob channel had no arbitrary-path/list/write ops, no
+//! confinement, and no write precondition:
 //!
 //! - **Grant** (round-2 D5, restructured per §13.5): NOT one access level but
 //!   three separately granted EXPORT SURFACES — `hierarchy` (list a tree),
@@ -328,12 +329,12 @@ pub fn handleWithService(gpa: Allocator, fs: *const RootedFs, grant: Grant, serv
 // ── tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
-const linux = std.os.linux;
+const c = std.c;
 
 fn tmpRoot(buf: []u8) ![:0]const u8 {
-    const path = try std.fmt.bufPrintZ(buf, "/tmp/weft-peerfs-{d}", .{linux.getpid()});
-    _ = linux.rmdir(path.ptr);
-    if (linux.errno(linux.mkdir(path.ptr, 0o755)) != .SUCCESS) return error.Mkdir;
+    const path = try std.fmt.bufPrintZ(buf, "/tmp/weft-peerfs-{d}", .{c.getpid()});
+    _ = c.rmdir(path.ptr);
+    if (c.errno(c.mkdir(path.ptr, 0o755)) != .SUCCESS) return error.Mkdir;
     return path;
 }
 
@@ -344,9 +345,9 @@ test "peer_fs: grant gates ops; list/read/write round-trip; stale write refused"
     var fs = try RootedFs.open(root_path.ptr);
     defer fs.close();
     defer {
-        _ = linux.unlinkat(fs.root_fd, "a.txt", 0);
-        _ = linux.unlinkat(fs.root_fd, "new.txt", 0);
-        _ = linux.rmdir(root_path.ptr);
+        _ = c.unlinkat(fs.root_fd, "a.txt", 0);
+        _ = c.unlinkat(fs.root_fd, "new.txt", 0);
+        _ = c.rmdir(root_path.ptr);
     }
     try fs.write("a.txt", "one");
 
@@ -435,7 +436,7 @@ test "peer_fs: semantic service bytes share the granted encrypted channel" {
     const root_path = try tmpRoot(&pbuf);
     var fs = try RootedFs.open(root_path.ptr);
     defer fs.close();
-    defer _ = linux.rmdir(root_path.ptr);
+    defer _ = c.rmdir(root_path.ptr);
 
     var implementation = struct {
         calls: usize = 0,
@@ -469,8 +470,8 @@ test "peer_fs: hierarchy, bytes, and mutate are three separately granted surface
     var fs = try RootedFs.open(root_path.ptr);
     defer fs.close();
     defer {
-        _ = linux.unlinkat(fs.root_fd, "a.txt", 0);
-        _ = linux.rmdir(root_path.ptr);
+        _ = c.unlinkat(fs.root_fd, "a.txt", 0);
+        _ = c.rmdir(root_path.ptr);
     }
     try fs.write("a.txt", "one");
 

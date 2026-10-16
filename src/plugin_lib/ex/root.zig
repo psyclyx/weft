@@ -175,22 +175,29 @@ fn builtin(kw: []const u8, bang: bool, args: []const u8) bool {
         if (args.len > 0) weft.runStr("file.save-as", args) else weft.run("file.save");
         return true;
     }
-    // wa/wall save the buffer (weft's save is the active buffer only — see note).
     if (eqAny(kw, &.{ "wa", "wall" })) {
-        weft.run("file.save");
+        weft.run("file.save-all");
         return true;
     }
-    if (eqAny(kw, &.{ "wq", "x", "xit", "wqa", "wqall", "xa", "xall" })) {
+    // A save lands frames later, so the quit WAITS for it (`file.when-saved`)
+    // and does not run if it fails. `!` quits whatever else is unsaved;
+    // without it, the quit asks about that (or refuses) as `:q` does.
+    const quit = if (bang) "app.quit-force" else "app.quit";
+    if (eqAny(kw, &.{ "wq", "x", "xit" })) {
         if (args.len > 0) weft.runStr("file.save-as", args) else weft.run("file.save");
-        weft.run("app.quit");
+        weft.runStr("file.when-saved", quit);
+        return true;
+    }
+    if (eqAny(kw, &.{ "wqa", "wqall", "xa", "xall" })) {
+        weft.run("file.save-all");
+        weft.runStr("file.when-saved", quit);
         return true;
     }
     if (eqAny(kw, &.{ "q", "quit", "qa", "qall", "quita", "quitall" })) {
-        weft.run("app.quit");
+        weft.run(quit);
         return true;
     }
     if (eqAny(kw, &.{ "e", "ed", "edit", "o", "op", "open" })) {
-        _ = bang;
         if (args.len > 0) {
             // A name typed here is relative to the project this entry is in —
             // its place — never to the directory the editor was launched from.

@@ -223,6 +223,11 @@ fn on_signal(id: i32) callconv(.c) void {
     if (id >= 0) plugin.signal(@intCast(id));
 }
 
+/// A directory a listing shows changed on disk (`wl_semantic_fs_watch`).
+fn on_poll() callconv(.c) void {
+    plugin.poll();
+}
+
 comptime {
     weft.exportCallback("on_semantic_target_probe", &on_semantic_target_probe);
     weft.exportCallback("on_semantic_target_open", &on_semantic_target_open);
@@ -231,5 +236,6 @@ comptime {
     weft.exportCallback("on_semantic_action", &on_semantic_action);
     weft.exportCallback("on_semantic_field_edit", &on_semantic_field_edit);
     weft.exportCallback("on_signal", &on_signal);
+    weft.exportCallback("on_poll", &on_poll);
     weft.exportCallback("on_context_changed", &onContextChanged);
 }

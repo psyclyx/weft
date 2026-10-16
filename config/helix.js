@@ -72,6 +72,18 @@ weft.use("undo");     // the undo history as a tree, docked right when shown (SP
 
 // ── Values ───────────────────────────────────────────────────────────
 weft.set("lsp", "zig", "zls");
+weft.set("lsp", "go", "gopls");
+weft.set("lsp", "nix", "nixd");
+weft.set("lsp", "fnl", "fennel-ls");
+weft.set("lsp", "lua", "lua-language-server");
+for (const ext of ["js", "mjs", "cjs", "jsx"]) weft.set("lsp", ext, "typescript-language-server --stdio");
+weft.set("lsp", "html", "vscode-html-language-server --stdio");
+// Indentation: .editorconfig, else the file's own lines, else these by
+// language, else four spaces (config.js says more).
+weft.set("indent", "go", "tabs");      // gofmt
+weft.set("indent", "zig", "spaces:4"); // zig fmt
+weft.set("indent", "js", "spaces:2");
+weft.set("indent", "nix", "spaces:2");
 // which-key: centered popup, a longer hold before it appears.
 weft.set("which_key", "placement", "center");
 weft.set("which_key", "delay-ms", "350");
@@ -211,6 +223,15 @@ weft.bind("helix-source", "SPC m e", "plugin.code.run");
 // Completion — the at-caret popup (buffer-word + LSP race + merge-rank).
 weft.bind("helix-insert", "C-SPC", "complete.show");
 weft.bind("helix-normal", "C-SPC", "complete.show");
+// …and it pops up by itself as you type, as helix's does: after `auto-prefix`
+// word characters and an `auto-delay` ms pause, at once after a language
+// server's trigger character, never in a comment or a string. Tab / C-n /
+// C-p / arrows move through it, Return accepts only a row you moved to, and
+// Escape leaves insert, closing it (the "complete" layers in defaults.js).
+weft.set("complete", "auto", "on");        // "off": only C-SPC opens it
+weft.set("complete", "auto-prefix", "2");  // word characters before it pops up
+weft.set("complete", "auto-delay", "120"); // ms of pause first
+weft.set("complete", "auto-quiet-in", ["comment", "string"]);
 
 weft.bind("helix-normal", "SPC o e", "direnv.status");
 weft.bind("helix-normal", "SPC o r", "repl.start");

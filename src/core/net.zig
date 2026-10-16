@@ -32,7 +32,7 @@
 //! not ours.
 
 const std = @import("std");
-const linux = std.os.linux;
+const libc = std.c;
 const Allocator = std.mem.Allocator;
 
 const session = @import("session.zig");
@@ -78,9 +78,9 @@ pub const Sock = struct {
     /// caller loops). Blocking. `EINTR` is retried transparently.
     pub fn send(self: Sock, bytes: []const u8) StreamError!usize {
         while (true) {
-            const rc = linux.write(self.fd, bytes.ptr, bytes.len);
-            switch (linux.errno(rc)) {
-                .SUCCESS => return rc,
+            const rc = libc.write(self.fd, bytes.ptr, bytes.len);
+            switch (libc.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
                 .INTR => continue,
                 .PIPE, .CONNRESET => return error.ConnReset,
                 else => return error.TransportFailed,
@@ -92,9 +92,9 @@ pub const Sock = struct {
     /// clean end-of-stream (the peer hung up), NOT an error. Blocking.
     pub fn recv(self: Sock, buf: []u8) StreamError!usize {
         while (true) {
-            const rc = linux.read(self.fd, buf.ptr, buf.len);
-            switch (linux.errno(rc)) {
-                .SUCCESS => return rc, // 0 == EOF
+            const rc = libc.read(self.fd, buf.ptr, buf.len);
+            switch (libc.errno(rc)) {
+                .SUCCESS => return @intCast(rc), // 0 == EOF
                 .INTR => continue,
                 .CONNRESET => return error.ConnReset,
                 else => return error.TransportFailed,
@@ -103,7 +103,7 @@ pub const Sock = struct {
     }
 
     pub fn close(self: Sock) void {
-        _ = linux.close(self.fd);
+        _ = libc.close(self.fd);
     }
 };
 
@@ -250,12 +250,7 @@ pub const TlsSock = struct {
 
 const t = std.testing;
 
-fn socketPair() ![2]i32 {
-    var fds: [2]i32 = undefined;
-    const rc = linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds);
-    if (linux.errno(rc) != .SUCCESS) return error.SocketPair;
-    return fds;
-}
+const socketPair = session.unixSocketPair;
 
 test "net: TCP Sock round-trips bytes both ways over a socketpair" {
     const fds = try socketPair();
@@ -289,11 +284,8 @@ test "net: Sock.connect reaches a live loopback listener" {
     // Bind an ephemeral loopback port; skip if the sandbox forbids it
     // (mirrors session.zig's tcpConnect test).
     const listener = session.tcpListener(0) catch return;
-    defer _ = linux.close(listener);
-    var addr: linux.sockaddr.in = undefined;
-    var alen: linux.socklen_t = @sizeOf(linux.sockaddr.in);
-    if (linux.errno(linux.getsockname(listener, @ptrCast(&addr), &alen)) != .SUCCESS) return;
-    const port = std.mem.bigToNative(u16, addr.port);
+    defer _ = libc.close(listener);
+    const port = session.tcpListenerPort(listener) catch return;
 
     const hostport = try std.fmt.allocPrint(t.allocator, "127.0.0.1:{d}", .{port});
     defer t.allocator.free(hostport);
@@ -358,13 +350,12 @@ test "net: TLS handshake emits a real ClientHello onto the wire" {
         fn go(fd: i32, out: *[5]u8, n: *usize) void {
             var got: usize = 0;
             while (got < 5) {
-                const rc = linux.read(fd, out[got..].ptr, 5 - got);
-                if (linux.errno(rc) != .SUCCESS) break;
-                if (rc == 0) break;
-                got += rc;
+                const rc = libc.read(fd, out[got..].ptr, 5 - got);
+                if (rc <= 0) break;
+                got += @intCast(rc);
             }
             n.* = got;
-            _ = linux.close(fd); // hang up to unblock the client's read
+            _ = libc.close(fd); // hang up to unblock the client's read
         }
     };
     var hdr: [5]u8 = .{0} ** 5;

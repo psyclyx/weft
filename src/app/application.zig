@@ -239,8 +239,13 @@ pub const Application = struct {
         if (self.notifySubjectsChanged()) damaged = true;
         // Named signals plugins raised this wake (`wl_signal_emit`), heard at
         // the same boundary and for the same reason: never inside the
-        // dispatch or poll that raised them.
-        if (core.wasm_host.deliverSignals(self.driver.ctx.gpa, self.driver.ctx.plugins.items)) {
+        // dispatch or poll that raised them. Typing is core's own signal
+        // (`Head.typed`), raised here once however many keys the wake held.
+        const head = &self.session.head;
+        const typed = head.typed;
+        head.typed = false;
+        const core_raised: []const []const u8 = if (typed) &.{core.wasm_host.typed_signal} else &.{};
+        if (core.wasm_host.deliverSignals(self.driver.ctx.gpa, self.driver.ctx.plugins.items, core_raised)) {
             damaged = true;
             // A provider that accepted a reveal reads there, off the layout
             // pass, and republishes: one more layout pass asks it again, so

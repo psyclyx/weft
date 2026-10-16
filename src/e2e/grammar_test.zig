@@ -282,7 +282,9 @@ test "e2e/grammar: GATE 2 — Tab inserts where it is bound, does nothing where 
     const gpa = t.allocator;
 
     // (1) In a text buffer Tab still inserts — because the editing grammar
-    // BINDS it to the `edit.insert-tab` command, never because a key became text.
+    // BINDS it to the `edit.tab` action, never because a key became text.
+    // What it inserts is its provider's: the indent plugin's step, four
+    // spaces in a file that says nothing of its own.
     {
         var app: App = undefined;
         try app.init(gpa);
@@ -294,7 +296,7 @@ test "e2e/grammar: GATE 2 — Tab inserts where it is bound, does nothing where 
         ed.press("Tab", "\t");
         const text = (try documentText(ed, gpa)).?;
         defer gpa.free(text);
-        try t.expectEqualStrings("\t", text);
+        try t.expectEqualStrings("    ", text);
     }
 
     // (2) In a structural context, on a row that DOES offer its hierarchy,

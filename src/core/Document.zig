@@ -371,18 +371,13 @@ fn mintIncarnation() u64 {
     return incarnations.fetchAdd(1, .monotonic);
 }
 
-/// A fresh document identity from the kernel CSPRNG (getrandom(2), the same
+/// A fresh document identity from the OS CSPRNG (`secure.osRandom`, the same
 /// source the channel keys use — no `std.Io` plumbing). 128 bits, so two
 /// replicas minting independently never collide in any history this editor
 /// will see.
 pub fn mintId() Id {
     var id: Id = .{ .bytes = undefined };
-    var got: usize = 0;
-    while (got < id.bytes.len) {
-        const rc = std.os.linux.getrandom(id.bytes[got..].ptr, id.bytes.len - got, 0);
-        if (std.os.linux.errno(rc) != .SUCCESS) @panic("getrandom failed");
-        got += rc;
-    }
+    @import("secure.zig").osRandom(&id.bytes);
     return id;
 }
 

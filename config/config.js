@@ -149,22 +149,31 @@ weft.plugin("acp.js");         // conversations are instances: *agent*, *agent:2
 // wins.
 weft.use("defaults");
 
+// The workspace chrome ide.js composes, under vim's keys. Each is a fragment
+// you can drop with its line; none of them binds an editing key.
+//
 // `sidebar` docks a files browser at the left edge. "Sidebar" is not a kind
 // the workspace knows — it is a named bundle of viewport ATTRIBUTES (dock
 // edge, out of the cycling rotation, owns its entry, not a focus source) plus
 // one `weft.present` line. Read config/sidebar.js: there is no window
 // management code in it anywhere, and slotting in document symbols instead of
-// files would be a different `weft.present`, not a different plugin.
-// Left to you rather than made the default: a docked companion claims a
-// quarter of every frame, which is a workspace opinion the reference config
-// declines to hold for you.
-// weft.use("sidebar");
-// The same goes for a menubar (config/menubar.js): File, Edit, … with the
-// key that runs each row in vim beside it (`SPC f S` for Save As…). The
-// palette (SPC :) and which-key are this config's discovery surfaces; one
-// line adds the bar (with menus.js, where core's commands sit in it), and F10
-// or Alt with a title's letter opens it.
-// weft.use("menus"); weft.use("menubar");
+// files would be a different `weft.present`, not a different plugin. Reach it
+// with SPC w h; View ▸ Appearance hides it.
+weft.use("sidebar");
+// The adaptive toolbar along the top: what the focused context offers (a
+// source file's Run and Format, a listing's New file, git's Stage) plus the
+// pinned entries below. It takes no focus; clicking it acts on the editor.
+weft.use("toolbar");
+// The menubar (config/menubar.js): File, Edit, … with the key that runs each
+// row in vim beside it (`SPC f S` for Save As…). Used after the toolbar, so it
+// docks above it. menus.js says where core's commands sit in it; F10, or Alt
+// with a title's letter, opens a menu from the keyboard.
+weft.use("menus");
+weft.use("menubar");
+// What source offers to do with itself — run, test, debug, format, rename —
+// as actions with a provider per context (config/code.js): the toolbar's
+// buttons, the Run menu, mouse-3's menu.
+weft.use("code");
 
 // `panel` docks a bottom panel that starts hidden: the problems list and the
 // terminal each bring themselves into it (SPC o p, SPC o t), one at a time.
@@ -177,7 +186,36 @@ weft.use("undo");
 // ── Values: weft.set(owner, key, value) ──────────────────────────────
 // Every value has an OWNER — the plugin (or core namespace) that reads it.
 // There is no grab-bag namespace; an unknown owner is refused, not stored.
-weft.set("lsp", "zig", "zls");            // a server per language: weft.set("lsp","<lang>","<cmd>")
+weft.set("lsp", "zig", "zls");            // a server per language: weft.set("lsp","<file extension>","<cmd>")
+weft.set("lsp", "go", "gopls");
+weft.set("lsp", "nix", "nixd");
+weft.set("lsp", "fnl", "fennel-ls");
+weft.set("lsp", "lua", "lua-language-server");
+for (const ext of ["js", "mjs", "cjs", "jsx"]) weft.set("lsp", ext, "typescript-language-server --stdio");
+weft.set("lsp", "html", "vscode-html-language-server --stdio");
+// View ▸ Appearance shows and hides each piece of the chrome above.
+weft.set("menu", "items", [
+  "View/Appearance\tSidebar\tviewport.toggle sidebar\tviewport.sidebar.shown\tviewports\t0",
+  "View/Appearance\tMenu Bar\tviewport.toggle menubar\tviewport.menubar.shown\tviewports\t1",
+  "View/Appearance\tToolbar\tviewport.toggle toolbar\tviewport.toolbar.shown\tviewports\t2",
+]);
+// Always on the toolbar, first: an intention shows its live availability
+// (greyed, with the reason, when it cannot run); a command is `name\tLabel`.
+weft.set("offers", "pinned", [
+  "std.persistence.save\tSave",
+  "std.history.undo\tUndo",
+  "std.history.redo\tRedo",
+  "palette.open\tPalette",
+]);
+// Indentation (the `indent` plugin, src/plugins/indent): a buffer's step is
+// its .editorconfig's, else what its own lines use, else these — by language
+// (the extension, as lsp's), else weft.set("indent", "default", …), else four
+// spaces. "auto", "electric", "backspace" (per language: "go.auto", …) "off"
+// turn auto-indent, closer re-indent, and whole-step Backspace off.
+weft.set("indent", "go", "tabs");      // gofmt
+weft.set("indent", "zig", "spaces:4"); // zig fmt
+weft.set("indent", "js", "spaces:2");
+weft.set("indent", "nix", "spaces:2");
 weft.set("which_key", "delay-ms", "200"); // hold a prefix this long before the hint pops
 weft.set("which_key", "placement", "corner"); // or "center"
 weft.set("editor", "flash-ms", "150");    // how long an operator flashes its range
@@ -408,6 +446,19 @@ weft.bind("normal-source", "SPC c x", "run.line");
 // C-SPC from insert (where you're typing) and normal (browse from rest).
 weft.bind("insert", "C-SPC", "complete.show");
 weft.bind("normal", "C-SPC", "complete.show");
+// …and it pops up by itself as you type (the `complete` plugin's policy):
+// once a word is `auto-prefix` characters long and typing has paused for
+// `auto-delay` ms, or at once after a language server's trigger character
+// (`.`), never inside a comment or a string (`auto-quiet-in`). The popup
+// leaves the keys to vim: Tab / C-n / C-p / arrows move through it, Return
+// accepts only a row you moved to, Escape leaves insert (closing it), and C-e
+// closes it where you are (nvim-cmp's key). The rest of the "complete" layers
+// are in defaults.js.
+weft.set("complete", "auto", "on");        // "off": only C-SPC opens it
+weft.set("complete", "auto-prefix", "2");  // word characters before it pops up
+weft.set("complete", "auto-delay", "120"); // ms of pause first
+weft.set("complete", "auto-quiet-in", ["comment", "string"]);
+weft.bind("complete", "C-e", "pick.cancel");
 
 // ── Actions: abstract intents resolved by CONTEXT ────────────────────
 // The dispatch middle tier. weft.action(name) declares an intent a key binds
@@ -418,16 +469,12 @@ weft.bind("normal", "C-SPC", "complete.show");
 // SPC-c r/x split (modes.run vs run.line) into one language-aware key; a
 // buffer with no provider echoes "no plugin.code.run provider here".
 // `:action.explain plugin.code.run` says which provider wins here and why.
-weft.action("plugin.code.run");
-weft.provide("plugin.code.run", {}, "run.line");                 // default: run the current line
-weft.provide("plugin.code.run", { lang: "zig" }, "make.build");  // a .zig buffer builds the project
-weft.provide("plugin.code.run", { lang: "py" }, "modes.run");     // python: the language runner
+// The actions and their providers — run the line by default, build a .zig,
+// run a .py or .go; format through fmt — are config/code.js's (used above,
+// shared with ide.js and its toolbar); this file binds the keys.
 weft.bind("normal-source", "SPC e", "plugin.code.run");          // SPC e — eval/run, by language
-
 // format is likewise an action: fmt handles most languages by extension, but a
 // language plugin can weft.provide("plugin.code.format", {lang:"…"}, "…") to override.
-weft.action("plugin.code.format");
-weft.provide("plugin.code.format", {}, "fmt.format-buffer");
 
 // ── SPC o — tools, and the INSTANCING surface ────────────────────────
 // A tool that holds state is instantiable: each start mints its own buffer
@@ -622,6 +669,6 @@ weft.set("theme", "hunk", "emphasis");
 // `text` is clean, cell-aligned text with no brackets; `text-icons` adds
 // small icons; `widget` draws rounded pills, real tabs and shadowed menus.
 // `theme.set-chrome widget` (or `theme.cycle-chrome`) switches it live.
-weft.set("theme", "chrome", "text");
+weft.set("theme", "chrome", "widget");
 
 weft.echo("weft: config.js loaded");

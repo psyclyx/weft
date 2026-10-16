@@ -627,7 +627,16 @@ sidebar.
   starts one hidden. A hidden viewport keeps its entry for when it is shown again.
 - Named signals: `wl_signal_emit(name)` and `wl_signal_subscribe(name)` →
   `on_signal(id)`, delivered at the frame boundary like `on_context_changed`. Core
-  knows no signal names and carries no payload.
+  carries no payload, and knows no plugin's signal names; it raises its own in the
+  `input.` namespace, which no plugin may emit into — `input.typed`, after a
+  person's live keystroke typed text into a text document (not a replay, a paste
+  or a field). `wl_signal_emit_after(name, ms)` (perm `timer`) raises a name
+  later; raising it again before then moves it, so it is a debounce.
+- Completion pops up while typing: the `complete` plugin hears `input.typed`, waits
+  out `auto-delay` with `wl_signal_emit_after`, and runs `complete.show-inline` —
+  the at-caret list as an INLINE pick, which leaves the keys to the grammar except
+  the ones the `complete` / `complete-chosen` layers bind (defaults.js). A
+  server's trigger characters reach it as the `lsp.trigger-characters` context key.
 - `wl_outline(start, end)`: the active entry's outline symbols from the grammar's
   `outline.scm` that overlap `[start, end)`, each whole.
 - A REPL session strips terminal controls (CSI, OSC, other escapes, CR, BEL) from

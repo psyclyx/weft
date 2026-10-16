@@ -291,6 +291,36 @@ fn cUndoStep(ctx: *Context, args: struct { mode: []const u8, step: []const u8 })
     return ok;
 }
 
+/// `mode.undo-step` — what one undo step is in the mode the head is in now
+/// (`command`, `continue` or `run`): the reading of the declaration above,
+/// for a command that means to cut a step of its own only where the grammar
+/// cuts per command (an auto-indent undone apart from the line break it
+/// followed) and never inside a step the grammar CONTINUES (vim's `o…Esc`).
+fn cUndoStepOf(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return .{ .string = @tagName(ctx.keymap.undoStepOf(ctx.head.currentMode())) };
+}
+
+/// `input.on-typing <command> <chars>` — DECLARE a typing hook
+/// (`Keymap.typing_hooks`): `command` runs with the text after a key types
+/// one of `chars` ("" = any text) in a mode that commits text. The hook's
+/// command decides where it applies.
+fn cOnTyping(ctx: *Context, args: struct { command: []const u8, chars: []const u8 }) anyerror!Value {
+    if (args.command.len == 0) return error.InvalidArgument;
+    try ctx.keymap.setTypingHook(ctx.gpa, args.command, args.chars);
+    return ok;
+}
+
+/// `input.on-typing-end <command> on|off` — whether `command` runs, with
+/// "", when a key leaves a mode that commits text (leaving insert). Asked
+/// for while a hook has something to finish, and withdrawn after.
+fn cOnTypingEnd(ctx: *Context, args: struct { command: []const u8, state: []const u8 }) anyerror!Value {
+    if (args.command.len == 0) return error.InvalidArgument;
+    const end = if (std.mem.eql(u8, args.state, "on")) true else if (std.mem.eql(u8, args.state, "off")) false else return error.InvalidArgument;
+    try ctx.keymap.setTypingEndHook(ctx.gpa, args.command, end);
+    return ok;
+}
+
 fn cViewRefresh(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     return invokeSemanticAction(ctx, semantic_model.action.standard.refresh);
@@ -596,6 +626,11 @@ fn cUndoBarrier(ctx: *Context, args: struct {}) anyerror!Value {
     // begin is otherwise the grammar's per-mode declaration, cut by dispatch
     // (`mode.set-undo-step`, `step.zig`); nothing needs this to end a step.
     const ed = ctx.textEditor() catch |e| return editErr(e);
+    // Fold the commits made so far into the unit being sealed FIRST, as
+    // `step.cut` does: a log ingests lazily, so a bare barrier left an edit
+    // made just before it to be folded into the unit AFTER it — the cut
+    // landed one edit late.
+    ed.history.ingest(ctx.gpa, &ed.doc) catch {};
     ed.history.barrier();
     return ok;
 }
@@ -663,42 +698,6 @@ fn cGridLandmarkNext(ctx: *Context, args: struct {}) anyerror!Value {
 fn cGridSelectLandmarkBody(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (!try @import("grid_mirror.zig").selectLandmarkBody(ctx.gpa, ctx.buffer())) return .{ .string = "no command output here" };
-    return ok;
-}
-
-/// Quit — refused while anything would be lost: a file's unsaved edits, a
-/// listing's unapplied draft, or text with no file behind it (a scratch, a
-/// parked one), which closing keeps but quitting cannot. The refusal names
-/// them; `app.quit-force` quits anyway.
-fn cQuit(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    var names: std.ArrayList(u8) = .empty;
-    defer names.deinit(ctx.gpa);
-    var count: usize = 0;
-    var it = ctx.buffers.iterator();
-    while (it.next()) |b| {
-        if (!holdsUnsavedWork(ctx, b) and !b.keepsDocument()) continue;
-        count += 1;
-        if (count > 4) continue;
-        const shown = if (b.textEditor()) |ed| std.fs.path.basename(ed.backingPath() orelse b.name) else b.name;
-        try names.appendSlice(ctx.gpa, if (count == 1) "" else ", ");
-        try names.appendSlice(ctx.gpa, shown);
-    }
-    count += ctx.buffers.parked.items.len;
-    if (count == 0) {
-        ctx.quit.* = true;
-        return ok;
-    }
-    const more = if (count > 4 or ctx.buffers.parked.items.len > 0) " and more" else "";
-    const msg = try std.fmt.allocPrint(ctx.gpa, "{d} unsaved ({s}{s}): save, or Quit Without Saving (app.quit-force)", .{ count, names.items, more });
-    defer ctx.gpa.free(msg);
-    try ctx.head.echo.say(ctx.gpa, msg);
-    return .{ .string = "unsaved" };
-}
-
-fn cQuitForce(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    ctx.quit.* = true;
     return ok;
 }
 
@@ -1073,6 +1072,9 @@ const table = [_]command.Command{
     command.define("field.cancel-edit", "Cancel the field edit, restoring the original text.", cFieldEditCancel).present(.{ .internal = true }),
     command.define("mode.set-structural-focus", "Declare whether a head in a mode focuses a structural row as a row or edits its field as text.", cStructuralFocus).present(.{ .internal = true }),
     command.define("mode.set-undo-step", "Declare what one undo step is in a mode: each command, the step that entered it, or a run of one command.", cUndoStep).present(.{ .internal = true }),
+    command.define("mode.undo-step", "Say what one undo step is in the current mode: command, continue or run.", cUndoStepOf).present(.{ .internal = true }),
+    command.define("input.on-typing", "Declare a command to run after typing one of some characters.", cOnTyping).present(.{ .internal = true }),
+    command.define("input.on-typing-end", "Say whether a command runs when typing ends, as a key leaves insert.", cOnTypingEnd).present(.{ .internal = true }),
     command.define("view.refresh", "Refresh the focused view.", cViewRefresh).present(.{ .label = "Refresh" }),
     command.define("view.revert", "Discard the focused view's draft and show it as it is.", cViewRevert).present(.{ .label = "Revert" }),
     command.define("view.apply", "Apply the focused view's draft.", cViewApply).present(.{ .label = "Apply" }),
@@ -1113,8 +1115,6 @@ const table = [_]command.Command{
     command.define("grid.landmark-prev", "Move to the landmark before the caret in a terminal read as text: the previous prompt.", cGridLandmarkPrev).present(.{ .label = "Previous Prompt" }),
     command.define("grid.landmark-next", "Move to the landmark after the caret in a terminal read as text: the next prompt.", cGridLandmarkNext).present(.{ .label = "Next Prompt" }),
     command.define("grid.select-landmark-body", "Select what follows the landmark at the caret: the output of the command at that prompt.", cGridSelectLandmarkBody).present(.{ .label = "Select Command Output" }),
-    command.define("app.quit", "Quit the editor, refusing while anything unsaved would be lost.", cQuit).present(.{ .label = "Quit", .icon = "log-out" }),
-    command.define("app.quit-force", "Quit the editor, discarding anything unsaved.", cQuitForce).present(.{ .label = "Quit Without Saving" }),
     command.define("edit.insert-newline", "Insert a line break at the cursor.", cInsertNewline).present(.{ .label = "Insert Newline" }),
     command.define("edit.insert-tab", "Insert a tab at the cursor.", cInsertTab).present(.{ .label = "Insert Tab" }),
 };
@@ -1160,6 +1160,28 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     });
     try actions.provide(.{ .action = "buffer.close", .command = "buffer.close-unmodified", .owner = "core" });
 
+    // Quitting is an action as well, its floor provider the refusal; save-all
+    // and what waits on saves live beside it (`unsaved.zig`).
+    try @import("unsaved.zig").install(gpa, commands, actions);
+
+    // The three TYPING KEYS are actions as well — Return's line break, Tab, and
+    // Backspace — because what each means in a text entry is a provider's
+    // call, not the floor's: a line break that carries the indentation over, a
+    // Tab that steps to the next indent stop in a file indented with spaces, a
+    // Backspace that takes a whole indent step back. Core's providers, at -1,
+    // are the bare character every grammar falls back to; a plugin that means
+    // more provides its own where it applies. Nothing in core says what
+    // indentation is.
+    const typing_keys = [_]struct { action: []const u8, floor: []const u8, summary: []const u8 }{
+        .{ .action = "edit.break-line", .floor = "edit.insert-newline", .summary = "Break the line at the cursor, as the entry's provider means it: a bare newline unless one says more." },
+        .{ .action = "edit.tab", .floor = "edit.insert-tab", .summary = "Insert what Tab means at the cursor here: a tab character unless a provider says more." },
+        .{ .action = "edit.backspace", .floor = "edit.delete-before", .summary = "Delete backward, as the entry's provider means it: one character unless one says more." },
+    };
+    for (typing_keys) |k| {
+        try command.registerAction(gpa, commands, actions, k.action, .pick, k.summary, .{ .internal = true });
+        try actions.provide(.{ .action = k.action, .command = k.floor, .priority = -1, .owner = "core" });
+    }
+
     // NO BLANKET std VOCABULARY FOR A TOOL LOCUS.
     //
     // There was one here: eight `provide`s scoped to `.locus = .tool`, so any
@@ -1188,9 +1210,9 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     // mechanism entry (`Head.setModeRaw`) is the only door reachable here.
     try head.setModeRaw(gpa, "default");
     const binds = [_][2][]const u8{
-        .{ "BackSpace", "edit.delete-before" },
+        .{ "BackSpace", "edit.backspace" },
         .{ "Delete", "edit.delete-after" },
-        .{ "Tab", "edit.insert-tab" },
+        .{ "Tab", "edit.tab" },
         .{ "Left", "cursor.left" },
         .{ "Right", "cursor.right" },
         .{ "Up", "cursor.up" },
@@ -1209,8 +1231,8 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     // Return is the fallback-list case (architecture §10.2): activate the
     // focused target if anything offers that here, else break the line. In a
     // text entry only the second arm has an offer, so this is the modeless
-    // floor's `edit.insert-newline`, reached through the catalog instead of by
-    // name.
+    // floor's `edit.break-line` action, reached through the catalog instead of
+    // by name.
     const enter = [_][]const u8{ "std.target.activate", "std.editing.insert-line-break" };
     for ([_][]const u8{ "Return", "KP_Enter" }) |key|
         try keymap.bindArms(gpa, "default", key, &enter, Keymap.prio_core, "core");

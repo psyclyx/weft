@@ -47,6 +47,16 @@ pub const SemanticFileRegistration = struct {
     router: *fs_runtime.Router,
 };
 
+/// One directory this plugin watches (`wl_semantic_fs_watch`): the target
+/// revision it named, the provider's watch, and whether a change is waiting
+/// for `wl_semantic_fs_changed` to take it.
+pub const SemanticWatch = struct {
+    target: semantic_model.target.Ref,
+    revision: u64,
+    ref: @import("weft_fs").contract.WatchRef,
+    changed: bool = false,
+};
+
 /// Resolves a buffer's live tree-sitter `Syntax` (kept opaque in the shell's
 /// `Buffer.frontend`) — the host provides this so the membrane can expose
 /// structural reads without core learning the frontend's shape. Mirrors
@@ -331,6 +341,10 @@ signal_subscriptions: std.ArrayList([]u8) = .empty,
 /// (`wl_signal_emit`), delivered by `wasm_host/activation.zig`'s
 /// `deliverSignals`. Owned.
 signals_raised: std.ArrayList([]u8) = .empty,
+/// This plugin's pending `wl_signal_emit_after`s, BORROWED from the plugin
+/// loop that owns them — so a re-arm can find and cancel one by name, and
+/// `deinit` can cancel them all before this plugin's memory goes.
+signal_timers: std.ArrayList(*@import("../wasm_host/activation.zig").SignalTimer) = .empty,
 
 /// This plugin.s node-tree projection over a text buffer, if it has published
 /// one (`wasm_host/projection.zig`). Held here, released in `deinit`, like
@@ -418,6 +432,9 @@ semantic_directories: std.ArrayList(fs_runtime.publication.ChildRegistration) = 
 /// with `semantic_directories` without teaching the target registry about
 /// filesystem authority.
 semantic_files: std.ArrayList(SemanticFileRegistration) = .empty,
+
+/// The directories this plugin watches (`wasm_host/semantic_fs.zig`).
+semantic_watches: std.ArrayList(SemanticWatch) = .empty,
 
 // ── Sandboxed semantic transfer attachments ──
 /// Guest references are owner-scoped and are revoked with this plugin. Host
@@ -792,6 +809,9 @@ pub fn deinit(self: *WasmPlugin) void {
     // ordinary answer), then the acceptor's cleanup frees the binding.
     self.cancelOwnPick();
     @import("../wasm_host/projection.zig").release(self);
+    // Watches first: they name roots the publications below release.
+    @import("../wasm_host/semantic_fs.zig").closeWatches(self);
+    self.semantic_watches.deinit(gpa);
     // Semantic resources hold provider pointers into this plugin. Revoke the
     // whole owner namespace while the guest instance is still alive; every
     // retained handle becomes stale before either side can dangle.
@@ -830,6 +850,8 @@ pub fn deinit(self: *WasmPlugin) void {
     self.signal_subscriptions.deinit(gpa);
     for (self.signals_raised.items) |name| gpa.free(name);
     self.signals_raised.deinit(gpa);
+    @import("../wasm_host/activation.zig").cancelSignalTimers(self);
+    self.signal_timers.deinit(gpa);
     // Offers die with the plugin: the table is retracted and every endpoint
     // it minted is refused from here on (the invoker's generation bumps).
     if (self.offers_ready) self.offers.deinit(gpa);

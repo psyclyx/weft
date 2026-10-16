@@ -90,7 +90,7 @@ pub fn rasterize(
     w: u32,
     h: u32,
 ) ![]u8 {
-    var renderer = try skia_mod.Skia.init(null, false, false);
+    var renderer = try skia_mod.Skia.initRaster(false);
     defer renderer.deinit();
     for (view.face_set.bytes, 1..) |bytes, id| renderer.registerFont(@intCast(id), bytes);
     try renderer.begin(w, h, view.theme.background);

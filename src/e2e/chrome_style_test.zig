@@ -192,7 +192,7 @@ test "e2e/chrome-style: frame-purity — building a frame with a tooltip, a mess
     try t.expectEqualDeep(drawn[0], drawn[1]);
 }
 
-test "e2e/chrome-style: config.js draws text chrome, and theme.set-chrome switches the next frame live" {
+test "e2e/chrome-style: config.js draws widget chrome, and theme.set-chrome switches the next frame live" {
     const gpa = t.allocator;
     var proj: Project = undefined;
     try proj.init(gpa);
@@ -210,17 +210,24 @@ test "e2e/chrome-style: config.js draws text chrome, and theme.set-chrome switch
     ed.runStr("file.open", "alpha.zig");
     ed.runStr("file.open", "bravo.txt");
 
-    const text = try ed.renderComposite();
-    defer gpa.free(text);
+    const booted = try ed.renderComposite();
+    defer gpa.free(booted);
     const view = try ed.ensureView();
-    try t.expectEqual(Style.text, view.chrome);
-    proj.shot(&ed, "chrome-style-config-text");
+    try t.expectEqual(Style.widget, view.chrome);
+    proj.shot(&ed, "chrome-style-config-booted");
     // Two documents (and whatever the config opened): a tab strip, whose
     // tabs are chrome.
     var entries: [4]u32 = undefined;
     try t.expect(ed.tabEntries(&entries).len >= 2);
 
     // One command, and the next frame is in the new style.
+    ed.runStr("theme.set-chrome", "text");
+    const text = try ed.renderComposite();
+    defer gpa.free(text);
+    try t.expectEqual(Style.text, view.chrome);
+    try t.expect(!std.mem.eql(u8, booted, text));
+    proj.shot(&ed, "chrome-style-config-text");
+
     ed.runStr("theme.set-chrome", "text-icons");
     const icons = try ed.renderComposite();
     defer gpa.free(icons);

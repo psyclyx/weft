@@ -4,23 +4,20 @@
 //! writer thread and the main tick contend on.
 
 const std = @import("std");
-const linux = std.os.linux;
+const c = std.c;
 const Allocator = std.mem.Allocator;
 const task = @import("../task.zig");
+const futex = @import("../futex.zig");
 const Clock = @import("clock.zig").Clock;
 
 // ── Small primitives ────────────────────────────────────────────────
 
 pub fn futexWaitTimed(word: *const std.atomic.Value(u32), expected: u32, timeout_ns: u64) void {
-    var ts: linux.timespec = .{
-        .sec = @intCast(timeout_ns / std.time.ns_per_s),
-        .nsec = @intCast(timeout_ns % std.time.ns_per_s),
-    };
-    _ = linux.futex_4arg(&word.raw, .{ .cmd = .WAIT, .private = true }, expected, &ts);
+    futex.wait(word, expected, timeout_ns);
 }
 
 pub fn futexWake(word: *const std.atomic.Value(u32), n: i32) void {
-    _ = linux.futex_3arg(&word.raw, .{ .cmd = .WAKE, .private = true }, @intCast(n));
+    futex.wake(word, @intCast(n));
 }
 
 /// Futex mutex (std.Thread.Mutex left std in 0.16). Two contenders,
@@ -59,7 +56,7 @@ pub const Link = struct {
     }
 };
 
-/// A Link over a connected socket/pipe fd (raw syscalls; Linux-native).
+/// A Link over a connected socket/pipe fd (libc read/write/shutdown/close).
 pub const FdLink = struct {
     fd: i32,
 
@@ -70,9 +67,9 @@ pub const FdLink = struct {
     fn readFd(ctx: ?*anyopaque, buf: []u8) anyerror!usize {
         const self: *FdLink = @ptrCast(@alignCast(ctx.?));
         while (true) {
-            const rc = linux.read(self.fd, buf.ptr, buf.len);
-            switch (linux.errno(rc)) {
-                .SUCCESS => return rc,
+            const rc = c.read(self.fd, buf.ptr, buf.len);
+            switch (c.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
                 .INTR => continue,
                 else => return error.LinkBroken,
             }
@@ -83,9 +80,9 @@ pub const FdLink = struct {
         const self: *FdLink = @ptrCast(@alignCast(ctx.?));
         var rest = bytes;
         while (rest.len > 0) {
-            const rc = linux.write(self.fd, rest.ptr, rest.len);
-            switch (linux.errno(rc)) {
-                .SUCCESS => rest = rest[rc..],
+            const rc = c.write(self.fd, rest.ptr, rest.len);
+            switch (c.errno(rc)) {
+                .SUCCESS => rest = rest[@intCast(rc)..],
                 .INTR => continue,
                 else => return error.LinkBroken,
             }
@@ -100,8 +97,8 @@ pub const FdLink = struct {
         // stays parked until the peer sends or closes). Without this, the
         // reader thread hangs in destroy() until the peer's next ~1s
         // heartbeat. Sockets only; ENOTSOCK on a non-socket fd is harmless.
-        _ = linux.shutdown(self.fd, 2); // SHUT_RDWR
-        _ = linux.close(self.fd);
+        _ = c.shutdown(self.fd, c.SHUT.RDWR);
+        _ = c.close(self.fd);
     }
 };
 

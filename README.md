@@ -5,7 +5,8 @@
 
 weft is a programmable editor for code and prose, written in Zig. It uses
 [stemma](https://github.com/psyclyx/stemma) for collaborative document state
-and runs on Linux with Wayland, Vulkan, and Skia.
+and draws through Skia on Linux (Wayland, with Vulkan or OpenGL) and macOS
+(Cocoa, with OpenGL).
 
 Text editing, file browsing, Git, command output, and agent
 conversations share a workspace. Plugins supply the editing modes and tools;
@@ -62,8 +63,11 @@ providing the appropriate behavior.
 
 ## Run it
 
-The Nix shell supplies Zig 0.16 and the native build dependencies. Opening a
-window requires a Wayland session and Vulkan support.
+The Nix shell supplies Zig 0.16 and the native build dependencies, on Linux
+and on macOS. On Linux, opening a window requires a Wayland session and Vulkan
+support — or OpenGL, with `zig build -Dgpu=opengl`. On macOS the window is
+Cocoa and renders through OpenGL; `zig build` also installs
+`zig-out/Applications/weft.app`. See [doc/platforms.md](doc/platforms.md).
 
 ```sh
 nix-shell
@@ -96,6 +100,20 @@ overrides that directory.
 
 The Nix package is available as `packages.weft` from `default.nix`. Arch and
 Debian package recipes use the same build; see [packaging/README.md](packaging/README.md).
+
+`homeManagerModules.default` from `default.nix` installs weft wrapped to run
+the reference `config/config.js`, with the grammars it registers and its
+language servers (zls, gopls, fennel-ls) on PATH. On macOS it also installs
+`weft.app`, which gets the same config and environment when Finder or the Dock
+launches it.
+
+```nix
+{
+  imports = [ (import ./path/to/weft { }).homeManagerModules.default ];
+  programs.weft.enable = true;
+  # programs.weft.configFile = "helix.js";  # or ide.js; or configDir = ./my-weft;
+}
+```
 
 Set the startup text size with `weft.set("editor", "font-size", "16")` in your
 config, or use `--em 16` without a config. `Ctrl++` (or `Ctrl+=`) and `Ctrl+-`
@@ -143,8 +161,15 @@ zig build test          # unit, integration, and offscreen editor tests
 zig build test-contract # focused schema, semantic, and filesystem contract tests
 ```
 
-The render tests use the production renderer with offscreen Vulkan images and
-need no display server. To record the two-editor demo, with `ffmpeg` available:
+The render tests use the production renderer on offscreen GPU targets and need
+no display server; `zig build test -Dgpu=opengl` runs the suite on OpenGL. To
+build (but not run) the macOS port from Linux:
+
+```sh
+nix-shell nix/macos-cross.nix --run 'zig build -Dtarget=aarch64-macos'
+```
+
+To record the two-editor demo, with `ffmpeg` available:
 
 ```sh
 WEFT_E2E_VIDEO=/tmp/weft-demo.mp4 zig build e2e-demo

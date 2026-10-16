@@ -302,10 +302,11 @@ const placeDirectory = shared.placeDirectory;
 ///     `test -e` anything it likes there. A door that answers one `statx`
 ///     cannot be the line where that becomes reachable.
 ///  3. **It cannot escape the place.** `placeKind` resolves through
-///     `RootedFs` — `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` — so an
-///     absolute `rel`, a `..` component, and a symlink planted inside the
-///     place all fail IN THE KERNEL, atomically. There is no lexical check to
-///     get wrong and no TOCTOU window to race.
+///     `RootedFs` — one `O_NOFOLLOW` `openat` per component from a held root
+///     fd — so an absolute `rel`, a `..` that would leave the root, and a
+///     symlink planted inside the place all fail, each step relative to an fd
+///     already held. There is no lexical check to get wrong and no TOCTOU
+///     window to race.
 ///
 /// So this is a question about the place a dispatch is already in, not
 /// filesystem access, and it is the primitive that let `git` and `project`
@@ -566,7 +567,7 @@ fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, kind: Fill
     // the frame thread, so the path exists nowhere the guest can reach it.
     const tmp: ?[]u8 = if (kind == .spool) blk: {
         spool_counter += 1;
-        break :blk std.fmt.allocPrint(gpa, "/tmp/weft-spool-{d}-{d}", .{ std.os.linux.getpid(), spool_counter }) catch return;
+        break :blk std.fmt.allocPrint(gpa, "/tmp/weft-spool-{d}-{d}", .{ std.c.getpid(), spool_counter }) catch return;
     } else null;
     var tmp_owned = true;
     defer if (tmp_owned) if (tmp) |b| gpa.free(b);
@@ -796,7 +797,7 @@ pub fn hExec(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     // guest can reach it and nothing it sends can influence the path.
     const tmp: ?[]u8 = if (input != null) blk: {
         exec_counter += 1;
-        break :blk std.fmt.allocPrint(gpa, "/tmp/weft-exec-{d}-{d}", .{ std.os.linux.getpid(), exec_counter }) catch return;
+        break :blk std.fmt.allocPrint(gpa, "/tmp/weft-exec-{d}-{d}", .{ std.c.getpid(), exec_counter }) catch return;
     } else null;
     var tmp_owned = true;
     defer if (tmp_owned) if (tmp) |b| gpa.free(b);
@@ -1189,7 +1190,7 @@ const t = std.testing;
 /// `link_path` → `target`, best effort. False if the platform refused (nothing
 /// here depends on symlinks being creatable).
 fn makeSymlink(target: [*:0]const u8, link_path: [*:0]const u8) bool {
-    return std.os.linux.errno(std.os.linux.symlinkat(target, std.os.linux.AT.FDCWD, link_path)) == .SUCCESS;
+    return std.c.symlink(target, link_path) == 0;
 }
 
 test "placeKind: a place-relative probe cannot escape the place" {

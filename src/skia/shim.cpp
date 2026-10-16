@@ -1,76 +1,34 @@
-// Skia C++ shim behind the C ABI in shim.h. Compiled with g++ (see build.zig
-// addSkia) and linked into the Zig exe. Renders the editor's per-pane content
-// (filled rects + positioned glyphs + stroked paths, and for chrome rounded
-// rects and clips — all decoded on the Zig side) onto
-// an SkCanvas, then reads the pixels back for the Vulkan backend to copy into
-// its target image. Backends: Ganesh Vulkan (sharing weft's VkDevice) or,
-// when there is no real GPU / WEFT_SKIA_CPU is set, the CPU raster path.
+// Skia C++ shim behind the C ABI in shim.h: the canvas, the frame, and the
+// CPU raster backend. Renders the editor's per-pane content (filled rects +
+// positioned glyphs + stroked paths, and for chrome rounded rects and clips —
+// all decoded on the Zig side) onto an SkCanvas. The GPU backends live beside
+// it (shim_vulkan.cpp, shim_gl.cpp) and only create the GrDirectContext and,
+// for GL, wrap the caller's framebuffer; every draw call below is the same
+// whichever one, or none, is underneath.
 
 #include "shim.h"
+#include "shim_state.h"
 
 #include <algorithm>
-#include <unordered_map>
-#include <vector>
+#include <new>
 
-#include "core/SkCanvas.h"
-#include "core/SkColor.h"
+#include "core/SkBlurTypes.h"
 #include "core/SkColorSpace.h"
 #include "core/SkData.h"
 #include "core/SkFont.h"
-#include "core/SkFontMgr.h"
-#include "core/SkFontTypes.h"
 #include "core/SkImageInfo.h"
-#include "core/SkBlurTypes.h"
 #include "core/SkMaskFilter.h"
 #include "core/SkPaint.h"
 #include "core/SkPathBuilder.h"
 #include "core/SkRRect.h"
-#include "core/SkSurface.h"
-#include "core/SkTypeface.h"
-#include "ports/SkFontMgr_empty.h"
-
 #include "gpu/GpuTypes.h"
-#include "gpu/ganesh/GrDirectContext.h"
 #include "gpu/ganesh/GrTypes.h"
 #include "gpu/ganesh/SkSurfaceGanesh.h"
-#include "gpu/ganesh/vk/GrVkDirectContext.h"
-#include "gpu/vk/VulkanBackendContext.h"
-#include "gpu/vk/VulkanExtensions.h"
-#include "third_party/vulkan/vulkan/vulkan_core.h"
+#include "ports/SkFontMgr_empty.h"
 
 static_assert(sizeof(WeftSkiaPathCommand) == 28);
 static_assert(sizeof(WeftSkiaPathStyle) == 40);
 static_assert(sizeof(WeftSkiaRRect) == 44);
-
-struct WeftSkia {
-    bool gpu = false;
-    SkColorType color_type = kBGRA_8888_SkColorType;
-
-    sk_sp<GrDirectContext> gr;          // GPU only
-    sk_sp<SkFontMgr> font_mgr;
-    std::unordered_map<uint32_t, sk_sp<SkTypeface>> faces;
-
-    // Frame target.
-    uint32_t width = 0, height = 0;
-    std::vector<uint8_t> pixels;        // width*height*4, the readback buffer
-    sk_sp<SkSurface> surface;
-    SkCanvas* canvas = nullptr;
-    // A clip in force (one save() deep); `weft_skia_clip` replaces it.
-    bool clipped = false;
-
-    // Glyph run accumulator. The view emits glyphs in reading order, so a text
-    // row is a long stretch sharing one (face, size, color) — drawing them one
-    // at a time rebuilt an SkFont and SkPaint per glyph and gave Skia no run to
-    // batch. We coalesce the stretch and flush it when any of those three
-    // change, or when a rect/clear/end has to observe the accumulated output.
-    // Flushing on rect is what preserves z-order: the view's item sequence is
-    // the paint order, so a pending run must land before a rect drawn after it.
-    std::vector<SkGlyphID> run_gids;
-    std::vector<SkPoint> run_pos;
-    uint32_t run_font_id = 0;
-    float run_size = 0;
-    SkColor4f run_color{0, 0, 0, 0};
-};
 
 static void weftFlushGlyphs(WeftSkia* s) {
     if (!s || !s->canvas || s->run_gids.empty()) return;
@@ -105,47 +63,15 @@ static SkImageInfo frameInfo(const WeftSkia* s) {
                              kPremul_SkAlphaType, nullptr);
 }
 
-extern "C" WeftSkia* weft_skia_create(const WeftSkiaVulkan* vk, int want_gpu, int bgra) {
+WeftSkia* weftSkiaNew(int bgra) {
     WeftSkia* s = new (std::nothrow) WeftSkia();
     if (!s) return nullptr;
     s->color_type = bgra ? kBGRA_8888_SkColorType : kRGBA_8888_SkColorType;
     s->font_mgr = SkFontMgr_New_Custom_Empty();
-
-    if (want_gpu && vk && vk->get_instance_proc_addr) {
-        auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(vk->get_instance_proc_addr);
-        auto instance = reinterpret_cast<VkInstance>(vk->instance);
-        auto gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
-            gipa(instance, "vkGetDeviceProcAddr"));
-
-        skgpu::VulkanGetProc getProc =
-            [gipa, gdpa](const char* name, VkInstance inst, VkDevice dev) -> PFN_vkVoidFunction {
-                if (dev != VK_NULL_HANDLE && gdpa) return gdpa(dev, name);
-                return gipa(inst, name);
-            };
-
-        // Advertise exactly the extensions enabled by this Vulkan target.
-        // The offscreen target supplies empty lists; a desktop target supplies
-        // its WSI extensions. Skia must never infer platform capabilities.
-        skgpu::VulkanExtensions ext;
-        ext.init(getProc, instance, reinterpret_cast<VkPhysicalDevice>(vk->physical_device),
-                 vk->instance_extension_count, vk->instance_extensions,
-                 vk->device_extension_count, vk->device_extensions);
-
-        skgpu::VulkanBackendContext bc{};
-        bc.fInstance = instance;
-        bc.fPhysicalDevice = reinterpret_cast<VkPhysicalDevice>(vk->physical_device);
-        bc.fDevice = reinterpret_cast<VkDevice>(vk->device);
-        bc.fQueue = reinterpret_cast<VkQueue>(vk->queue);
-        bc.fGraphicsQueueIndex = vk->queue_family;
-        bc.fMaxAPIVersion = vk->api_version;
-        bc.fVkExtensions = &ext;
-        bc.fGetProc = getProc;
-
-        s->gr = GrDirectContexts::MakeVulkan(bc);
-        s->gpu = (s->gr != nullptr);
-    }
     return s;
 }
+
+extern "C" WeftSkia* weft_skia_create_raster(int bgra) { return weftSkiaNew(bgra); }
 
 extern "C" void weft_skia_destroy(WeftSkia* s) {
     if (!s) return;
@@ -167,10 +93,12 @@ extern "C" void weft_skia_register_font(WeftSkia* s, uint32_t font_id,
 
 extern "C" int weft_skia_begin(WeftSkia* s, uint32_t width, uint32_t height) {
     if (!s || width == 0 || height == 0) return 1;
-    if (width != s->width || height != s->height || !s->surface) {
+    if (width != s->width || height != s->height || !s->surface || s->wrapped) {
         s->width = width;
         s->height = height;
+        s->wrapped = false;
         s->pixels.assign(static_cast<size_t>(width) * height * 4, 0);
+        s->surface.reset();
         if (s->gpu) {
             s->surface = SkSurfaces::RenderTarget(s->gr.get(), skgpu::Budgeted::kYes, frameInfo(s));
             if (!s->surface) {  // GPU surface alloc failed — drop to raster for good.
@@ -181,8 +109,12 @@ extern "C" int weft_skia_begin(WeftSkia* s, uint32_t width, uint32_t height) {
             s->surface = SkSurfaces::WrapPixels(frameInfo(s), s->pixels.data(),
                                                 static_cast<size_t>(width) * 4);
         }
-        if (!s->surface) return 1;
     }
+    return weftSkiaStartFrame(s);
+}
+
+int weftSkiaStartFrame(WeftSkia* s) {
+    if (!s->surface) return 1;
     s->canvas = s->surface->getCanvas();
     s->clipped = false;
     // A frame always ends with a flush, so this is belt-and-braces: never carry
@@ -287,13 +219,19 @@ extern "C" void weft_skia_clip(WeftSkia* s, int on, float x, float y, float w, f
     s->clipped = true;
 }
 
-extern "C" const uint8_t* weft_skia_end(WeftSkia* s, size_t* row_bytes) {
-    if (!s || !s->surface) return nullptr;
+// Land whatever the frame still holds on the canvas: the pending glyph run
+// and a clip left in force.
+static void finishCanvas(WeftSkia* s) {
     weftFlushGlyphs(s);
     if (s->clipped && s->canvas) {
         s->canvas->restore();
         s->clipped = false;
     }
+}
+
+extern "C" const uint8_t* weft_skia_end(WeftSkia* s, size_t* row_bytes) {
+    if (!s || !s->surface || s->wrapped) return nullptr;
+    finishCanvas(s);
     const size_t rb = static_cast<size_t>(s->width) * 4;
     if (row_bytes) *row_bytes = rb;
 
@@ -305,4 +243,14 @@ extern "C" const uint8_t* weft_skia_end(WeftSkia* s, size_t* row_bytes) {
     // Raster path drew straight into s->pixels via WrapPixels — nothing to do.
     s->canvas = nullptr;
     return s->pixels.data();
+}
+
+extern "C" int weft_skia_flush(WeftSkia* s) {
+    if (!s || !s->surface || !s->wrapped) return 1;
+    finishCanvas(s);
+    // No CPU sync: the caller's buffer swap orders presentation after this
+    // submission, so waiting here would only stall the frame loop.
+    s->gr->flushAndSubmit(s->surface.get(), GrSyncCpu::kNo);
+    s->canvas = nullptr;
+    return 0;
 }

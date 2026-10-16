@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const linux = std.os.linux;
+const libc = std.c;
 
 const identity = @import("../identity.zig");
 const task = @import("../task.zig");
@@ -48,12 +48,7 @@ const syntax_claim = @import("../syntax_claim.zig");
 
 const t = std.testing;
 
-fn socketPair() ![2]i32 {
-    var fds: [2]i32 = undefined;
-    const rc = linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds);
-    if (linux.errno(rc) != .SUCCESS) return error.SocketPair;
-    return fds;
-}
+const socketPair = session.unixSocketPair;
 
 /// Yield for roughly `us` microseconds of real wall-clock time — enough
 /// to let the session's reader/writer threads make progress (a tight spin
@@ -71,8 +66,8 @@ fn testPark(ms: u64) void {
 /// Is anything queued on `fd` right now? Asserting the ABSENCE of delivery
 /// needs a question that answers immediately; a read would just block.
 fn readable(fd: i32) bool {
-    var pfd: linux.pollfd = .{ .fd = fd, .events = linux.POLL.IN, .revents = 0 };
-    return linux.poll(@ptrCast(&pfd), 1, 0) == 1;
+    var pfd = [1]libc.pollfd{.{ .fd = fd, .events = libc.POLL.IN, .revents = 0 }};
+    return libc.poll(&pfd, 1, 0) == 1;
 }
 
 test "session: a view-only peer's ops are dropped by the host" {
@@ -509,14 +504,14 @@ test "peer_fs over the wire: a client lists a host's confined shared root" {
 
     // Host shared root: a temp dir with a file.
     var pbuf: [128]u8 = undefined;
-    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-peerwire-{d}", .{linux.getpid()});
-    _ = linux.rmdir(root_path.ptr);
-    if (linux.errno(linux.mkdir(root_path.ptr, 0o755)) != .SUCCESS) return error.Mkdir;
+    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-peerwire-{d}", .{libc.getpid()});
+    _ = libc.rmdir(root_path.ptr);
+    if (libc.mkdir(root_path.ptr, 0o755) != 0) return error.Mkdir;
     var root = try rooted_fs.RootedFs.open(root_path.ptr);
     defer root.close();
     defer {
-        _ = linux.unlinkat(root.root_fd, "hello.txt", 0);
-        _ = linux.rmdir(root_path.ptr);
+        _ = libc.unlinkat(root.root_fd, "hello.txt", 0);
+        _ = libc.rmdir(root_path.ptr);
     }
     try root.write("hello.txt", "shared bytes");
 
@@ -626,11 +621,8 @@ test "tcpConnect: a refused connection fails fast, never hangs" {
 test "tcpConnect: connects to a live listener and the fd is blocking again" {
     // Bind an ephemeral loopback port; skip if the sandbox forbids it.
     const listener = session.tcpListener(0) catch return;
-    defer _ = linux.close(listener);
-    var addr: linux.sockaddr.in = undefined;
-    var alen: linux.socklen_t = @sizeOf(linux.sockaddr.in);
-    if (linux.errno(linux.getsockname(listener, @ptrCast(&addr), &alen)) != .SUCCESS) return;
-    const port = std.mem.bigToNative(u16, addr.port);
+    defer _ = libc.close(listener);
+    const port = session.tcpListenerPort(listener) catch return;
 
     const hostport = try std.fmt.allocPrint(t.allocator, "127.0.0.1:{d}", .{port});
     defer t.allocator.free(hostport);
@@ -638,8 +630,8 @@ test "tcpConnect: connects to a live listener and the fd is blocking again" {
     const Accept = struct {
         fn go(l: i32) void {
             const cfd = session.tcpAccept(l) catch return;
-            defer _ = linux.close(cfd);
-            _ = linux.write(cfd, "hi", 2); // prove the connected fd carries data
+            defer _ = libc.close(cfd);
+            _ = libc.write(cfd, "hi", 2); // prove the connected fd carries data
             testPark(50);
         }
     };
@@ -647,22 +639,22 @@ test "tcpConnect: connects to a live listener and the fd is blocking again" {
     defer th.join();
 
     const fd = try session.tcpConnect(hostport);
-    defer _ = linux.close(fd);
+    defer _ = libc.close(fd);
     // A blocking read (O_NONBLOCK must have been cleared, else this EAGAINs).
     var buf: [2]u8 = undefined;
     var got: usize = 0;
     while (got < 2) {
-        const rc = linux.read(fd, buf[got..].ptr, buf.len - got);
-        if (linux.errno(rc) != .SUCCESS) return error.ReadFailed; // e.g. EAGAIN
+        const rc = libc.read(fd, buf[got..].ptr, buf.len - got);
+        if (rc < 0) return error.ReadFailed; // e.g. EAGAIN
         if (rc == 0) break;
-        got += rc;
+        got += @intCast(rc);
     }
     try t.expectEqualStrings("hi", buf[0..got]);
 }
 
 test "Session: authenticated identities survive a real TCP connection" {
     const listener = session.tcpListener(0) catch return;
-    defer _ = linux.close(listener);
+    defer _ = libc.close(listener);
     const port = try session.tcpListenerPort(listener);
     const hostport = try std.fmt.allocPrint(t.allocator, "127.0.0.1:{d}", .{port});
     defer t.allocator.free(hostport);
@@ -698,13 +690,12 @@ test "partial checkout: multi-GB sparse file — jump to end, tail growth, viewe
         var pbuf: [128:0]u8 = undefined;
         @memcpy(pbuf[0..path.len], path);
         pbuf[path.len] = 0;
-        const fd_rc = linux.open(pbuf[0..path.len :0], .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, 0o644);
-        try t.expect(linux.errno(fd_rc) == .SUCCESS);
-        const fd: i32 = @intCast(fd_rc);
-        defer _ = linux.close(fd);
-        try t.expect(linux.errno(linux.ftruncate(fd, @intCast(three_gb))) == .SUCCESS);
+        const fd = libc.open(pbuf[0..path.len :0], .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, @as(c_uint, 0o644));
+        try t.expect(fd >= 0);
+        defer _ = libc.close(fd);
+        try t.expect(libc.ftruncate(fd, @intCast(three_gb)) == 0);
         const tail_msg = "THE END OF A VERY LARGE FILE";
-        _ = linux.pwrite(fd, tail_msg.ptr, tail_msg.len, @intCast(three_gb - tail_msg.len));
+        _ = libc.pwrite(fd, tail_msg.ptr, tail_msg.len, @intCast(three_gb - tail_msg.len));
     }
 
     const fds = try socketPair();
@@ -763,10 +754,10 @@ test "partial checkout: multi-GB sparse file — jump to end, tail growth, viewe
         var pbuf: [128:0]u8 = undefined;
         @memcpy(pbuf[0..path.len], path);
         pbuf[path.len] = 0;
-        const fd_rc = linux.open(pbuf[0..path.len :0], .{ .ACCMODE = .WRONLY }, 0);
-        const fd: i32 = @intCast(fd_rc);
-        defer _ = linux.close(fd);
-        _ = linux.pwrite(fd, "++GREW", 6, @intCast(three_gb));
+        const fd = libc.open(pbuf[0..path.len :0], .{ .ACCMODE = .WRONLY });
+        try t.expect(fd >= 0);
+        defer _ = libc.close(fd);
+        _ = libc.pwrite(fd, "++GREW", 6, @intCast(three_gb));
     }
     try rf.postStat(sb);
     rounds = 0;
@@ -4743,14 +4734,14 @@ const FsPair = struct {
 test "peer_fs exports: a hierarchy-only peer lists, and is refused the bytes by name" {
     const gpa = t.allocator;
     var pbuf: [128]u8 = undefined;
-    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-peerexports-{d}", .{linux.getpid()});
-    _ = linux.rmdir(root_path.ptr);
-    if (linux.errno(linux.mkdir(root_path.ptr, 0o755)) != .SUCCESS) return error.Mkdir;
+    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-peerexports-{d}", .{libc.getpid()});
+    _ = libc.rmdir(root_path.ptr);
+    if (libc.mkdir(root_path.ptr, 0o755) != 0) return error.Mkdir;
     var root = try rooted_fs.RootedFs.open(root_path.ptr);
     defer root.close();
     defer {
-        _ = linux.unlinkat(root.root_fd, "secret.txt", 0);
-        _ = linux.rmdir(root_path.ptr);
+        _ = libc.unlinkat(root.root_fd, "secret.txt", 0);
+        _ = libc.rmdir(root_path.ptr);
     }
     try root.write("secret.txt", "contents");
 
@@ -4785,14 +4776,14 @@ test "peer_fs exports: a hierarchy-only peer lists, and is refused the bytes by 
 test "peer_fs exports: mutate is granted on its own, not as the top of a ladder" {
     const gpa = t.allocator;
     var pbuf: [128]u8 = undefined;
-    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-peermutate-{d}", .{linux.getpid()});
-    _ = linux.rmdir(root_path.ptr);
-    if (linux.errno(linux.mkdir(root_path.ptr, 0o755)) != .SUCCESS) return error.Mkdir;
+    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-peermutate-{d}", .{libc.getpid()});
+    _ = libc.rmdir(root_path.ptr);
+    if (libc.mkdir(root_path.ptr, 0o755) != 0) return error.Mkdir;
     var root = try rooted_fs.RootedFs.open(root_path.ptr);
     defer root.close();
     defer {
-        _ = linux.unlinkat(root.root_fd, "note.txt", 0);
-        _ = linux.rmdir(root_path.ptr);
+        _ = libc.unlinkat(root.root_fd, "note.txt", 0);
+        _ = libc.rmdir(root_path.ptr);
     }
 
     var pair: FsPair = undefined;
@@ -4818,14 +4809,14 @@ test "peer_fs exports: mutate is granted on its own, not as the top of a ladder"
 test "peer_fs exports: the legacy read preset still lists and reads" {
     const gpa = t.allocator;
     var pbuf: [128]u8 = undefined;
-    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-peerlegacy-{d}", .{linux.getpid()});
-    _ = linux.rmdir(root_path.ptr);
-    if (linux.errno(linux.mkdir(root_path.ptr, 0o755)) != .SUCCESS) return error.Mkdir;
+    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-peerlegacy-{d}", .{libc.getpid()});
+    _ = libc.rmdir(root_path.ptr);
+    if (libc.mkdir(root_path.ptr, 0o755) != 0) return error.Mkdir;
     var root = try rooted_fs.RootedFs.open(root_path.ptr);
     defer root.close();
     defer {
-        _ = linux.unlinkat(root.root_fd, "hello.txt", 0);
-        _ = linux.rmdir(root_path.ptr);
+        _ = libc.unlinkat(root.root_fd, "hello.txt", 0);
+        _ = libc.rmdir(root_path.ptr);
     }
     try root.write("hello.txt", "shared bytes");
 
@@ -4932,14 +4923,14 @@ test "gate A (§13.7): an offline peer's mutation refuses at once, and reconnect
     const gpa = t.allocator;
 
     var pbuf: [128]u8 = undefined;
-    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-gate-a-{d}", .{linux.getpid()});
-    _ = linux.rmdir(root_path.ptr);
-    if (linux.errno(linux.mkdir(root_path.ptr, 0o755)) != .SUCCESS) return error.Mkdir;
+    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-gate-a-{d}", .{libc.getpid()});
+    _ = libc.rmdir(root_path.ptr);
+    if (libc.mkdir(root_path.ptr, 0o755) != 0) return error.Mkdir;
     var root = try rooted_fs.RootedFs.open(root_path.ptr);
     defer root.close();
     defer {
-        _ = linux.unlinkat(root.root_fd, "note.txt", 0);
-        _ = linux.rmdir(root_path.ptr);
+        _ = libc.unlinkat(root.root_fd, "note.txt", 0);
+        _ = libc.rmdir(root_path.ptr);
     }
     try root.write("note.txt", "one");
 
@@ -5168,14 +5159,14 @@ test "gate D (§18): a hierarchy-only peer lists names, and is refused every byt
     const gpa = t.allocator;
 
     var pbuf: [128]u8 = undefined;
-    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-gate-d-{d}", .{linux.getpid()});
-    _ = linux.rmdir(root_path.ptr);
-    if (linux.errno(linux.mkdir(root_path.ptr, 0o755)) != .SUCCESS) return error.Mkdir;
+    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-gate-d-{d}", .{libc.getpid()});
+    _ = libc.rmdir(root_path.ptr);
+    if (libc.mkdir(root_path.ptr, 0o755) != 0) return error.Mkdir;
     var root = try rooted_fs.RootedFs.open(root_path.ptr);
     defer root.close();
     defer {
-        _ = linux.unlinkat(root.root_fd, "secret.txt", 0);
-        _ = linux.rmdir(root_path.ptr);
+        _ = libc.unlinkat(root.root_fd, "secret.txt", 0);
+        _ = libc.rmdir(root_path.ptr);
     }
     try root.write("secret.txt", "classified");
 

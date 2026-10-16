@@ -48,7 +48,7 @@
 const std = @import("std");
 const core = @import("weft_core");
 const view_mod = @import("weft_gfx").view;
-const wayland = @import("weft_platform").wayland;
+const platform = @import("weft_platform");
 
 /// Whether the TOP of `ctx.head`'s transient stack is the frame our own
 /// paired-transient menu machinery (below) pushed for menu mode `m` — the
@@ -446,7 +446,7 @@ fn isBareModifier(spec: []const u8) bool {
     return false;
 }
 
-pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
+pub fn dispatchKey(ctx: *core.command.Context, ev: platform.KeyEvent) !void {
     // Translate the platform key event to a canonical keyspec (+ the printable
     // text it would insert), then hand off to the backend-independent
     // `dispatchSpec`. Splitting here means a headless driver (the e2e harness)
@@ -458,18 +458,19 @@ pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
     // raw C API) directly, as this file used to. This file is
     // platform-NEUTRAL (shared by the real compositor path and every
     // headless/e2e keypress via `dispatchSpec`, below); it should only ever
-    // need `wayland.KeyEvent`'s public shape, never wayland's C internals.
+    // need `platform.KeyEvent`'s public shape, never wayland's C internals.
     var name_buf: [64]u8 = undefined;
-    const name = wayland.Window.keysymName(&name_buf, ev.keysym);
+    const name = platform.Window.keysymName(&name_buf, ev.keysym);
     if (name.len == 0) return;
     var spec_buf: [80]u8 = undefined;
-    const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, name);
+    const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, ev.mods.logo, name);
     // The PHYSICAL/COMMIT split (architecture §10.1): the keyspec above is the
     // physical key; this is the text — if any — the keystroke committed. A
-    // ctrl/alt chord is physical input only, and `TextCommit.from` keeps the
+    // ctrl/alt/super chord is physical input only (⌘C on a Mac is a
+    // command, never a "c"), and `TextCommit.from` keeps the
     // control-byte spellings xkb hands back for Tab/Escape/Return out of the
     // commit entirely.
-    const commit: core.TextCommit = if (ev.mods.ctrl or ev.mods.alt) .none else .from(ev.text());
+    const commit: core.TextCommit = if (ev.mods.ctrl or ev.mods.alt or ev.mods.logo) .none else .from(ev.text());
     return dispatchSpec(ctx, spec, commit);
 }
 
@@ -567,6 +568,19 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // whatever the grammar binds it to.
     if (claimedKey(ctx, spec, commit)) return;
 
+    // An INLINE pick (completion while typing) answers the few keys its
+    // layers bind — Tab, Down, Return once a row is chosen — before the
+    // grammar sees them; every other key is the grammar's, so typing goes on.
+    // Not mid-chord: a held prefix is the grammar's sequence. Before
+    // dot-repeat: moving through a list is not a change to repeat.
+    if (ctx.head.pending.len == 0) if (ctx.head.pick.keyLayers()) |layers| {
+        for (layers) |layer| {
+            const arms = ctx.keymap.layerArms(layer orelse continue, spec) orelse continue;
+            if (chooseArm(ctx, arms)) |arm| invokeArm(ctx, arm);
+            return;
+        }
+    };
+
     // Dot-repeat: record this keystroke (unless we ARE a replay), and decide at
     // the end of dispatch whether the sequence so far was a repeatable change.
     // A pointer gesture is not recorded: replayed later it would act wherever
@@ -574,6 +588,12 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     const dot_recording = !ctx.head.dot.replaying;
     if (dot_recording and !core.pointer.isPointerSpec(spec)) dotRecord(&ctx.head.dot, spec, commit);
     defer if (dot_recording) dotBoundary(ctx);
+
+    // The typing hooks hear what this key TYPED — or that it ended the
+    // typing — once the key has done whatever it does, and before the
+    // repeat boundary, so what they change is part of the key.
+    const hooks_hear = ctx.keymap.typing_hooks.count() > 0 and ctx.keymap.commitCommand(ctx.head.currentMode()) != null;
+    defer if (hooks_hear) afterTyping(ctx, commit);
 
     // Mid-chord META keys act on the which-key overlay, NOT the sequence:
     //  · Backspace steps BACK one key of the pending chord (pop a level).
@@ -719,9 +739,63 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     core.step.begin(ctx, commit_cmd);
     core.task.beginHotSection();
     defer core.task.endHotSection();
+    const typing = typingInto(ctx);
     _ = core.command.run(ctx.commands, ctx, commit_cmd, &.{.{ .string = commit.bytes }}) catch |err| {
         std.log.warn("{s} failed: {t}", .{ commit_cmd, err });
     };
+    if (typing) |before| if (typedInto(ctx, before)) {
+        ctx.head.typed = true;
+    };
+}
+
+/// What a keystroke's commit is about to type into, when it can count as
+/// TYPING (`Head.typed`): a person's live key — not a dot-repeat or macro
+/// replaying keys — into the active entry's text document, not a field of a
+/// listing. Its document's commit count, to compare after.
+const TypingInto = struct { entry: *core.Buffers.Buffer, commits: usize };
+
+fn typingInto(ctx: *core.command.Context) ?TypingInto {
+    if (ctx.head.dot.replaying or ctx.head.macros.depth > 0) return null;
+    const entry = ctx.buffer();
+    if (entry.posture(ctx.head.scene_selection.edit != null) != .text) return null;
+    const ed = entry.textEditor() orelse return null;
+    return .{ .entry = entry, .commits = ed.doc.commitCount() };
+}
+
+/// The commit landed in that same document: text was typed.
+fn typedInto(ctx: *core.command.Context, before: TypingInto) bool {
+    if (ctx.buffer() != before.entry) return false;
+    const ed = before.entry.textEditor() orelse return false;
+    return ed.doc.commitCount() != before.commits;
+}
+
+// ── Typing hooks (`Keymap.typing_hooks`) ─────────────────────────────
+
+/// After a key dispatched in a mode that commits text: run each typing hook
+/// that hears it — with the text the key committed while the head still
+/// commits text, or with "" — each that asked for it — when the key took it
+/// out of such a mode (the typing ended). A key that only began a chord
+/// typed nothing yet, and a key that committed nothing while typing goes on
+/// is not typing.
+fn afterTyping(ctx: *core.command.Context, commit: core.TextCommit) void {
+    if (ctx.head.pending.len > 0) return;
+    const still = ctx.keymap.commitCommand(ctx.head.currentMode()) != null;
+    const text: []const u8 = if (still) commit.bytes else "";
+    if (still and text.len == 0) return;
+    // By index, with each name copied out: a hook may declare another, and
+    // that may move the table under the iteration.
+    var i: usize = 0;
+    while (i < ctx.keymap.typing_hooks.count()) : (i += 1) {
+        if (!ctx.keymap.typing_hooks.values()[i].hears(text)) continue;
+        var buf: [128]u8 = undefined;
+        const held = ctx.keymap.typing_hooks.keys()[i];
+        if (held.len > buf.len) continue;
+        @memcpy(buf[0..held.len], held);
+        const name = buf[0..held.len];
+        _ = core.command.run(ctx.commands, ctx, name, &.{.{ .string = text }}) catch |err| {
+            std.log.warn("typing hook {s} failed: {t}", .{ name, err });
+        };
+    }
 }
 
 // ── Capture (architecture §10.4) ─────────────────────────────────────

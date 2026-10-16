@@ -143,6 +143,12 @@ pub const Session = struct {
     /// ready. Owned: a truncated new name renames the symbol to the wrong
     /// thing, and a silent wrong edit is the worst answer available.
     rename: []u8 = &.{},
+    /// The characters this server said open completion
+    /// (`completionProvider.triggerCharacters`), one byte each — the LAST
+    /// byte of a longer trigger (`::`, `->`), which is the one typed last.
+    /// Published as the entry's `lsp.trigger-characters` (`publishTriggers`),
+    /// so an auto-trigger asks the server rather than keeping a table. Owned.
+    triggers: []u8 = &.{},
 
     /// One slot per kind: concurrency between kinds is structural, and a second
     /// ask of one kind can only ever supersede its own predecessor. It lives

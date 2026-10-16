@@ -103,6 +103,27 @@ pub const Options = struct {
     /// substrings is exactly how an annotator would end up decorating a
     /// confirmation dialog.
     category: []const u8 = "",
+    /// Set: an INLINE pick (`InlineKeys`). Null: the ordinary pick, which
+    /// takes the keyboard in "pick" mode.
+    inline_keys: ?InlineKeys = null,
+};
+
+/// An inline pick does not take the keyboard. The head stays in the mode it
+/// was in, so typing goes on into the buffer, and dispatch offers a key to
+/// these two keymap layers before the grammar sees it: `chosen` first once
+/// the person has moved the selection, then `base`. A key neither binds is
+/// the grammar's, as if no pick were open — and an inline pick with no rows
+/// to show takes no key at all.
+///
+/// An inline pick has no preselection: no row is chosen until the selection
+/// is moved, and editing the query (the caller's `setQuery`) un-chooses it
+/// again. That is what lets `chosen` bind Return to accept while an
+/// un-navigated Return still types a newline.
+///
+/// The names are borrowed and must outlive the pick (in practice, literals).
+pub const InlineKeys = struct {
+    base: []const u8,
+    chosen: []const u8,
 };
 
 /// One selectable item: the text is what matching and acceptance see;
