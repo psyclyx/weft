@@ -152,7 +152,7 @@ fn on_complete(session: u32) callconv(.c) void {
 /// runs with a real one. `pending_msg` is valid synchronously across the
 /// nested call (nothing re-parses that session's buffer until the NEXT loop
 /// iteration's `conn.next()`).
-fn on_poll() callconv(.c) void {
+fn on_poll() void {
     // Indexed, and re-reading `sessions.items` each step: the nested `weft.run`
     // below is a real dispatching entry, so what it drives may mint a session
     // and grow the table under us. A session is never removed, so index `i`
@@ -1209,12 +1209,11 @@ fn asInt(v: rpc.Value) ?i64 {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra, .pick = onPickAccept }).exportAll();
+    weft.plugin(&cmds, .{ .describe = describeExtra, .init = initExtra, .pick = onPickAccept, .poll = on_poll }).exportAll();
 }
 
 comptime {
     weft.exportCallback("on_complete", &on_complete);
-    weft.exportCallback("on_poll", &on_poll);
     weft.exportCallback("on_activate", &on_activate);
     weft.exportCallback("on_signal", &on_signal);
     weft.exportCallback("on_resolve", &on_resolve);

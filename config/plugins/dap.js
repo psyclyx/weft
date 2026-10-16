@@ -188,7 +188,8 @@ weft.command("dap.start", () => {
   recent = s;
   log(s, "debug: launching " + cmd + " → " + s.program + "\n", ST.muted);
   setStatus(s, "starting");
-  s.adapter = weft.procSpawn(cmd);
+  // Words, no shell: the configured command is split, never interpreted.
+  s.adapter = weft.procSpawn(cmd.trim().split(/\s+/));
   send(s, "initialize", {
     clientID: "weft",
     adapterID: "weft",

@@ -92,7 +92,7 @@ fn init() void {
 }
 
 /// Each loop: a race still running may have answers to fold in.
-fn on_poll() callconv(.c) void {
+fn on_poll() void {
     if (popup.racing()) weft.run("complete.tick");
 }
 
@@ -209,11 +209,10 @@ fn orDefaultNum(key: []const u8, default: u32) u32 {
 }
 
 comptime {
-    weft.plugin(&cmds, .{ .describe = describe, .init = init }).exportAll();
+    weft.plugin(&cmds, .{ .describe = describe, .init = init, .poll = on_poll }).exportAll();
 }
 
 comptime {
     weft.exportCallback("on_complete", &on_complete);
     weft.exportCallback("on_signal", &on_signal);
-    weft.exportCallback("on_poll", &on_poll);
 }

@@ -37,6 +37,7 @@ comptime {
         .capabilities = &.{"designation/places"},
         .init = start,
         .pick = onPickAccept,
+        .poll = on_poll,
     }).exportAll();
 }
 
@@ -224,7 +225,7 @@ fn on_signal(id: i32) callconv(.c) void {
 }
 
 /// A directory a listing shows changed on disk (`wl_semantic_fs_watch`).
-fn on_poll() callconv(.c) void {
+fn on_poll() void {
     plugin.poll();
 }
 
@@ -236,6 +237,5 @@ comptime {
     weft.exportCallback("on_semantic_action", &on_semantic_action);
     weft.exportCallback("on_semantic_field_edit", &on_semantic_field_edit);
     weft.exportCallback("on_signal", &on_signal);
-    weft.exportCallback("on_poll", &on_poll);
     weft.exportCallback("on_context_changed", &onContextChanged);
 }

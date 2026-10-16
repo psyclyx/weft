@@ -2581,6 +2581,31 @@ pub fn authorFile(ed: *Editor, name: []const u8, body: []const u8) void {
 /// the rendered UI surface, so reading them to assert UI state is fair under
 /// the e2e's boundary (real FILE content is read from disk instead). Returns
 /// null if no such buffer exists. Caller frees.
+/// A shell script as a command a config can name. A configured command is
+/// words — an argv, with no shell to un-quote it — so a test that wants a
+/// shell's `printf`, `;` and `exec` writes its script to a file of its own and
+/// names `sh <file>`. Removed by `deinit`.
+pub const ShCommand = struct {
+    path: []u8,
+    command: []u8,
+
+    var made: usize = 0;
+
+    pub fn init(gpa: std.mem.Allocator, script: []const u8) !ShCommand {
+        made += 1;
+        const path = try std.fmt.allocPrint(gpa, "/tmp/weft-sh-{d}-{d}.sh", .{ std.c.getpid(), made });
+        errdefer gpa.free(path);
+        try core.file.writeBytes(gpa, path, script);
+        return .{ .path = path, .command = try std.fmt.allocPrint(gpa, "sh {s}", .{path}) };
+    }
+
+    pub fn deinit(self: ShCommand, gpa: std.mem.Allocator) void {
+        core.file.deleteFile(gpa, self.path);
+        gpa.free(self.path);
+        gpa.free(self.command);
+    }
+};
+
 pub fn toolText(ed: *Editor, name: []const u8) ?[]u8 {
     var it = ed.buffers.iterator();
     while (it.next()) |b| {

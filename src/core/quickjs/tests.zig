@@ -588,7 +588,7 @@ test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
         \\weft.onOutput((h) => { reply = weft.procRead(h); weft.run("test.deliver"); });
         \\weft.command("test.deliver", () => { weft.echo("got:" + reply); });
         \\weft.command("test.go", () => {
-        \\  let h = weft.procSpawn("read x; printf '%s\n' \"$x\"");
+        \\  let h = weft.procSpawn(["/bin/sh", "-c", "read x; printf '%s\n' \"$x\""]);
         \\  weft.procSend(h, "ping\n");
         \\});
     ;
@@ -615,7 +615,7 @@ test "quickjs: an echo from a background entry reaches the status feed, never a 
     defer engine.deinit();
     const src =
         \\weft.onOutput((h) => { weft.echo("bg:" + weft.procRead(h).trim()); });
-        \\weft.command("test.go", () => { weft.procSpawn("printf 'pong\\n'"); });
+        \\weft.command("test.go", () => { weft.procSpawn(["/bin/sh", "-c", "printf 'pong\\n'"]); });
     ;
     try env.grant("test", "proc");
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
@@ -846,7 +846,7 @@ test "quickjs: a JS plugin reads a file through weft.fileRead" {
 /// run inside the dispatching command that called them.
 const grant_gate_js =
     \\weft.command("gate.spawn", () => {
-    \\  try { weft.procSpawn("true"); weft.echo("spawned"); }
+    \\  try { weft.procSpawn(["/bin/sh", "-c", "true"]); weft.echo("spawned"); }
     \\  catch (e) { weft.echo("threw: " + e.message); }
     \\});
     \\weft.command("gate.read", () => {

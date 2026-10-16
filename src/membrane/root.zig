@@ -461,9 +461,10 @@ pub const imports = [_]Entry{
 
     // ── proc.zig — perm-gated off-thread process effects ───────────────
     .{ .name = "wl_shell_insert", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "run `<cmd>` off-thread and insert its stdout at the cursor when done" },
-    .{ .name = "wl_proc_spawn", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .perm = .proc, .doc = "spawn a persistent subprocess; its stdout buffers for `wl_proc_read`" },
+    .{ .name = "wl_proc_spawn", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .proc, .perm = .proc, .doc = "spawn a subprocess from an argv (`argc` NUL-separated arguments, no shell) in the dispatching place; stdout and stderr stream back through `wl_proc_read` as they land, its exit through `wl_proc_status`, and on_poll is raised for both. Flag 1 keeps a stdin pipe for `wl_proc_send`" },
     .{ .name = "wl_proc_send", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .doc = "write to a spawned subprocess's stdin" },
-    .{ .name = "wl_proc_read", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "drain buffered stdout from a spawned subprocess" },
+    .{ .name = "wl_proc_read", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "drain what has landed on a spawned subprocess's stdout (stream 0) or stderr (1); 0 when nothing is waiting now" },
+    .{ .name = "wl_proc_status", .params = &.{.u32}, .results = &.{.i32}, .group = .proc, .doc = "a spawned subprocess's exit code once it has exited (-1 by signal or never ran), -2 while it runs, -3 no such stream; reading an exit is hearing it" },
     .{ .name = "wl_proc_close", .params = &.{.u32}, .results = &.{}, .group = .proc, .doc = "kill a spawned subprocess (slot stays for handle stability)" },
     .{ .name = "wl_place_root", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "the dispatching place's absolute directory, or 0 bytes when it has none locally" },
     .{ .name = "wl_place_id", .params = &.{}, .results = &.{.i32}, .group = .proc, .doc = "a dense opaque id for the dispatching place; compare it, never interpret it" },
@@ -652,9 +653,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 290; // +4 wl_pick_live/query/push/done (a plugin feeds a pick as the query changes: search, a server's symbols, a file list), +2 wl_caps_resolve + wl_caps_item_doc (a completion item's docs, resolved lazily), +5 wl_caps_fire/poll/merged/finish + wl_key_layers (the completion UI is a plugin: it races the providers and owns its popup's keys), +1 wl_surface_doc (a caret popup shows a markdown document: hover, docs, signature help), +1 wl_buffer_docked (a buffer switcher lists documents, not chrome), +1 wl_signal_emit_after (debounced signals), +2 wl_semantic_fs_watch + wl_semantic_fs_changed (a listing follows its directory on disk)
+const max_import_count: usize = 291; // +1 wl_proc_status (a spawned process's exit is heard, not inferred from silence), +4 wl_pick_live/query/push/done (a plugin feeds a pick as the query changes: search, a server's symbols, a file list), +2 wl_caps_resolve + wl_caps_item_doc (a completion item's docs, resolved lazily), +5 wl_caps_fire/poll/merged/finish + wl_key_layers (the completion UI is a plugin: it races the providers and owns its popup's keys), +1 wl_surface_doc (a caret popup shows a markdown document: hover, docs, signature help), +1 wl_buffer_docked (a buffer switcher lists documents, not chrome), +1 wl_signal_emit_after (debounced signals), +2 wl_semantic_fs_watch + wl_semantic_fs_changed (a listing follows its directory on disk)
 const max_export_count: usize = 24; // +1 on_pick_query (a live pick hears its query settle), +1 on_resolve (a completion item's docs, resolved lazily)
-const max_semantic_operation_count: usize = 312; // +4 the live pick doors + on_pick_query, +2 the resolve doors + on_resolve, +5 the completion consumer doors, +1 wl_surface_doc, +1 wl_buffer_docked, +2 wl_semantic_fs_watch + wl_semantic_fs_changed
+const max_semantic_operation_count: usize = 314; // +2 proc_status on both planes, +4 the live pick doors + on_pick_query, +2 the resolve doors + on_resolve, +5 the completion consumer doors, +1 wl_surface_doc, +1 wl_buffer_docked, +2 wl_semantic_fs_watch + wl_semantic_fs_changed
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;

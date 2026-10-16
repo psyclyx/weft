@@ -139,9 +139,10 @@ pub const imports = [_]Entry{
     // The four proc doors run `wasm_host/proc.zig`'s bodies — the SAME ones
     // `wl_proc_*` runs. Their arities are `wl_proc_*`'s by construction, not by
     // transcription (doc/place.md §4.1a).
-    e("qjs_proc_spawn", 2, 1, .plugin, "spawn a persistent subprocess in the dispatching entry's place; returns a handle"),
+    e("qjs_proc_spawn", 4, 1, .plugin, "spawn a subprocess from an argv (NUL-separated, no shell) in the dispatching entry's place; flag 1 keeps a stdin pipe; returns a handle"),
     e("qjs_proc_send", 3, 0, .plugin, "write to a spawned subprocess's stdin"),
-    e("qjs_proc_read", 3, 1, .plugin, "drain buffered stdout from a spawned subprocess"),
+    e("qjs_proc_read", 4, 1, .plugin, "drain what has landed on a spawned subprocess's stdout (0) or stderr (1)"),
+    e("qjs_proc_status", 1, 1, .plugin, "a spawned subprocess's exit code once it has exited, -2 while it runs, -3 no such stream"),
     e("qjs_proc_close", 1, 0, .plugin, "kill a spawned subprocess"),
     e("qjs_buffer_append", 5, 0, .plugin, "append text (+style class) to a named buffer, authored as the transcript peer"),
     e("qjs_buffer_fold", 4, 0, .plugin, "collapse `[start,end)` of a named buffer as an invisible/foldable span"),
@@ -276,7 +277,7 @@ pub const parity = [_]GroupParity{
 /// `qjs_*` import, so a merge conflict or half-finished edit fails the
 /// build instead of silently drifting quickjs.zig's three registration
 /// sites apart.
-const expected_count = 63;
+const expected_count = 64; // +1 qjs_proc_status (a spawned process's exit is heard)
 
 comptime {
     // EVERY wasm import group must appear in `parity` exactly once. This is
@@ -347,7 +348,7 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
     }
     try t.expectEqual(@as(usize, expected_count), imports.len);
     try t.expectEqual(@as(usize, 17), config_count); // defineConfigFns' surface
-    try t.expectEqual(@as(usize, 46), plugin_count); // the resident-plugin-only surface
+    try t.expectEqual(@as(usize, 47), plugin_count); // the resident-plugin-only surface
 }
 
 // Sealed eval (doc/configuration.md §5 C11; manifest.zig's module doc):
@@ -418,7 +419,7 @@ test "qjs membrane parity: every wasm group is claimed, and the gap is written d
     // 62 → 63 with `qjs_context_listen`: a JS handler is a value the host
     // cannot probe for as it probes a wasm export, so the plugin says when it
     // has one, and the context event goes only to plugins that do.
-    try t.expectEqual(@as(usize, 63), imports.len);
+    try t.expectEqual(@as(usize, 64), imports.len);
 }
 
 test "qjs membrane contract: no clock/env/random-shaped .config import" {

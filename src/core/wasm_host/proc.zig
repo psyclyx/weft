@@ -102,10 +102,14 @@ fn streamAt(r: *Resources, h: i32) ?*proc_stream.ProcStream {
     return r.streams.at(h);
 }
 
-/// `procSpawn(cmd) -> handle` (or -1 if unavailable). Spawns a persistent
-/// subprocess in the dispatching entry's PLACE, with that place's environment
-/// (`resolveSpawnAtCtx`/`resolveSpawnEnvCtx`); its stdout is buffered for
-/// `procRead`. Returns -1 when the place cannot host a local child, rather
+/// `procSpawn(argv, argv_len, argc, flags) -> handle` (or -1 if unavailable).
+/// Spawns a subprocess from an ARGV — `argc` NUL-separated arguments, no shell,
+/// nothing interpreted — in the dispatching entry's PLACE, with that place's
+/// environment (`resolveSpawnAtCtx`/`resolveSpawnEnvCtx`). Its stdout and
+/// stderr stream back through `procRead` as they land, and its exit through
+/// `procStatus`; the plugin's `on_poll` is raised for both. Flag 1 keeps a
+/// stdin pipe for `procSend` (a protocol peer); without it stdin is the null
+/// device. Returns -1 when the place cannot host a local child, rather
 /// than falling back to the editor's own directory — the whole point of
 /// asking the place instead of taking a directory from the guest.
 pub fn spawnBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -116,11 +120,19 @@ pub fn spawnBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i3
         results[0] = -1;
         return;
     };
-    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
+    const block = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer gpa.free(block);
+    const argc: usize = @intCast(@max(args[2], 0));
+    const argv = if (argc == 0 or argc > 4096) null else splitArgv(gpa, block, argc);
+    const cmd = argv orelse {
         results[0] = -1;
         return;
     };
     defer gpa.free(cmd);
+    const duplex = args[3] & 1 != 0;
     // `ProcStream.start` dups the cwd it is given, so this one is ours to free.
     const at = shared.resolveSpawnAtCtx(ctx, gpa);
     defer switch (at) {
@@ -139,7 +151,7 @@ pub fn spawnBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i3
     const spawn_env = shared.resolveSpawnEnvCtx(ctx, gpa);
     var env_owned = true;
     defer if (env_owned) if (spawn_env) |owned_env| owned_env.block.deinit(gpa);
-    const s = proc_stream.ProcStream.start(gpa, pool, cmd, cwd, spawn_env orelse r.environ) catch {
+    const s = proc_stream.ProcStream.start(gpa, pool, cmd, cwd, spawn_env orelse r.environ, .{ .duplex = duplex }) catch {
         results[0] = -1;
         return;
     };
@@ -168,7 +180,8 @@ pub fn sendBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32
     s.send(bytes);
 }
 
-/// `procRead(handle, out, cap) -> n`: drain up to `cap` buffered stdout bytes.
+/// `procRead(handle, stream, out, cap) -> n`: drain up to `cap` bytes that
+/// have landed on stdout (`stream` 0) or stderr (1). 0: none waiting now.
 pub fn readBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     // No `d.ctx`: draining an already-started child resolves no place.
     const r = d.resources;
@@ -176,14 +189,31 @@ pub fn readBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32
         results[0] = 0;
         return;
     };
-    const cap: usize = @intCast(args[2]);
+    const cap: usize = @intCast(@max(args[3], 0));
     const buf = r.gpa.alloc(u8, cap) catch {
         results[0] = 0;
         return;
     };
     defer r.gpa.free(buf);
-    const n = s.read(buf);
-    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(cap), buf[0..n]) catch 0);
+    const n = if (args[1] == 1) s.readErr(buf) else s.read(buf);
+    results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(cap), buf[0..n]) catch 0);
+}
+
+/// `procStatus(handle) -> i32`: the child's exit code once it has exited
+/// (-1: by signal, or it never ran); -2 while it runs; -3 for no such stream.
+/// Reading an exit is hearing it: `on_poll` stops being raised for it.
+pub fn statusBody(d: Door, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const s = streamAt(d.resources, args[0]) orelse {
+        results[0] = -3;
+        return;
+    };
+    const code = s.status() orelse {
+        results[0] = -2;
+        return;
+    };
+    s.exit_heard = true;
+    results[0] = code;
 }
 
 /// `procClose(handle)`: kill the subprocess; the slot stays null for stability.
@@ -207,6 +237,7 @@ pub const wasmDoor = shared.wasmDoor;
 pub const hProcSpawn = wasmDoor(spawnBody, .proc);
 pub const hProcSend = wasmDoor(sendBody, null);
 pub const hProcRead = wasmDoor(readBody, null);
+pub const hProcStatus = wasmDoor(statusBody, null);
 pub const hProcClose = wasmDoor(closeBody, null);
 
 /// The plugin-plane proc surface as DATA: per door, the ONE body both
@@ -229,6 +260,7 @@ pub const doors = .{
     .{ .name = "proc_spawn", .body = spawnBody, .wl = hProcSpawn, .wl_gate = @as(?Perm, .proc), .qjs_gate = @as(?Perm, .proc) },
     .{ .name = "proc_send", .body = sendBody, .wl = hProcSend, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, .proc) },
     .{ .name = "proc_read", .body = readBody, .wl = hProcRead, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, .proc) },
+    .{ .name = "proc_status", .body = statusBody, .wl = hProcStatus, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, null) },
     .{ .name = "proc_close", .body = closeBody, .wl = hProcClose, .wl_gate = @as(?Perm, null), .qjs_gate = @as(?Perm, null) },
 };
 

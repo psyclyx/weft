@@ -53,6 +53,25 @@ plane's `qjs_proc_spawn`. Their callers move to argv:
 A caller that needs a shell says so in its argv
 (`sh -c <script>`), and the script is then its own business.
 
+*Landed (1a):*
+- `wl_proc_spawn` takes an argv and a duplex flag, and `wl_proc_read`
+  takes a stream (stdout or stderr). `wl_proc_status` reports the exit.
+  The JavaScript plane matches: `weft.procSpawn(argv[], duplex)`,
+  `procRead(h, stream)` and `procStatus(h)`.
+- `ProcStream` keeps stderr (bounded) and the exit status. It signals
+  the loop's wake fd when bytes land, so process streams left the 8 ms
+  poll, which now runs only for REPL and net sessions.
+- SDK `weft.spawn` / `spawnWith` give line, chunk and exit
+  continuations, drained by the SDK's own `on_poll` within a bounded
+  budget per poll. A plugin's `.poll` hook runs after that.
+- Configured commands (an LSP server, an ACP agent, a DAP adapter) are
+  words split into an argv, never shell-parsed.
+- The live search streams rg's lines and kills the previous search.
+
+Left: the fill and filter doors (`proc_to_buffer`, `append`,
+`spool`, `filter`) and their callers, and `exec` as a convenience
+over the stream.
+
 ## 2. Incremental projections
 
 A projection commit applies what changed: new rows at the end are an

@@ -198,6 +198,11 @@ pub const ExecDone = @import("exec.zig").Done;
 pub const ExecStream = @import("exec.zig").Stream;
 pub const Argv = @import("exec.zig").Argv;
 pub const exec = @import("exec.zig").exec;
+pub const SpawnSpec = @import("process.zig").Spec;
+pub const SpawnHandlers = @import("process.zig").Handlers;
+pub const Process = @import("process.zig").Process;
+pub const spawn = @import("process.zig").spawn;
+pub const spawnWith = @import("process.zig").spawnWith;
 pub const execWith = @import("exec.zig").execWith;
 
 // ── ask: a question with a continuation, not a pick id to demux ───────
@@ -3053,11 +3058,39 @@ pub fn declareCapture(cmd: []const u8) void {
     e.wl_declare_capture(p(cmd.ptr), @intCast(cmd.len));
 }
 
-/// Spawn a persistent subprocess whose stdout comes BACK to the guest (via
-/// `procRead`), for an in-guest protocol client. Returns a handle, or null.
-pub fn procSpawn(cmd: []const u8) ?u32 {
-    const h = e.wl_proc_spawn(p(cmd.ptr), @intCast(cmd.len));
+/// Spawn a subprocess from an ARGV (no shell) whose output comes back to the
+/// guest through `procRead`, for an in-guest protocol client that frames its
+/// own messages. `duplex` keeps a stdin pipe for `procSend`. A plugin that
+/// wants lines and an exit uses `spawn` instead. Returns a handle, or null.
+pub fn procSpawn(argv: []const []const u8, duplex: bool) ?u32 {
+    if (argv.len == 0) return null;
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    for (argv, 0..) |arg, i| {
+        if (i > 0) block.append(allocator, 0) catch return null;
+        block.appendSlice(allocator, arg) catch return null;
+    }
+    const h = e.wl_proc_spawn(p(block.items.ptr), @intCast(block.items.len), @intCast(argv.len), @intFromBool(duplex));
     return if (h < 0) null else @intCast(h);
+}
+
+/// A command line from config split into an argv on whitespace — words, with
+/// no shell: nothing in it is quoted, expanded or interpreted. Into `out`.
+pub fn argvWords(line: []const u8, out: *Argv) []const []const u8 {
+    var it = std.mem.tokenizeAny(u8, line, " \t");
+    while (it.next()) |w| out.push(w);
+    return out.slice();
+}
+
+/// A spawned subprocess's exit code once it has exited (-1 by signal or never
+/// ran), or null while it runs. A gone handle reads as exited (-1).
+pub fn procStatus(handle: u32) ?i32 {
+    const code = e.wl_proc_status(handle);
+    return switch (code) {
+        -2 => null,
+        -3 => -1,
+        else => code,
+    };
 }
 /// Write bytes to the subprocess's stdin.
 pub fn procSend(handle: u32, bytes: []const u8) void {
@@ -3066,7 +3099,7 @@ pub fn procSend(handle: u32, bytes: []const u8) void {
 /// Drain up to `out.len` buffered stdout bytes; returns the slice read (may be
 /// empty). Valid until the next call.
 pub fn procRead(handle: u32, out: []u8) []u8 {
-    const n = e.wl_proc_read(handle, p(out.ptr), @intCast(out.len));
+    const n = e.wl_proc_read(handle, 0, p(out.ptr), @intCast(out.len));
     return if (n <= 0) out[0..0] else out[0..@intCast(n)];
 }
 /// Kill the subprocess (its handle stays reserved).

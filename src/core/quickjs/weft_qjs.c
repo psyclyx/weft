@@ -92,11 +92,13 @@ extern int host_keys_for(const char *name, int name_len, char *out, int cap);
 // Plugin proc-stream membrane: a persistent duplex child whose stdout the guest
 // reads (an ACP agent, an LSP-shaped tool). Config satisfies these with stubs.
 __attribute__((import_module("weft"), import_name("qjs_proc_spawn")))
-extern int host_proc_spawn(const char *cmd, int cmd_len);
+extern int host_proc_spawn(const char *argv, int argv_len, int argc, int flags);
 __attribute__((import_module("weft"), import_name("qjs_proc_send")))
 extern void host_proc_send(int handle, const char *ptr, int len);
 __attribute__((import_module("weft"), import_name("qjs_proc_read")))
-extern int host_proc_read(int handle, char *out, int cap);
+extern int host_proc_read(int handle, int stream, char *out, int cap);
+__attribute__((import_module("weft"), import_name("qjs_proc_status")))
+extern int host_proc_status(int handle);
 __attribute__((import_module("weft"), import_name("qjs_proc_close")))
 extern void host_proc_close(int handle);
 // Append text to a named buffer (created if absent) — a transcript/tool buffer
@@ -1050,8 +1052,12 @@ static JSValue js_command(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-// weft.procSpawn(cmd) -> handle (or -1): a persistent duplex child, run in the
-// dispatching entry's PLACE (doc/place.md).
+// weft.procSpawn(argv, duplex = true) -> handle (or -1): a child started from
+// an ARGV — an array of strings, no shell, nothing interpreted — run in the
+// dispatching entry's PLACE (doc/place.md). `duplex` keeps a stdin pipe for
+// procSend; without it stdin is the null device. A string is refused: a
+// command line would need a shell to mean anything, and that is the caller's
+// to ask for (`["sh", "-c", script]`).
 //
 // There is deliberately no cwd argument. A JS plugin is not a different kind of
 // plugin, and the wasm door (wl_proc_spawn) has none either. A raw directory
@@ -1059,16 +1065,48 @@ static JSValue js_command(JSContext *ctx, JSValueConst this_val,
 // cannot name a peer or a synthetic container, so it could only ever have meant
 // "somewhere on this machine", which is the assumption being retired.
 // Throws when the plugin holds no `proc` grant.
+static char g_argv_buf[65536];
 static JSValue js_proc_spawn(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
-    if (argc < 1) return JS_ThrowTypeError(ctx, "procSpawn(cmd)");
-    size_t cl;
-    const char *cmd = JS_ToCStringLen(ctx, &cl, argv[0]);
-    int h = -1;
-    if (cmd) h = host_proc_spawn(cmd, (int)cl);
-    JS_FreeCString(ctx, cmd);
+    if (argc < 1 || !JS_IsArray(argv[0]))
+        return JS_ThrowTypeError(ctx, "procSpawn(argv: string[], duplex?)");
+    int64_t n = 0;
+    JSValue lenv = JS_GetPropertyStr(ctx, argv[0], "length");
+    JS_ToInt64(ctx, &n, lenv);
+    JS_FreeValue(ctx, lenv);
+    if (n <= 0 || n > 4096) return JS_ThrowTypeError(ctx, "procSpawn: an argv needs 1 to 4096 arguments");
+    size_t w = 0;
+    for (int64_t i = 0; i < n; i++) {
+        JSValue item = JS_GetPropertyUint32(ctx, argv[0], (uint32_t)i);
+        size_t l;
+        const char *a = JS_ToCStringLen(ctx, &l, item);
+        JS_FreeValue(ctx, item);
+        if (!a) return JS_EXCEPTION;
+        if (w + l + 1 > sizeof g_argv_buf) {
+            JS_FreeCString(ctx, a);
+            return JS_ThrowRangeError(ctx, "procSpawn: argv too long");
+        }
+        if (i > 0) g_argv_buf[w++] = 0;
+        memcpy(g_argv_buf + w, a, l);
+        w += l;
+        JS_FreeCString(ctx, a);
+    }
+    int duplex = argc < 2 || JS_IsUndefined(argv[1]) ? 1 : JS_ToBool(ctx, argv[1]);
+    int h = host_proc_spawn(g_argv_buf, (int)w, (int)n, duplex ? 1 : 0);
     if (h == WEFT_DENIED) return weft_throw_denied(ctx, "procSpawn");
     return JS_NewInt32(ctx, h);
+}
+
+// weft.procStatus(handle) -> the exit code once the child has exited (-1 by
+// signal, or it never ran), null while it runs.
+static JSValue js_proc_status(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NULL;
+    int h;
+    JS_ToInt32(ctx, &h, argv[0]);
+    int code = host_proc_status(h);
+    if (code == -2) return JS_NULL;
+    return JS_NewInt32(ctx, code == -3 ? -1 : code);
 }
 
 // weft.procSend(handle, str): write to the child's stdin verbatim.
@@ -1084,15 +1122,18 @@ static JSValue js_proc_send(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-// weft.procRead(handle) -> string: newly-arrived stdout, "" if none. The
-// handler loops this to drain, splitting on newlines to recover NDJSON lines.
+// weft.procRead(handle, stream = 0) -> string: what has newly landed on stdout
+// (0) or stderr (1), "" if none. The handler loops this to drain, splitting on
+// newlines to recover NDJSON lines.
 static char g_read_buf[262144];
 static JSValue js_proc_read(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv) {
     if (argc < 1) return JS_NewStringLen(ctx, "", 0);
     int h;
     JS_ToInt32(ctx, &h, argv[0]);
-    int n = host_proc_read(h, g_read_buf, (int)sizeof g_read_buf);
+    int stream = 0;
+    if (argc >= 2) JS_ToInt32(ctx, &stream, argv[1]);
+    int n = host_proc_read(h, stream == 1 ? 1 : 0, g_read_buf, (int)sizeof g_read_buf);
     if (n == WEFT_DENIED) return weft_throw_denied(ctx, "procRead");
     if (n <= 0) return JS_NewStringLen(ctx, "", 0);
     return JS_NewStringLen(ctx, g_read_buf, (size_t)n);
@@ -1807,6 +1848,7 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "procSend", JS_NewCFunction(g_ctx, js_proc_send, "procSend", 2));
     JS_SetPropertyStr(g_ctx, weft, "procRead", JS_NewCFunction(g_ctx, js_proc_read, "procRead", 1));
     JS_SetPropertyStr(g_ctx, weft, "procClose", JS_NewCFunction(g_ctx, js_proc_close, "procClose", 1));
+    JS_SetPropertyStr(g_ctx, weft, "procStatus", JS_NewCFunction(g_ctx, js_proc_status, "procStatus", 1));
     JS_SetPropertyStr(g_ctx, weft, "bufferAppend", JS_NewCFunction(g_ctx, js_buffer_append, "bufferAppend", 2));
     JS_SetPropertyStr(g_ctx, weft, "bufferFold", JS_NewCFunction(g_ctx, js_buffer_fold, "bufferFold", 3));
     JS_SetPropertyStr(g_ctx, weft, "bufferLen", JS_NewCFunction(g_ctx, js_buffer_len, "bufferLen", 1));

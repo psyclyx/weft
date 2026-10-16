@@ -74,6 +74,12 @@ pub fn authorAndCheckSyntax(ed: *h.Editor, c: Case) !void {
 pub const Peer = struct {
     tag: []const u8,
     command: []u8,
+    /// The script the server runs, written to a file of its own: a server is
+    /// started from an argv (words, no shell), so its program is a path, not a
+    /// one-liner a shell would have to un-quote.
+    script_path: []u8,
+
+    var scripts: usize = 0;
 
     pub fn init(gpa: std.mem.Allocator, tag: []const u8) !Peer {
         return build(gpa, tag, "my $where = \"\";");
@@ -148,20 +154,24 @@ pub const Peer = struct {
             \\    print "Content-Length: ", length($reply), "\r\n\r\n", $reply;
             \\}
         ;
-        // Only the tag and the `$where` preamble are interpolated by Zig; the
-        // script is verbatim perl, single-quoted so the shell expands none of
-        // its `$` variables.
+        // The tag reaches the script as its first argument; only the `$where`
+        // preamble is spliced into the source.
+        scripts += 1;
+        const path = try std.fmt.allocPrint(gpa, "/tmp/weft-lsp-peer-{d}-{d}-{s}.pl", .{ std.c.getpid(), scripts, tag });
+        errdefer gpa.free(path);
+        const source = try std.fmt.allocPrint(gpa, "my $tag = shift @ARGV;{s}{s}", .{ where_init, script });
+        defer gpa.free(source);
+        try h.core.file.writeBytes(gpa, path, source);
         return .{
             .tag = tag,
-            .command = try std.fmt.allocPrint(
-                gpa,
-                "perl -MJSON::PP -MCwd -e 'my $tag = \"{s}\";{s}{s}'",
-                .{ tag, where_init, script },
-            ),
+            .script_path = path,
+            .command = try std.fmt.allocPrint(gpa, "perl -MJSON::PP -MCwd {s} {s}", .{ path, tag }),
         };
     }
 
     pub fn deinit(self: Peer, gpa: std.mem.Allocator) void {
+        h.core.file.deleteFile(gpa, self.script_path);
+        gpa.free(self.script_path);
         gpa.free(self.command);
     }
 

@@ -36,8 +36,14 @@ pub const Conn = struct {
     /// Owns the CURRENT parsed message's arena; freed on the next `next()`.
     parsed: ?std.json.Parsed(Value) = null,
 
+    /// Start the server `cmd` names — words, as config spells it
+    /// (`typescript-language-server --stdio`), split into an argv with no
+    /// shell: nothing in it is quoted, expanded or interpreted.
     pub fn start(self: *Conn, cmd: []const u8) bool {
-        self.stream = weft.procSpawn(cmd) orelse return false;
+        var words: weft.Argv = .{};
+        const argv = weft.argvWords(cmd, &words);
+        if (words.full or argv.len == 0) return false;
+        self.stream = weft.procSpawn(argv, true) orelse return false;
         self.rx.clearRetainingCapacity();
         self.seq = 1;
         self.live = true;

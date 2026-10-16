@@ -54,7 +54,19 @@ pub const ProcStream = struct {
     /// reader task that owns the fork+exec publishes it; nobody else may touch it
     /// before that, and only the reader task touches it (read side) after.
     child: std.process.Child = undefined,
-    argv_cmd: []u8, // owned copy: the caller's `cmd` may not outlive `start()`
+    /// The child's argv, owned (one block, sliced): the caller's may not
+    /// outlive `start()`. No shell: an argument is one argument, whatever it
+    /// contains. A caller that wants a shell says so (`sh -c <script>`).
+    argv_block: []u8,
+    argv: [][]const u8,
+    /// Whether the child keeps a stdin pipe (a protocol peer: an LSP, an
+    /// agent). Without one its stdin is the null device — a tool that reads
+    /// stdin when it is a pipe (ripgrep does) must not wait on one nobody
+    /// writes.
+    duplex: bool,
+    /// Signalled when output lands, so the frame loop wakes for it rather
+    /// than polling (the pool's notify fd; none in a test without a loop).
+    pool: *task.Pool,
     cwd_copy: ?[]u8,
     environ: std.process.Environ,
     /// Whether `environ` is OURS to free. False for the shared process
@@ -93,10 +105,24 @@ pub const ProcStream = struct {
     pending_out: std.ArrayList(u8) = .empty,
     out_mutex: task.Mutex = .{},
     out_buf: std.ArrayList(u8) = .empty,
+    /// stderr, kept apart from stdout (a protocol on stdout must not be
+    /// corrupted by diagnostics) and bounded: what a failing child says is
+    /// worth keeping; a chatty one's whole log is not.
+    err_buf: std.ArrayList(u8) = .empty,
+    err_cursor: usize = 0,
+    /// The child's exit: `running` until the reader has reaped it, then its
+    /// code, or -1 for a child that died by signal or never ran.
+    exit: std.atomic.Value(i32) = .init(running),
     /// Bytes already handed to `read`. The buffer resets once fully drained, so
     /// steady-state memory is one frame's worth of output, not the whole run.
     cursor: usize = 0,
     reader: task.Handle(void),
+    /// Whether the reader reaped the child itself (it waits for the exit, to
+    /// keep its status); `deinit` reaps only what it did not.
+    reaped: bool = false,
+    /// Frame thread: the consumer has read the exit (`procStatus`), so it is
+    /// no longer news (`ready`).
+    exit_heard: bool = false,
     /// How long `deinit` waits for this stream's reader to finish before
     /// giving up (see `deinit`'s doc). Per-instance so a test can shrink it
     /// (`setDeinitDeadlineForTesting`) instead of paying the real production
@@ -112,15 +138,26 @@ pub const ProcStream = struct {
     /// `environ` is the child's environment — pass weft's block so the child
     /// resolves `PATH` (an agent needs it); `.empty` is a hermetic child (only
     /// sh builtins / absolute argv).
-    pub fn start(gpa: Allocator, pool: *task.Pool, cmd: []const u8, cwd: ?[]const u8, environ: std.process.Environ) SpawnError!*ProcStream {
-        return startImpl(gpa, pool, cmd, cwd, environ, null);
+    pub fn start(gpa: Allocator, pool: *task.Pool, argv: []const []const u8, cwd: ?[]const u8, environ: std.process.Environ, opts: Options) SpawnError!*ProcStream {
+        return startImpl(gpa, pool, argv, cwd, environ, opts, null);
     }
+
+    pub const Options = struct {
+        /// Keep a stdin pipe (see `duplex`).
+        duplex: bool = true,
+    };
+
+    /// What `exit` holds while the child runs.
+    pub const running = std.math.minInt(i32);
+
+    /// The most stderr kept.
+    pub const err_cap = 64 * 1024;
 
     /// Test-only: like `start`, but `hook` runs on the reader task right before
     /// the fork+exec, so a test can gate it open/closed deterministically
     /// instead of racing a wall clock against a real subprocess spawn.
-    pub fn startTesting(gpa: Allocator, pool: *task.Pool, cmd: []const u8, cwd: ?[]const u8, environ: std.process.Environ, hook: *const fn () void) SpawnError!*ProcStream {
-        return startImpl(gpa, pool, cmd, cwd, environ, hook);
+    pub fn startTesting(gpa: Allocator, pool: *task.Pool, argv: []const []const u8, cwd: ?[]const u8, environ: std.process.Environ, hook: *const fn () void) SpawnError!*ProcStream {
+        return startImpl(gpa, pool, argv, cwd, environ, .{}, hook);
     }
 
     /// Test-only: install `mid_flush_hook` (see its doc). Only meaningful
@@ -136,17 +173,31 @@ pub const ProcStream = struct {
         s.deinit_deadline_ns = ns;
     }
 
-    fn startImpl(gpa: Allocator, pool: *task.Pool, cmd: []const u8, cwd: ?[]const u8, environ: std.process.Environ, hook: ?*const fn () void) SpawnError!*ProcStream {
+    fn startImpl(gpa: Allocator, pool: *task.Pool, argv: []const []const u8, cwd: ?[]const u8, environ: std.process.Environ, opts: Options, hook: ?*const fn () void) SpawnError!*ProcStream {
+        if (argv.len == 0 or argv[0].len == 0) return error.ProcessSpawnFailed;
         const s = try gpa.create(ProcStream);
         errdefer gpa.destroy(s);
-        const cmd_dup = try gpa.dupe(u8, cmd);
-        errdefer gpa.free(cmd_dup);
+        var total: usize = 0;
+        for (argv) |a| total += a.len;
+        const block = try gpa.alloc(u8, total);
+        errdefer gpa.free(block);
+        const owned = try gpa.alloc([]const u8, argv.len);
+        errdefer gpa.free(owned);
+        var at: usize = 0;
+        for (argv, owned) |a, *o| {
+            @memcpy(block[at .. at + a.len], a);
+            o.* = block[at .. at + a.len];
+            at += a.len;
+        }
         const cwd_dup = if (cwd) |p| try gpa.dupe(u8, p) else null;
         errdefer if (cwd_dup) |p| gpa.free(p);
         s.* = .{
             .gpa = gpa,
             .io_threaded = .init(gpa, .{ .environ = environ }),
-            .argv_cmd = cmd_dup,
+            .argv_block = block,
+            .argv = owned,
+            .duplex = opts.duplex,
+            .pool = pool,
             .cwd_copy = cwd_dup,
             .environ = environ,
             .pre_spawn_hook = hook,
@@ -204,8 +255,8 @@ pub const ProcStream = struct {
         if (s.pre_spawn_hook) |h| h();
 
         var child = std.process.spawn(io, .{
-            .argv = &.{ "/bin/sh", "-c", s.argv_cmd },
-            .stdin = .pipe,
+            .argv = s.argv,
+            .stdin = if (s.duplex) .pipe else .ignore,
             .stdout = .pipe,
             .stderr = .pipe,
             .cwd = if (s.cwd_copy) |p| .{ .path = p } else .inherit,
@@ -213,12 +264,14 @@ pub const ProcStream = struct {
             s.spawn_mutex.lock();
             s.spawn_failed = true;
             s.spawn_mutex.unlock();
+            s.exit.store(-1, .release); // never ran: an exit like any other
             return;
         };
 
         if (s.canceled.load(.acquire)) {
             if (child.id) |id| std.posix.kill(id, std.posix.SIG.KILL) catch {};
             _ = child.wait(io) catch {};
+            s.exit.store(-1, .release);
             return;
         }
 
@@ -256,6 +309,7 @@ pub const ProcStream = struct {
         mr.init(s.gpa, io, mr_buf.toStreams(), &.{ s.child.stdout.?, s.child.stderr.? });
         defer mr.deinit();
         while (mr.fill(256, .none)) |_| {
+            var landed = false;
             const out = mr.reader(0);
             const out_chunk = out.buffered();
             if (out_chunk.len > 0) {
@@ -263,11 +317,63 @@ pub const ProcStream = struct {
                 s.out_buf.appendSlice(s.gpa, out_chunk) catch {};
                 s.out_mutex.unlock();
                 out.toss(out_chunk.len);
+                landed = true;
             }
             const err = mr.reader(1);
             const err_chunk = err.buffered();
-            if (err_chunk.len > 0) err.toss(err_chunk.len); // discard stderr
+            if (err_chunk.len > 0) {
+                s.out_mutex.lock();
+                const room = err_cap -| s.err_buf.items.len;
+                s.err_buf.appendSlice(s.gpa, err_chunk[0..@min(room, err_chunk.len)]) catch {};
+                s.out_mutex.unlock();
+                err.toss(err_chunk.len);
+                landed = true;
+            }
+            // Wake the frame loop for what landed: a consumer hears it now,
+            // not at a polling interval or the next unrelated wake.
+            if (landed) s.wake();
         } else |_| {} // EOF / read failure — the child is gone.
+        // Reap it here, so its status is known. (The reader's own exit wakes
+        // the loop — the pool signals a resident's completion.)
+        const code: i32 = if (s.child.wait(io)) |term| switch (term) {
+            .exited => |c| c,
+            else => -1,
+        } else |_| -1;
+        s.reaped = true;
+        s.exit.store(code, .release);
+    }
+
+    fn wake(s: *ProcStream) void {
+        if (s.pool.notify_fd) |fd| @import("scheduler.zig").signalWakeFd(fd);
+    }
+
+    /// Frame thread: copy newly-arrived stderr into `out`, like `read`.
+    pub fn readErr(s: *ProcStream, out: []u8) usize {
+        s.out_mutex.lock();
+        defer s.out_mutex.unlock();
+        const avail = s.err_buf.items[s.err_cursor..];
+        const n = @min(avail.len, out.len);
+        @memcpy(out[0..n], avail[0..n]);
+        s.err_cursor += n;
+        return n;
+    }
+
+    /// Frame thread: something for the consumer — bytes on either stream, or
+    /// an exit it has not heard yet (a child that exits silently, a search
+    /// with no matches, must still be heard ending).
+    pub fn ready(s: *ProcStream) bool {
+        if (!s.exit_heard and s.status() != null) return true;
+        s.out_mutex.lock();
+        defer s.out_mutex.unlock();
+        return s.out_buf.items.len > s.cursor or s.err_buf.items.len > s.err_cursor;
+    }
+
+    /// Frame thread: the child's exit code once it has exited and been reaped
+    /// (-1: by signal, or it never ran); null while it runs. Bytes may still
+    /// be waiting: a consumer drains them, then reads this as "no more".
+    pub fn status(s: *ProcStream) ?i32 {
+        const code = s.exit.load(.acquire);
+        return if (code == running) null else code;
     }
 
     /// Frame thread: copy newly-arrived stdout into `out` (up to its length),
@@ -383,11 +489,13 @@ pub const ProcStream = struct {
         s.spawn_mutex.lock();
         const spawned = s.spawned;
         s.spawn_mutex.unlock();
-        if (spawned) _ = s.child.wait(s.io_threaded.io()) catch {};
+        if (spawned and !s.reaped) _ = s.child.wait(s.io_threaded.io()) catch {};
         s.out_buf.deinit(gpa);
+        s.err_buf.deinit(gpa);
         s.pending_out.deinit(gpa);
         s.io_threaded.deinit();
-        gpa.free(s.argv_cmd);
+        gpa.free(s.argv_block);
+        gpa.free(s.argv);
         if (s.cwd_copy) |p| gpa.free(p);
         gpa.destroy(s);
     }
@@ -404,7 +512,7 @@ test "proc_stream: duplex — write stdin, read stdout back" {
 
     // sh builtins only (read + printf), so the hermetic `.empty` environ needs
     // no PATH; the child reads a line and echoes it, then exits (flushing).
-    var s = try ProcStream.start(gpa, pool, "read x; printf '%s\\n' \"$x\"", null, .empty);
+    var s = try ProcStream.start(gpa, pool, &.{ "/bin/sh", "-c", "read x; printf '%s\\n' \"$x\"" }, null, .empty, .{});
     defer s.deinit();
     s.send("hello\n");
 
@@ -445,7 +553,7 @@ test "proc_stream: start() defers the fork+exec — a seam, not a wall-clock rac
     defer pool.deinit();
     gate_deferred_spawn.store(false, .release);
 
-    var s = try ProcStream.startTesting(gpa, pool, "read x; printf '%s\\n' \"$x\"", null, .empty, hookDeferredSpawn);
+    var s = try ProcStream.startTesting(gpa, pool, &.{ "/bin/sh", "-c", "read x; printf '%s\\n' \"$x\"" }, null, .empty, hookDeferredSpawn);
     defer s.deinit();
 
     try t.expect(!s.isSpawned()); // held at the gate: cannot have forked yet
@@ -497,7 +605,7 @@ test "proc_stream: canceled before the spawn lands reaps its own child — no ha
     defer pool.deinit();
     gate_cancel_race.store(false, .release);
 
-    var s = try ProcStream.startTesting(gpa, pool, "read x; printf '%s\\n' \"$x\"", null, .empty, hookCancelRace);
+    var s = try ProcStream.startTesting(gpa, pool, &.{ "/bin/sh", "-c", "read x; printf '%s\\n' \"$x\"" }, null, .empty, hookCancelRace);
     try t.expect(!s.isSpawned());
 
     s.canceled.store(true, .release); // what deinit() does first
@@ -541,7 +649,7 @@ test "proc_stream: the queued flush happens under spawn_mutex — a concurrent s
     gate_mid_flush.store(false, .release);
     reached_mid_flush.store(false, .release);
 
-    var s = try ProcStream.startTesting(gpa, pool, "read x; printf '%s' \"$x\"", null, .empty, hookDeferredSpawn);
+    var s = try ProcStream.startTesting(gpa, pool, &.{ "/bin/sh", "-c", "read x; printf '%s' \"$x\"" }, null, .empty, hookDeferredSpawn);
     defer s.deinit();
     s.setMidFlushHookForTesting(hookMidFlush); // safe: pre-spawn gate is still closed
 
@@ -620,7 +728,7 @@ test "proc_stream: live peers outnumber the pool's workers — none starves, and
     // `read x; printf` (sh builtins — no PATH needed under `.empty`) parks each
     // child on stdin: pinned for its whole life, the persistent-peer shape.
     var peers: [3]*ProcStream = undefined;
-    for (&peers) |*p| p.* = try ProcStream.start(gpa, pool, "read x; printf '%s' \"$x\"", null, .empty);
+    for (&peers) |*p| p.* = try ProcStream.start(gpa, pool, &.{ "/bin/sh", "-c", "read x; printf '%s' \"$x\"" }, null, .empty, .{});
     defer for (peers) |p| p.deinit();
 
     for (peers, 0..) |p, i| {
@@ -661,4 +769,71 @@ fn pooledSquare(x: u64) u64 {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+/// Drain stdout and stderr until the child has exited, or a deadline.
+fn drainAll(s: *ProcStream, out: []u8, err: []u8) struct { out: usize, err: usize, code: ?i32 } {
+    var o: usize = 0;
+    var e: usize = 0;
+    const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < deadline) {
+        const n = s.read(out[o..]);
+        const m = s.readErr(err[e..]);
+        o += n;
+        e += m;
+        if (n == 0 and m == 0) {
+            if (s.status()) |code| return .{ .out = o, .err = e, .code = code };
+            std.Thread.yield() catch {};
+        }
+    }
+    return .{ .out = o, .err = e, .code = null };
+}
+
+test "proc_stream: an argv reaches the child as given — no shell sees it" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 2 });
+    defer pool.deinit();
+    // The hermetic environ has no PATH, so the program is sh by absolute path —
+    // but the argument under test is a positional one (`$1`), handed over as
+    // given: what a shell would have split, expanded or run stays one string.
+    var s = try ProcStream.start(gpa, pool, &.{ "/bin/sh", "-c", "printf '%s' \"$1\"", "sh", "a b; echo $HOME" }, null, .empty, .{ .duplex = false });
+    defer s.deinit();
+    var out: [64]u8 = undefined;
+    var err: [64]u8 = undefined;
+    const got = drainAll(s, &out, &err);
+    try t.expectEqualStrings("a b; echo $HOME", out[0..got.out]);
+    try t.expectEqual(@as(?i32, 0), got.code);
+}
+
+test "proc_stream: stderr and the exit come back, apart from stdout" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 2 });
+    defer pool.deinit();
+    var s = try ProcStream.start(gpa, pool, &.{ "/bin/sh", "-c", "echo out; echo err >&2; exit 3" }, null, .empty, .{ .duplex = false });
+    defer s.deinit();
+    var out: [64]u8 = undefined;
+    var err: [64]u8 = undefined;
+    const got = drainAll(s, &out, &err);
+    try t.expectEqualStrings("out\n", out[0..got.out]);
+    try t.expectEqualStrings("err\n", err[0..got.err]);
+    try t.expectEqual(@as(?i32, 3), got.code);
+    // Heard once read: an exit is news until the consumer has it.
+    try t.expect(s.ready());
+    s.exit_heard = true;
+    try t.expect(!s.ready());
+}
+
+test "proc_stream: without duplex, stdin is the null device — a child that reads it ends" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 2 });
+    defer pool.deinit();
+    // With a pipe nobody writes, this would wait forever; on the null device
+    // the read ends at once.
+    var s = try ProcStream.start(gpa, pool, &.{ "/bin/sh", "-c", "read x; echo \"[$x]\"" }, null, .empty, .{ .duplex = false });
+    defer s.deinit();
+    var out: [64]u8 = undefined;
+    var err: [64]u8 = undefined;
+    const got = drainAll(s, &out, &err);
+    try t.expectEqualStrings("[]\n", out[0..got.out]);
+    try t.expect(got.code != null);
 }

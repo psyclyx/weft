@@ -290,9 +290,10 @@ pub extern "weft:abi/1" fn wl_repl_start(cmd: u32, cmd_len: u32, name: u32, name
 pub extern "weft:abi/1" fn wl_repl_send(handle: u32, ptr: u32, len: u32) void;
 pub extern "weft:abi/1" fn wl_repl_quit(handle: u32) void;
 pub extern "weft:abi/1" fn wl_repl_exited(handle: u32) i32;
-pub extern "weft:abi/1" fn wl_proc_spawn(cmd: u32, cmd_len: u32) i32;
+pub extern "weft:abi/1" fn wl_proc_spawn(argv: u32, argv_len: u32, argc: u32, flags: u32) i32;
 pub extern "weft:abi/1" fn wl_proc_send(handle: u32, ptr: u32, len: u32) void;
-pub extern "weft:abi/1" fn wl_proc_read(handle: u32, out: u32, cap: u32) i32;
+pub extern "weft:abi/1" fn wl_proc_read(handle: u32, stream: u32, out: u32, cap: u32) i32;
+pub extern "weft:abi/1" fn wl_proc_status(handle: u32) i32;
 pub extern "weft:abi/1" fn wl_proc_close(handle: u32) void;
 pub extern "weft:abi/1" fn wl_place_root(out: u32, cap: u32) i32;
 pub extern "weft:abi/1" fn wl_place_id() i32;

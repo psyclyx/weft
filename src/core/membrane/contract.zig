@@ -366,6 +366,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_proc_spawn", .handler = proc.hProcSpawn },
     .{ .name = "wl_proc_send", .handler = proc.hProcSend },
     .{ .name = "wl_proc_read", .handler = proc.hProcRead },
+    .{ .name = "wl_proc_status", .handler = proc.hProcStatus },
     .{ .name = "wl_proc_close", .handler = proc.hProcClose },
     .{ .name = "wl_place_root", .handler = proc.hPlaceRoot },
     .{ .name = "wl_place_id", .handler = proc.hPlaceId },

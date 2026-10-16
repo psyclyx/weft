@@ -423,7 +423,8 @@ function startAgent(cmd, prompt, name) {
   convs.set(ordinal, c);
   focused = c;
   setStatus(c, "●", "starting");
-  c.proc = weft.procSpawn(cmd);
+  // Words, no shell: the configured command is split, never interpreted.
+  c.proc = weft.procSpawn(cmd.trim().split(/\s+/));
   rpc(c, "initialize", {
     protocolVersion: 1,
     clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },

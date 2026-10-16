@@ -103,42 +103,50 @@ fn grep() void {
         weft.echo("grep: could not open the search");
 }
 
-/// The most rows one query reads back from ripgrep — the pick holds 2000;
-/// this keeps a match-everything query from reading megabytes to show them.
-const live_read_max = 1 << 18;
+/// The search the open pick is showing: one at a time, so a new query (or
+/// the pick closing) kills the last rather than letting it run on.
+var live: ?weft.Process = null;
 
-/// A query settled: run ripgrep on it, its matches the query's rows.
+fn stopLive() void {
+    if (live) |proc| proc.kill();
+    live = null;
+}
+
+/// A query settled: ripgrep on it, each line it prints a row as it prints it.
 fn liveQuery(query: []const u8, feed: weft.Feed) void {
+    stopLive();
     if (query.len == 0) return feed.done();
     const argv = [_][]const u8{ "rg", "--line-number", "--column", "--no-heading", "--color=never", "--max-columns=240", "--max-columns-preview", "--smart-case", "--", query };
-    if (!weft.execWith(weft.Feed, feed, .{ .argv = &argv }, liveLanded)) {
+    live = weft.spawnWith(weft.Feed, feed, .{ .argv = &argv }, LiveRows);
+    if (live == null) {
         weft.echo("grep: could not run rg");
         feed.done();
     }
 }
 
-fn liveLanded(r: weft.ExecDone, feed: weft.Feed) void {
-    defer feed.done();
-    // rg exits 1 for "no matches" and 2 for a bad pattern: say why only then.
-    if (r.status == 2) {
-        var err_buf: [256]u8 = undefined;
-        weft.echo(r.firstLine(.err, &err_buf));
-        return;
+const LiveRows = struct {
+    pub fn line(feed: weft.Feed, text: []const u8) void {
+        if (text.len == 0 or feed.push(text, "")) return;
+        // Refused: the query moved on, or this one has all the rows a pick
+        // holds. Either way nothing more of this search is wanted.
+        feed.done();
+        stopLive();
     }
-    const out = weft.allocator.alloc(u8, @min(r.len(.out), live_read_max)) catch return;
-    defer weft.allocator.free(out);
-    var text = r.read(.out, 0, out);
-    // A full window may end mid-line: that line is not a row.
-    if (text.len < r.len(.out)) text = text[0..(std.mem.lastIndexOfScalar(u8, text, '\n') orelse 0)];
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        if (!feed.push(line, "")) break;
+
+    pub fn exit(feed: weft.Feed, code: i32, stderr: []const u8) void {
+        // rg exits 1 for "no matches" and 2 for a bad pattern: say why only then.
+        if (code == 2) {
+            const first = std.mem.sliceTo(std.mem.trim(u8, stderr, " \t\r\n"), '\n');
+            if (first.len > 0) weft.echo(first);
+        }
+        feed.done();
+        live = null;
     }
-}
+};
 
 /// A row chosen: open where it points.
 fn liveAnswer(answer: weft.Answer) void {
+    stopLive();
     const line = switch (answer) {
         .chosen => |text| text,
         .typed, .cancelled => return,

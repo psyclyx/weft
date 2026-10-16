@@ -463,7 +463,7 @@ fn touch(t: *Term) void {
 
 /// `on_poll`: something of ours is ready — a shell printed or ended, a pane
 /// changed size, or an entry closed.
-fn onPoll() callconv(.c) void {
+fn onPoll() void {
     // A terminal whose entry was closed: its shell goes with it.
     var i: usize = terms.items.len;
     while (i > 0) {
@@ -714,6 +714,5 @@ const cmds = [_]weft.CommandEntry{
 };
 
 comptime {
-    weft.plugin(&cmds, .{ .describe = describeExtra, .init = init }).exportAll();
-    weft.exportCallback("on_poll", &onPoll);
+    weft.plugin(&cmds, .{ .describe = describeExtra, .init = init, .poll = onPoll }).exportAll();
 }

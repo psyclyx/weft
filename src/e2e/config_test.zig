@@ -1277,9 +1277,13 @@ test "e2e/config: an exiting agent cancels its own pending permission and frees 
     ;
     // #1 asks for permission and DIES. #2 asks and stays (`exec`, so the pid
     // weft holds is the live process).
-    try ed.setConfig("acp", "cmd", "printf '" ++ perm_request ++ "\\n' doomed 'doomed tool'");
+    const doomed = try h.ShCommand.init(gpa, "printf '" ++ perm_request ++ "\\n' doomed 'doomed tool'\n");
+    defer doomed.deinit(gpa);
+    try ed.setConfig("acp", "cmd", doomed.command);
     ed.run("acp.start");
-    try ed.setConfig("acp", "cmd", "printf '" ++ perm_request ++ "\\n' alive 'surviving tool'; exec sleep 30");
+    const alive = try h.ShCommand.init(gpa, "printf '" ++ perm_request ++ "\\n' alive 'surviving tool'; exec sleep 30\n");
+    defer alive.deinit(gpa);
+    try ed.setConfig("acp", "cmd", alive.command);
     ed.run("acp.start");
 
     // Whichever order the two land in, the settled state is the same: #1's
@@ -1301,7 +1305,9 @@ test "e2e/config: an exiting agent cancels its own pending permission and frees 
 
     // The freed slot is REUSED: a third conversation takes ordinal 1 back and
     // streams into `*agent*`, which only a released slot allows.
-    try ed.setConfig("acp", "cmd", "printf '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"text\":\"third-turn\"}}}}\\n'");
+    const third = try h.ShCommand.init(gpa, "printf '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"text\":\"third-turn\"}}}}\\n'" ++ "\n");
+    defer third.deinit(gpa);
+    try ed.setConfig("acp", "cmd", third.command);
     ed.run("acp.start");
     try t.expect(drainToolContains(&ed, "*agent*", "third-turn"));
 

@@ -114,7 +114,7 @@ fn rangeRelay() void {
 /// its stdout has bytes pending (readiness-driven — see `wasm_host/
 /// activation.zig`'s `notifyPollIfReady`).
 fn spawn() void {
-    _ = weft.procSpawn("echo hi");
+    _ = weft.procSpawn(&.{ "echo", "hi" }, false);
 }
 
 /// How many times `on_poll` has fired — read this (via `command.run`, a

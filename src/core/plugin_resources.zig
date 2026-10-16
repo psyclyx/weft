@@ -258,9 +258,11 @@ pub const Resources = struct {
     /// way of both planes. A pty is not asked: it rings the frame loop itself
     /// (the pool's notify fd) when output lands or its child ends, so a shell
     /// idling in a panel costs no poll.
-    pub fn hasLiveStream(self: *const Resources) bool {
-        return anyLive(proc_stream.ProcStream, self.streams.slice()) or
-            anyLive(repl_session.Session, self.sessions.slice()) or
+    /// Whether this plugin holds a live REPL or net session — the streams
+    /// that still need the frame loop to poll them. A process stream is not
+    /// one of them: its reader wakes the loop when bytes land (`proc_stream`).
+    pub fn hasPolledStream(self: *const Resources) bool {
+        return anyLive(repl_session.Session, self.sessions.slice()) or
             anyLive(net_session.Session, self.net_sessions.slice());
     }
 

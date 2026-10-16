@@ -165,6 +165,9 @@ pub const Hooks = struct {
     /// choosing. `weft.ask`'s continuations are routed first and never reach
     /// here; ids with the top bit set are the SDK's.
     pick: ?*const fn (pick_id: u32) void = null,
+    /// Something this plugin holds is ready (`on_poll`). Processes it started
+    /// with `weft.spawn` are served first, by the SDK; this hook gets the rest.
+    poll: ?*const fn () void = null,
 };
 
 /// Generate the three exports for `cmds`. Call `exportAll` from a `comptime`
@@ -287,6 +290,13 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
             _ = @import("ask.zig").deliverQuery(pick_id, epoch);
         }
 
+        /// The host's readiness wake: the SDK's processes first, then the
+        /// plugin's own hook. Exported unconditionally, like `on_exec`.
+        fn onPoll() callconv(.c) void {
+            @import("process.zig").pump();
+            if (hooks.poll) |f| f();
+        }
+
         pub fn exportAll() void {
             exportCallback("describe", &describeFn);
             exportCallback("init", &initFn);
@@ -295,6 +305,7 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
             if (hooks.after != null) exportCallback("on_mapping_end", &onMappingEnd);
             exportCallback("on_pick_accept", &onPickAccept);
             exportCallback("on_pick_query", &onPickQuery);
+            exportCallback("on_poll", &onPoll);
         }
 
         /// The host id for a command this plugin declared, by name — for the

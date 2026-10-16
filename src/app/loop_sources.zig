@@ -241,7 +241,10 @@ pub fn pluginLoopDue(ctx: ?*anyopaque, now: u64) ?u64 {
 // finishes, i.e. process exit, not per byte). Rather than plumb a
 // dedicated wakeup through every one of those (repl_session.zig,
 // proc_stream.zig, each guest's own polling shape), this is one named,
-// honestly-bounded 8ms fallback.
+// honestly-bounded 8ms fallback. PROCESS streams have left it: their reader
+// signals the pool's wake fd when bytes land (`proc_stream.wake`), so an open
+// language server or agent no longer keeps the loop awake. REPL and net
+// sessions remain (doc/streams.md).
 //
 // Gated on an ACTUALLY-LIVE stream (review fix: gating on "any plugin
 // resident" was wrong — LSP/modes/syntax/vim etc. are ordinary plugins
@@ -271,8 +274,8 @@ const plugin_stream_interval_ns: u64 = 8 * std.time.ns_per_ms;
 /// check. It has them now (empty until those doors are shared), so sharing a
 /// door will not silently leave the frame loop asleep on it.
 fn hasLiveStream(self: *const PluginStreamCtx) bool {
-    for (self.plugins.items) |p| if (p.resources.hasLiveStream()) return true;
-    for (self.js_plugins.items) |jp| if (jp.resources.hasLiveStream()) return true;
+    for (self.plugins.items) |p| if (p.resources.hasPolledStream()) return true;
+    for (self.js_plugins.items) |jp| if (jp.resources.hasPolledStream()) return true;
     return false;
 }
 

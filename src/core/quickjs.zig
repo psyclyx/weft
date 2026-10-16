@@ -245,6 +245,7 @@ pub const plugin_handlers = .{
     .{ .name = "qjs_proc_spawn", .handler = cProcSpawn },
     .{ .name = "qjs_proc_send", .handler = cProcSend },
     .{ .name = "qjs_proc_read", .handler = cProcRead },
+    .{ .name = "qjs_proc_status", .handler = cProcStatus },
     .{ .name = "qjs_proc_close", .handler = cProcClose },
     .{ .name = "qjs_buffer_append", .handler = cBufferAppend },
     .{ .name = "qjs_buffer_fold", .handler = cBufferFold },
@@ -876,6 +877,7 @@ pub const cKeysFor = jsDoor(@import("wasm_host/commands.zig").keysForBody, null)
 const cProcSpawn = jsDoor(proc_doors.spawnBody, .proc);
 const cProcSend = jsDoor(proc_doors.sendBody, .proc);
 const cProcRead = jsDoor(proc_doors.readBody, .proc);
+const cProcStatus = jsDoor(proc_doors.statusBody, null);
 const cProcClose = jsDoor(proc_doors.closeBody, null);
 
 // The read/motion surface, one body each in `wasm_host/edit.zig`. A JS plugin

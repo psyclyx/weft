@@ -33,7 +33,7 @@ pub fn notifyPollIfReady(p: *WasmPlugin) bool {
     // Asked every time, first: polling a watch is what drains it.
     const watched = semantic_fs_doors.pollWatches(p);
     const streamed = for (p.resources.streams.slice()) |maybe| {
-        if (maybe) |s| if (s.pending() > 0) break true;
+        if (maybe) |s| if (s.ready()) break true;
     } else pty_doors.anyPtyReady(p) or pty_doors.anyExtentMoved(p);
     const raced = @import("capability.zig").raceReady(p);
     const ready = watched or streamed or raced;
