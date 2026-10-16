@@ -25,6 +25,7 @@
 
 const std = @import("std");
 const weft = @import("weft");
+const args = @import("weft_args");
 const invoke = @import("weft_invoke");
 const offers_lib = @import("weft_offers");
 
@@ -118,6 +119,29 @@ fn initExtra() void {
     list_all = std.mem.eql(u8, weft.config("commands"), "all");
     brief = std.mem.eql(u8, weft.config("detail"), "brief");
     recent_first = std.mem.eql(u8, weft.config("recent"), "on");
+    // An argument that takes a command (`keys.bind`'s, `palette.complete`'s)
+    // is offered the commands this list shows.
+    args.offer("command");
+}
+
+/// `arg/command`: every command a person is shown here, its summary beside
+/// it — the ids, since an argument names a command by its id.
+fn on_slot_fire(session: i32) callconv(.c) void {
+    _ = args.question(@bitCast(session)) orelse return;
+    var rows: std.ArrayList(args.Row) = .empty;
+    defer rows.deinit(weft.allocator);
+    var arena: std.heap.ArenaAllocator = .init(weft.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const n = weft.commandCount();
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const name = a.dupe(u8, weft.commandName(i) orelse continue) catch return;
+        const meta = weft.commandMeta(name) orelse weft.Presentation{};
+        if (meta.internal and !list_all) continue;
+        rows.append(weft.allocator, .{ .text = name, .doc = a.dupe(u8, meta.summary) catch return }) catch return;
+    }
+    args.answer(@bitCast(session), rows.items);
 }
 
 /// `palette.complete <call>`: the call core was handed short (its name, then
@@ -345,4 +369,5 @@ fn onPickAccept(pick_id: u32) void {
 const manifest = weft.plugin(&cmds, .{ .init = initExtra, .pick = onPickAccept });
 comptime {
     manifest.exportAll();
+    weft.exportCallback("on_slot_fire", &on_slot_fire);
 }

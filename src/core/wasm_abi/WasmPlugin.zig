@@ -519,6 +519,10 @@ caps_merged: []*const capability.CompletionItem = &.{},
 // `container.SlotDecl.schema`'s doc — so whichever side allocated it owns
 // the free; here, that's this plugin).
 declared_schemas: std.ArrayList(*const @import("weft_schema").Schema) = .empty,
+/// Slot sessions this plugin fired (`wl_slot_fire`) and has not finished:
+/// what its `on_poll` is raised for when an answer lands late, and what is
+/// finished for it when it unloads.
+slots_fired: std.ArrayList(u64) = .empty,
 /// Decoded predicate TREES, not leaf strings. A bound predicate used to be a
 /// single leaf whose one string this list held; it is now whatever
 /// `facts.decode` produced — children and all — so the thing that must be
@@ -938,7 +942,11 @@ pub fn deinit(self: *WasmPlugin) void {
     // THEMSELVES (wl_slot_declare) persist, exactly like declared actions —
     // Container has no slot-removal API (matches every other domain's
     // "declarations outlive a single provider" convention).
-    if (self.ctx.slot_host) |host| host.unregisterByOwnerPrefix(self.name);
+    if (self.ctx.slot_host) |host| {
+        for (self.slots_fired.items) |id| host.finish(id);
+        host.unregisterByOwnerPrefix(self.name);
+    }
+    self.slots_fired.deinit(gpa);
     for (self.declared_schemas.items) |s| @import("weft_schema").freeSchema(gpa, s);
     self.declared_schemas.deinit(gpa);
     for (self.slot_predicates.items) |pred| @import("weft_facts").free(gpa, pred);

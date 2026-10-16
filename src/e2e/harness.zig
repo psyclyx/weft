@@ -505,6 +505,15 @@ pub const Editor = struct {
         _ = self.advanceAt(core.task.nowNs(), false) catch {};
     }
 
+    /// Invoke a command the way a key or a menu row does (`command.invoke`):
+    /// a call that arrives short is offered to whoever completes it — the
+    /// palette's asker — rather than refused.
+    pub fn invoke(self: *Editor, cmd: []const u8) void {
+        command.invoke(self.commands, self.ctx, cmd, &.{});
+        self.application.noteInput();
+        _ = self.advanceAt(core.task.nowNs(), false) catch {};
+    }
+
     /// Run a command with one string argument (e.g. `open <path>`).
     pub fn runStr(self: *Editor, cmd: []const u8, arg: []const u8) void {
         var at_shell: [std.fs.max_path_bytes]u8 = undefined;
@@ -1544,6 +1553,7 @@ const guest = struct {
     const headtest = @embedFile("guest_headtest_wasm");
     const offerwatch = @embedFile("guest_offerwatch_wasm");
     const diagfeed = @embedFile("guest_diagfeed_wasm");
+    const argtest = @embedFile("guest_argtest_wasm");
     /// Test fixture only — `src/plugin_fixtures/fs_limit.zig`: declares fs_read +
     /// fs_write and exposes each path-taking door as a command reading its
     /// path from the args, so a test controls exactly which path to try
@@ -1685,6 +1695,12 @@ pub fn loadWebIde(ed: *Editor) !void {
     try ed.load("run", guest.run);
     try ed.load("make", guest.make);
     try ed.load("fmt", guest.fmt);
+}
+
+/// The `argtest` fixture (`src/plugin_fixtures/argtest.zig`): commands whose
+/// argument says what it takes, for the asker's choice tests.
+pub fn loadArgtest(ed: *Editor) !void {
+    try ed.load("argtest", guest.argtest);
 }
 
 /// The instantiable session tools: REPLs, consoles, and LLM conversations,

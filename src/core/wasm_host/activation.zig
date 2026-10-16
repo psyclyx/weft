@@ -38,7 +38,7 @@ pub fn notifyPollIfReady(p: *WasmPlugin) bool {
     } else for (p.resources.walks.slice()) |maybe| {
         if (maybe) |w| if (w.ready()) break true;
     } else pty_doors.anyPtyReady(p) or pty_doors.anyExtentMoved(p);
-    const raced = @import("capability.zig").raceReady(p);
+    const raced = @import("capability.zig").raceReady(p) or @import("slot.zig").firedReady(p);
     const ready = watched or streamed or raced;
     if (!ready) return false;
     notifyPoll(p);

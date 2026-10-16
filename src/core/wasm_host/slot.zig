@@ -252,8 +252,48 @@ pub fn hSlotFire(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     // `.ctx` is what lets a PROVIDER (a different plugin, whose `active_ctx`
     // is whatever it last ran under) answer for the head that actually asked
     // — see `wpSlotProvider`'s doc and `slot.Request.ctx`.
-    const id = host.fire(name, intent.factsFor(ctx), version, .{ .request = request, .ctx = ctx }) catch return;
-    results[0] = @bitCast(@as(u32, @truncate(id orelse return)));
+    const id = (host.fire(name, intent.factsFor(ctx), version, .{ .request = request, .ctx = ctx }) catch return) orelse return;
+    p.slots_fired.append(gpa, id) catch {
+        host.finish(id);
+        return;
+    };
+    // What landed inside `fire` (a synchronous provider) is answered by the
+    // time this returns; only a LATER answer is news for `on_poll`.
+    if (host.session(id)) |s| s.heard = s.all().len;
+    results[0] = @bitCast(@as(u32, @truncate(id)));
+}
+
+/// Whether any session this plugin fired has an answer it has not been told
+/// of (`on_poll`), marking those told. A finished or vanished session is
+/// dropped from the list.
+pub fn firedReady(p: *WasmPlugin) bool {
+    const host = p.activeCtx().slot_host orelse return false;
+    var ready = false;
+    var i: usize = 0;
+    while (i < p.slots_fired.items.len) {
+        const s = host.session(p.slots_fired.items[i]) orelse {
+            _ = p.slots_fired.swapRemove(i);
+            continue;
+        };
+        if (s.all().len > s.heard) {
+            s.heard = s.all().len;
+            ready = true;
+        }
+        i += 1;
+    }
+    return ready;
+}
+
+/// `wl_slot_name(session, ptr, cap)` — the slot a fired session asks, for a
+/// provider of several slots: one `on_slot_fire` export answers them all,
+/// and the question it is being asked is data it is given, not a payload
+/// shape to guess from. Its length, or -1 for no such session.
+pub fn hSlotName(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = -1;
+    const host = p.activeCtx().slot_host orelse return;
+    const s = host.session(@as(u32, @bitCast(args[0]))) orelse return;
+    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), s.slot) catch return);
 }
 
 /// The session a `wl_slot_*` consumer verb names, or null.
@@ -321,5 +361,9 @@ pub fn hSlotFinish(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const host = p.activeCtx().slot_host orelse return;
-    host.finish(@as(u32, @bitCast(args[0])));
+    const id: u64 = @as(u32, @bitCast(args[0]));
+    // Only what this plugin fired is its to finish.
+    const at = std.mem.indexOfScalar(u64, p.slots_fired.items, id) orelse return;
+    _ = p.slots_fired.swapRemove(at);
+    host.finish(id);
 }

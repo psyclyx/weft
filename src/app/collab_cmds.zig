@@ -702,7 +702,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
     _ = try commands.bind(gpa, "collab.share", .{
         .name = "collab.share",
         .summary = "Share the active buffer with the people you are connected to, optionally as a preset: look together, pair or review.",
-        .args = &.{.{ .name = "preset", .type = .string, .optional = true }},
+        .args = &.{.{ .name = "preset", .type = .string, .optional = true, .takes = "look_together|pair|review" }},
         .handler = shareHandler,
         .data = sc,
         .meta = .{ .label = "Share Buffer", .icon = "share-2" },
@@ -710,7 +710,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
     _ = try commands.bind(gpa, "collab.share-presence", .{
         .name = "collab.share-presence",
         .summary = "Show or hide your cursor to the people you are connected to, separately from sharing a buffer.",
-        .args = &.{.{ .name = "state", .type = .string }},
+        .args = &.{.{ .name = "state", .type = .string, .takes = "on|off" }},
         .handler = sharePresenceHandler,
         .data = sc,
         .meta = .{ .label = "Share Cursor", .icon = "eye", .prompts = true },
@@ -718,7 +718,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
     _ = try commands.bind(gpa, "collab.share-fs", .{
         .name = "collab.share-fs",
         .summary = "Choose what others may do with your shared files: see the tree, read contents, or write.",
-        .args = &.{.{ .name = "surfaces", .type = .string }},
+        .args = &.{.{ .name = "surfaces", .type = .string, .takes = "none|read|rw|hierarchy|bytes|write" }},
         .handler = shareFsHandler,
         .data = sc,
         .meta = .{ .label = "Share Files", .icon = "folder-open", .prompts = true },
@@ -734,7 +734,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
     _ = try commands.bind(gpa, "collab.listen", .{
         .name = "collab.listen",
         .summary = "Host a session on a port so others can join, viewing, editing or owning what you share.",
-        .args = &.{ .{ .name = "port", .type = .string }, .{ .name = "access", .type = .string } },
+        .args = &.{ .{ .name = "port", .type = .string }, .{ .name = "access", .type = .string, .takes = core.command.ArgSpec.oneOf(core.session.Access) } },
         .handler = listenHandler,
         .data = sc,
         .meta = .{ .label = "Host Session", .icon = "users", .prompts = true },
@@ -782,7 +782,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
     _ = try commands.bind(gpa, "collab.grant", .{
         .name = "collab.grant",
         .summary = "Change what a connected person may do: view, edit or own.",
-        .args = &.{ .{ .name = "fingerprint", .type = .string }, .{ .name = "grade", .type = .string } },
+        .args = &.{ .{ .name = "fingerprint", .type = .string }, .{ .name = "grade", .type = .string, .takes = core.command.ArgSpec.oneOf(core.session.Access) } },
         .handler = grantHandler,
         .data = sc,
         .meta = .{ .label = "Set Peer Access", .prompts = true },

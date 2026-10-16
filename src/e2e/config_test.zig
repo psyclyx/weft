@@ -1172,10 +1172,16 @@ test "e2e/config: the palette runs a command WITH arguments — typed, or asked 
     ed.typeText("7000");
     ed.press("Return", "");
     ed.settle(2);
-    try t.expect(std.mem.indexOf(u8, ed.promptText(), "collab.listen <access>") != null);
-    ed.typeText("own");
-    ed.press("Return", "");
+    // The access is CHOSEN, not spelled: `listen` takes `view|edit|own`, so
+    //    the question is the picker, and its rows are exactly those.
+    try t.expect(ed.pick.active);
+    try t.expectEqualStrings("collab.listen <access>", ed.pick.prompt);
+    try t.expectEqual(@as(usize, 3), ed.pick.items.items.len);
+    for ([_][]const u8{ "view", "edit", "own" }, ed.pick.items.items) |want, got| try t.expectEqualStrings(want, got);
+    ed.typeText("ow");
+    ed.run("pick.accept");
     ed.settle(2);
+    try t.expect(!ed.pick.active);
     try t.expectEqual(@as(?u16, 7000), ed.share_ctx.pending_listen);
     try t.expectEqual(core.session.Access.own, ed.share_ctx.pending_access);
 

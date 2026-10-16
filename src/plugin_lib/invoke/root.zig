@@ -26,11 +26,18 @@
 //! friends) — never by a table of its own. A command declared today is
 //! askable today, from a plugin that has never heard of it.
 //!
+//! An argument that says what it TAKES is asked for with a choice: the picker
+//! every list uses, its rows the values a closed list names (`read|edit`) or
+//! that whoever answers its kind offers (`arg/file`, `arg/command` —
+//! `weft_args`), streaming in as they are found, and a typed value still
+//! accepted. One that offers nothing is asked on the prompt's line.
+//!
 //! Freestanding-wasm shaped: fixed buffers per instantiation, no allocator.
 
 const std = @import("std");
 const weft = @import("weft");
 const prompt = @import("weft_prompt");
+const arg_values = @import("weft_args");
 
 /// Arguments one invocation collects — the ceiling `wl_run_argv` enforces,
 /// mirrored here so a command too wide to invoke is refused with a sentence
@@ -320,8 +327,76 @@ pub fn Invoker(comptime cfg: Config) type {
             put(&label_buf, &w, name_buf[0..name_len]);
             put(&label_buf, &w, " <");
             put(&label_buf, &w, pname);
-            put(&label_buf, &w, ">: ");
+            put(&label_buf, &w, ">");
+            const what = weft.commandArgTakes(idx, filled) orelse pname;
+            if (choose(what, pname, label_buf[0..w])) return;
+            put(&label_buf, &w, ": ");
             ask_line.open(label_buf[0..w]);
+        }
+
+        // ── Asking with a choice ────────────────────────────────────────
+
+        /// What the argument being chosen takes, held for the pick's life.
+        var takes_buf: [256]u8 = undefined;
+        var takes_len: usize = 0;
+        /// The kind's answers, asked before the pick opens (so an argument
+        /// nobody offers anything for is typed instead) and listened to
+        /// once it has.
+        var asked: ?weft.Fire = null;
+        var listening: ?weft.Listening = null;
+
+        /// Open the picker for this argument when there is something to
+        /// choose from; false when there is not.
+        fn choose(what: []const u8, pname: []const u8, label: []const u8) bool {
+            if (what.len > takes_buf.len) return false;
+            @memcpy(takes_buf[0..what.len], what);
+            takes_len = what.len;
+            const closed = arg_values.values(what) != null;
+            if (!closed) asked = arg_values.ask(what, name_buf[0..name_len], pname) orelse return false;
+            const spec: weft.SearchSpec = .{
+                .prompt = label,
+                // A kind is also what the rows ARE, so whoever annotates
+                // files or commands notes these too.
+                .category = if (closed) "" else what,
+                .free_text = true,
+                .per_query = false,
+                .matched = false,
+            };
+            if (weft.search(spec, offerValues, takeValue)) return true;
+            if (asked) |f| f.deinit();
+            asked = null;
+            return false;
+        }
+
+        fn offerValues(_: []const u8, feed: weft.Feed) void {
+            if (arg_values.values(takes_buf[0..takes_len])) |listed| {
+                var it = listed;
+                while (it.next()) |v| {
+                    if (v.len > 0 and !feed.push(v, "")) break;
+                }
+                return feed.done();
+            }
+            const f = asked orelse return feed.done();
+            asked = null;
+            listening = weft.listenWith(weft.Feed, feed, f, Offered);
+        }
+
+        const Offered = struct {
+            pub fn answer(feed: weft.Feed, payload: []const u8, _: []const u8) void {
+                var rows = arg_values.rowsOf(payload) orelse return;
+                while (rows.next()) |r| {
+                    if (!feed.push(r.text, r.doc)) return;
+                }
+            }
+        };
+
+        fn takeValue(answer: weft.Answer) void {
+            if (listening) |l| l.stop();
+            listening = null;
+            switch (answer) {
+                .cancelled => onCancel(),
+                .chosen, .typed => |text| onArg(trim(text)),
+            }
         }
 
         fn onArg(text: []const u8) void {

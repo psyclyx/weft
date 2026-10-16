@@ -84,7 +84,7 @@ pub fn registerCursorCommands(
     _ = try commands.bind(gpa, "cursor.set-style", .{
         .name = "cursor.set-style",
         .summary = "Set a mode's caret style: block, bar or underline.",
-        .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "style", .type = .string } },
+        .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "style", .type = .string, .takes = "block|bar|underline" } },
         .handler = cursor_config.setCursorHandler,
         .data = cursor_cfg,
         .meta = .{ .internal = true },
@@ -92,7 +92,7 @@ pub fn registerCursorCommands(
     _ = try commands.bind(gpa, "cursor.set-place", .{
         .name = "cursor.set-place",
         .summary = "Set whether a mode draws the caret at the selection's head or inside it on its last character.",
-        .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "place", .type = .string } },
+        .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "place", .type = .string, .takes = core.command.ArgSpec.oneOf(@import("weft_gfx").view.CaretPlace) } },
         .handler = cursor_config.cursorPlaceHandler,
         .data = cursor_cfg,
         .meta = .{ .internal = true },
@@ -100,7 +100,7 @@ pub fn registerCursorCommands(
     _ = try commands.bind(gpa, "cursor.set-blink", .{
         .name = "cursor.set-blink",
         .summary = "Turn caret blinking on or off for a mode.",
-        .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "state", .type = .string } },
+        .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "state", .type = .string, .takes = "on|off" } },
         .handler = cursor_config.cursorBlinkHandler,
         .data = cursor_cfg,
         .meta = .{ .internal = true },

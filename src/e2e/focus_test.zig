@@ -525,9 +525,9 @@ test "e2e/focus: ide.js — over a focused row, a picker, a prompt and snipe's c
     try t.expect(!ed.pick.active);
 
     // A one-line prompt over the row: the palette asking a chosen command
-    // for its argument.
+    // for an argument nothing offers values for (a new name is typed).
     ed.press("C-S-p", "");
-    ed.typeText("Set Chrome Style");
+    ed.typeText("New Named Buffer");
     ed.press("Return", "");
     try t.expectEqualStrings("palette-arg", ed.mode());
     ed.typeText("zz");

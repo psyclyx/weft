@@ -169,8 +169,10 @@ pub const Resources = struct {
         name: []u8,
         summary: []u8 = &.{},
         /// The declared parameter list, as written: space-separated names, each
-        /// bare (required) or bracketed (`[preset]`, optional). Owned; the
-        /// `ArgSpec` names below borrow slices of it.
+        /// bare (required) or bracketed (`[preset]`, optional), each optionally
+        /// saying what it takes after a colon (`access:read|edit`,
+        /// `target:file` — `ArgSpec.takes`). Owned; the `ArgSpec` names below
+        /// borrow slices of it.
         params: []u8 = &.{},
         args: []command_mod.ArgSpec = &.{},
         /// How it maps over several extents (`declare_arity`), null undeclared;
@@ -198,10 +200,13 @@ pub const Resources = struct {
             var i: usize = 0;
             while (it.next()) |tok| : (i += 1) {
                 const optional = tok.len >= 2 and tok[0] == '[' and tok[tok.len - 1] == ']';
+                const inner = if (optional) tok[1 .. tok.len - 1] else tok;
+                const colon = std.mem.indexOfScalar(u8, inner, ':');
                 specs[i] = .{
-                    .name = if (optional) tok[1 .. tok.len - 1] else tok,
+                    .name = if (colon) |c| inner[0..c] else inner,
                     .type = .string,
                     .optional = optional,
+                    .takes = if (colon) |c| inner[c + 1 ..] else "",
                 };
             }
             return .{ owned, specs };
@@ -268,3 +273,20 @@ pub const Resources = struct {
         return false;
     }
 };
+
+test "parseParams: a parameter may say what it takes — a kind, or the values" {
+    const gpa = std.testing.allocator;
+    const owned, const specs = try Resources.DeclaredCommand.parseParams(gpa, "access:view|edit|own [target:file] name");
+    defer gpa.free(owned);
+    defer gpa.free(specs);
+    try std.testing.expectEqual(@as(usize, 3), specs.len);
+    try std.testing.expectEqualStrings("access", specs[0].name);
+    try std.testing.expectEqualStrings("view|edit|own", specs[0].kind());
+    try std.testing.expect(!specs[0].optional);
+    try std.testing.expectEqualStrings("target", specs[1].name);
+    try std.testing.expectEqualStrings("file", specs[1].kind());
+    try std.testing.expect(specs[1].optional);
+    // Saying nothing, it takes the kind its name spells.
+    try std.testing.expectEqualStrings("name", specs[2].name);
+    try std.testing.expectEqualStrings("name", specs[2].kind());
+}

@@ -73,6 +73,7 @@ const Library = enum {
     sessions,
     files,
     annotate,
+    args,
     gutter,
     rowkey,
     regex,
@@ -95,6 +96,7 @@ const Library = enum {
             .sessions => "weft_sessions",
             .files => "weft_files",
             .annotate => "weft_annotate",
+            .args => "weft_args",
             .gutter => "weft_gutter",
             .rowkey => "weft_rowkey",
             .regex => "weft_regex",
@@ -121,7 +123,9 @@ const Library = enum {
             // `offers` is the one READING of a context's offers (pinned
             // first, then arranged by `affordances`) that the offers
             // projection and the palette share.
-            .annotate, .gutter, .statusline, .output, .files, .prompt, .search, .labels, .offers => .service_presentation,
+            // `args` is the `arg/<kind>` slots' schema and both halves: what
+            // an argument can be, asked of whoever answers its kind.
+            .annotate, .args, .gutter, .statusline, .output, .files, .prompt, .search, .labels, .offers => .service_presentation,
             // `menu` is a menu's behaviour, scene and interaction — what the
             // context menu and the menubar share (doc/chrome.md §2).
             .invoke, .menu => .interaction_orchestration,
@@ -136,7 +140,7 @@ const Library = enum {
     /// asks for a missing argument the same way, and there is one of those.
     fn deps(self: Library) []const Library {
         return switch (self) {
-            .invoke => &.{.prompt},
+            .invoke => &.{ .prompt, .args },
             .ex => &.{ .prompt, .invoke },
             .search => &.{.regex},
             .offers => &.{.affordances},
@@ -421,6 +425,9 @@ const guests = [_]Guest{
     // A diagnostics source without a language server: rows set by a test,
     // announced by the `diagnostics` signal, read by the problems panel.
     .{ .name = "diagfeed", .import = "guest_diagfeed_wasm", .install = false },
+    // Commands whose argument says what it takes (a late kind, a kind, a
+    // listed set), for the asker's choice tests.
+    .{ .name = "argtest", .import = "guest_argtest_wasm", .install = false },
     // The Files conformance gate's fixture (src/e2e/grammar_test.zig): a
     // synthetic third-party input grammar binding only standard protocol
     // intentions (doc/configuration.md §5.1).
@@ -458,7 +465,7 @@ const guests = [_]Guest{
     .{ .name = "edit", .import = "guest_edit_wasm", .install = true },
     .{ .name = "complete", .import = "guest_complete_wasm", .install = true },
     .{ .name = "project", .import = "guest_project_wasm", .install = true },
-    .{ .name = "palette", .import = "guest_palette_wasm", .install = true, .libraries = &.{ .invoke, .offers } },
+    .{ .name = "palette", .import = "guest_palette_wasm", .install = true, .libraries = &.{ .invoke, .offers, .args } },
     .{ .name = "structural", .import = "guest_structural_wasm", .install = true },
     .{ .name = "ts", .import = "guest_ts_wasm", .install = true },
     .{ .name = "region", .import = "guest_region_wasm", .install = true },
@@ -495,7 +502,7 @@ const guests = [_]Guest{
     // Pick-row annotations (doc/marginalia.md): binds `ui/pick-annotate` and
     // answers with a note per row. No commands, no core privilege.
     .{ .name = "marginalia", .import = "guest_marginalia_wasm", .install = true, .libraries = &.{.annotate} },
-    .{ .name = "files", .import = "guest_files_wasm", .install = true, .libraries = &.{.files} },
+    .{ .name = "files", .import = "guest_files_wasm", .install = true, .libraries = &.{ .files, .args } },
     .{ .name = "helix", .import = "guest_helix_wasm", .install = true, .libraries = &.{ .ex, .prompt, .regex, .search, .labels } },
     .{ .name = "emacs", .import = "guest_emacs_wasm", .install = true },
     // The conventional, non-modal grammar config/ide.js drives (doc/configs.md §3.2).

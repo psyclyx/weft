@@ -209,6 +209,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_command_arity", .handler = commands.hCommandArity },
     .{ .name = "wl_command_arity_required", .handler = commands.hCommandArityRequired },
     .{ .name = "wl_command_arg", .handler = commands.hCommandArg },
+    .{ .name = "wl_command_arg_takes", .handler = commands.hCommandArgTakes },
     .{ .name = "wl_command_meta", .handler = commands.hCommandMeta },
     .{ .name = "wl_keys_for", .handler = commands.hKeysFor },
     .{ .name = "wl_command_at", .handler = commands.hCommandAt },
@@ -440,6 +441,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_slot_result", .handler = slot.hSlotResult },
     .{ .name = "wl_slot_result_provider", .handler = slot.hSlotResultProvider },
     .{ .name = "wl_slot_finish", .handler = slot.hSlotFinish },
+    .{ .name = "wl_slot_name", .handler = slot.hSlotName },
 };
 
 /// Zip `contract_data.imports` (data) with `handlers` (binding) by NAME —

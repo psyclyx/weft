@@ -480,6 +480,24 @@ pub fn hCommandArg(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), cmd.args[k].name) catch 0);
 }
 
+/// `wl_command_arg_takes(i, k, out, cap)`: what the `i`-th command's `k`-th
+/// argument takes (`ArgSpec.kind`) — a kind, or `|`-separated values — into
+/// guest memory, or -1. What an asker offers candidates from.
+pub fn hCommandArgTakes(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const n: command.Commands.Name = @enumFromInt(@as(usize, @intCast(args[0])));
+    const cmd = p.activeCtx().commands.lookup(n) orelse {
+        results[0] = -1;
+        return;
+    };
+    const k: usize = @intCast(@max(args[1], 0));
+    if (k >= cmd.args.len) {
+        results[0] = -1;
+        return;
+    }
+    results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), cmd.args[k].kind()) catch 0);
+}
+
 /// Command dispatch back into the guest: stash the args (readable via
 /// `wl_arg_*`), reset the result, run `on_command(id)`, and return whatever
 /// result the guest set (`wl_set_result_*`, default nil). String results

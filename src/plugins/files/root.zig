@@ -18,6 +18,7 @@
 const std = @import("std");
 const weft = @import("weft");
 const files_guest = @import("weft_files_adapter");
+const args = @import("weft_args");
 
 var plugin: files_guest.Plugin = undefined;
 
@@ -189,6 +190,71 @@ fn stopFinding() void {
     finding = null;
 }
 
+// ── arg/file ────────────────────────────────────────────────────────
+
+/// An argument that takes a file is offered the files of the place it is
+/// asked in: the same walk Open File lists, answered in parts as it finds
+/// them. Paths are relative to the place, which is what a command handed a
+/// typed name reads it against.
+fn on_slot_fire(session: i32) callconv(.c) void {
+    _ = args.question(@bitCast(session)) orelse return;
+    const id: u32 = @bitCast(session);
+    const w = weft.walkWith(u32, id, .{}, Offering) orelse {
+        args.answer(id, &.{});
+        return;
+    };
+    Offering.live.append(weft.allocator, .{ .session = id, .walk = w }) catch w.stop();
+}
+
+const Offering = struct {
+    /// The walks answering an asker that is still asking.
+    var live: std.ArrayList(struct { session: u32, walk: weft.Walk }) = .empty;
+    /// The part found since the last answer: each path's end in `bytes`.
+    var ends: std.ArrayList(usize) = .empty;
+    var bytes: std.ArrayList(u8) = .empty;
+
+    pub fn path(_: u32, rel: []const u8) void {
+        bytes.appendSlice(weft.allocator, rel) catch return;
+        ends.append(weft.allocator, bytes.items.len) catch return;
+    }
+    pub fn drained(session: u32) void {
+        // The asker finished its question (chose, typed, or backed out):
+        // nothing more is wanted, so the walk stops here.
+        if (weft.slotName(session) == null) return forget(session, true);
+        flush(session);
+    }
+    pub fn end(session: u32, _: bool) void {
+        flush(session);
+        forget(session, false);
+    }
+
+    fn flush(session: u32) void {
+        defer {
+            ends.clearRetainingCapacity();
+            bytes.clearRetainingCapacity();
+        }
+        if (ends.items.len == 0) return;
+        const rows = weft.allocator.alloc(args.Row, ends.items.len) catch return;
+        defer weft.allocator.free(rows);
+        var from: usize = 0;
+        for (ends.items, rows) |stop, *r| {
+            r.* = .{ .text = bytes.items[from..stop] };
+            from = stop;
+        }
+        args.answer(session, rows);
+    }
+
+    fn forget(session: u32, stop: bool) void {
+        ends.clearRetainingCapacity();
+        bytes.clearRetainingCapacity();
+        for (live.items, 0..) |o, i| if (o.session == session) {
+            _ = live.swapRemove(i);
+            if (stop) o.walk.stop();
+            return;
+        };
+    }
+};
+
 fn openChosen(answer: weft.Answer) void {
     stopFinding();
     const trimmed = std.mem.trim(u8, answer.text(), " \t");
@@ -197,6 +263,7 @@ fn openChosen(answer: weft.Answer) void {
 
 fn start() void {
     places_arena = std.heap.ArenaAllocator.init(weft.allocator);
+    args.offer("file");
     _ = weft.designationOpener("places", "files.places");
     files_guest.Plugin.provideRowVerbs();
     plugin = .init(weft.allocator);
@@ -266,4 +333,5 @@ comptime {
     weft.exportCallback("on_semantic_field_edit", &on_semantic_field_edit);
     weft.exportCallback("on_signal", &on_signal);
     weft.exportCallback("on_context_changed", &onContextChanged);
+    weft.exportCallback("on_slot_fire", &on_slot_fire);
 }

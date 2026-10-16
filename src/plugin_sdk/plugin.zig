@@ -168,8 +168,9 @@ pub const Hooks = struct {
     /// here; ids with the top bit set are the SDK's.
     pick: ?*const fn (pick_id: u32) void = null,
     /// Something this plugin holds is ready (`on_poll`). Processes it started
-    /// with `weft.spawn` and walks started with `weft.walk` are served first,
-    /// by the SDK; this hook gets the rest.
+    /// with `weft.spawn`, walks started with `weft.walk` and slots listened
+    /// to with `weft.listen` are served first, by the SDK; this hook gets the
+    /// rest.
     poll: ?*const fn () void = null,
 };
 
@@ -298,6 +299,7 @@ pub fn plugin(comptime cmds: []const Entry, comptime hooks: Hooks) type {
         fn onPoll() callconv(.c) void {
             @import("process.zig").pump();
             @import("walk.zig").pump();
+            @import("answers.zig").pump();
             if (hooks.poll) |f| f();
         }
 

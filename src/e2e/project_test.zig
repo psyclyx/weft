@@ -1260,6 +1260,82 @@ test "e2e/files: Open File lists the place as it is walked, and the chosen row o
     try t.expect(std.mem.endsWith(u8, ed.bufferName(), "found.zig"));
 }
 
+// An argument that says what it TAKES is chosen, not spelled: the asker is
+// the picker every list uses, its rows the values the declaration lists, or
+// what whoever answers the argument's kind offers — at once (the palette's
+// commands) or as it finds them (the files plugin's walk of the place). A
+// value nobody offered can still be typed; backing out runs nothing.
+test "e2e/args: an argument is chosen from what it takes — listed values, a kind answered at once, a kind walked" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+    // The palette asks for what a short call left out, and answers `arg/command`.
+    try ed.load("palette", h.bundled_plugins.get("palette").?);
+    try h.loadArgtest(&ed);
+    {
+        const r = try proj.oracle("mkdir -p src/deep && printf 'x' > top.txt && printf 'x' > src/deep/found.zig");
+        gpa.free(r);
+    }
+
+    // Listed values: exactly those, narrowed as you type.
+    ed.invoke("argtest.paint");
+    ed.settle(2);
+    try t.expect(ed.pick.active);
+    try t.expectEqualStrings("argtest.paint <color>", ed.pick.prompt);
+    try t.expectEqual(@as(usize, 3), ed.pick.items.items.len);
+    ed.typeText("gre");
+    try t.expect(try waitPick(&ed, "green", "red"));
+    ed.run("pick.accept");
+    ed.settle(2);
+    try t.expectEqualStrings("painted green", ed.echoText());
+
+    // A kind answered at once: the palette offers the commands.
+    ed.invoke("argtest.run");
+    ed.settle(2);
+    try t.expect(ed.pick.active);
+    try t.expect(try waitPick(&ed, "argtest.paint", ""));
+    ed.typeText("argtest.pa");
+    try t.expect(try waitPick(&ed, "argtest.paint", "argtest.open"));
+    ed.run("pick.accept");
+    ed.settle(2);
+    try t.expectEqualStrings("ran argtest.paint", ed.echoText());
+
+    // A kind answered as it is found: the files of the place, walked.
+    ed.invoke("argtest.open");
+    ed.settle(2);
+    try t.expect(ed.pick.active);
+    try t.expect(try waitPick(&ed, "src/deep/found.zig", ""));
+    try t.expect(try waitPick(&ed, "top.txt", ""));
+    ed.typeText("found");
+    try t.expect(try waitPick(&ed, "src/deep/found.zig", "top.txt"));
+    ed.run("pick.accept");
+    ed.settle(2);
+    try t.expectEqualStrings("opened src/deep/found.zig", ed.echoText());
+
+    // A value nobody offered is still an answer.
+    ed.invoke("argtest.paint");
+    ed.settle(2);
+    ed.typeText("mauve");
+    try t.expect(try waitPick(&ed, "", ""));
+    ed.run("pick.accept");
+    ed.settle(2);
+    try t.expectEqualStrings("painted mauve", ed.echoText());
+
+    // Backing out runs nothing.
+    ed.invoke("argtest.paint");
+    ed.settle(2);
+    ed.run("pick.cancel");
+    ed.settle(2);
+    try t.expect(!ed.pick.active);
+    try t.expectEqualStrings("painted mauve", ed.echoText());
+}
+
 // A search with many matches once found NONE: the exec door refused to hand
 // back a window of an output bigger than the reader's buffer, and the empty
 // answer looked like "no matches". And once it was read, filling *grep* with

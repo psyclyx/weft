@@ -95,7 +95,7 @@ pub fn register(gpa: std.mem.Allocator, commands: *core.command.Commands) !void 
     _ = try commands.bind(gpa, "theme.set-chrome", .{
         .name = "theme.set-chrome",
         .summary = "Switch how the editor's chrome looks, live: text, text with icons, or widgets.",
-        .args = &.{.{ .name = "style", .type = .string }},
+        .args = &.{.{ .name = "style", .type = .string, .takes = "text|text-icons|widget" }},
         .handler = setChromeHandler,
         .meta = .{ .label = "Set Chrome Style", .icon = "palette", .prompts = true },
     });

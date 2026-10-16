@@ -134,6 +134,7 @@ pub extern "weft:abi/1" fn wl_command_owner(i: u32, out_ptr: u32, out_cap: u32) 
 pub extern "weft:abi/1" fn wl_command_arity(i: u32) i32;
 pub extern "weft:abi/1" fn wl_command_arity_required(i: u32) i32;
 pub extern "weft:abi/1" fn wl_command_arg(i: u32, k: u32, out_ptr: u32, out_cap: u32) i32;
+pub extern "weft:abi/1" fn wl_command_arg_takes(i: u32, k: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_command_meta(name: u32, name_len: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_keys_for(name: u32, name_len: u32, out_ptr: u32, out_cap: u32) i32;
 pub extern "weft:abi/1" fn wl_command_at(where: u32, name: u32, name_len: u32, out_ptr: u32, out_cap: u32) i32;
@@ -354,6 +355,7 @@ pub extern "weft:abi/1" fn wl_slot_done(session: i32) i32;
 pub extern "weft:abi/1" fn wl_slot_result(session: i32, index: u32, ptr: u32, cap: u32) i32;
 pub extern "weft:abi/1" fn wl_slot_result_provider(session: i32, index: u32, ptr: u32, cap: u32) i32;
 pub extern "weft:abi/1" fn wl_slot_finish(session: i32) void;
+pub extern "weft:abi/1" fn wl_slot_name(session: i32, ptr: u32, cap: u32) i32;
 
 fn ZigType(comptime v: contract_data.ValType) type {
     return switch (v) {

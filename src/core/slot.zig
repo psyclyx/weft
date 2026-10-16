@@ -21,6 +21,7 @@ const Allocator = std.mem.Allocator;
 const container_mod = @import("container.zig");
 const facts_mod = @import("weft_facts");
 const schema_mod = @import("weft_schema");
+const task = @import("task.zig");
 
 pub const Schema = schema_mod.Schema;
 pub const Facts = facts_mod.Facts;
@@ -89,6 +90,10 @@ pub const Session = struct {
     outstanding: usize,
     results: std.ArrayList(Result) = .empty,
     fresh: usize = 0,
+    /// Results the guest that fired this has been told of (`on_poll`) — so a
+    /// provider answering LATE (a walk, a server) wakes its asker once per
+    /// answer, and an answered session does not keep it polled.
+    heard: usize = 0,
 
     fn deinit(self: *Session, gpa: Allocator) void {
         gpa.free(self.slot);
@@ -120,6 +125,9 @@ pub const SlotHost = struct {
     sessions: std.AutoHashMapUnmanaged(u64, *Session) = .empty,
     next_session: u64 = 1,
     next_provider_seq: u64 = 0,
+    /// Woken when an answer lands, so the asker hears a late one at once
+    /// rather than at the next unrelated wake. Null in a bare fixture.
+    pool: ?*task.Pool = null,
     /// BORROWED (task #19's shared-Container fold-in convention, followed
     /// from day one here rather than retrofitted) — the same
     /// `container.Container` instance `capability.Caps`/`action.Actions`/the
@@ -315,6 +323,7 @@ pub const SlotHost = struct {
         errdefer gpa.free(restamped);
         try s.results.append(gpa, .{ .provider = try gpa.dupe(u8, from.owner), .payload = restamped });
         s.outstanding -|= 1;
+        if (self.pool) |pool| pool.wakeLoop();
     }
 
     /// A provider that will never answer this session (dead, unsupported).

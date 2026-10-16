@@ -412,6 +412,7 @@ const guest_command_runners = [_]struct { name: []const u8, args: usize }{
     .{ .name = "wl_command_arity", .args = 0 },
     .{ .name = "wl_command_arity_required", .args = 0 },
     .{ .name = "wl_command_arg", .args = 0 },
+    .{ .name = "wl_command_arg_takes", .args = 0 },
     .{ .name = "wl_command_meta", .args = 0 },
     .{ .name = "wl_keys_for", .args = 0 },
     .{ .name = "wl_command_at", .args = 0 },

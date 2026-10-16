@@ -170,6 +170,48 @@ Landed:
   `plugin_lib/prompt`, and a bottom dock row now draws every span it
   has, not just the first.
 
+## 6. Arguments are chosen, not spelled
+
+Landed:
+
+- A command declares what each argument TAKES (`ArgSpec.takes`).
+  - In a plugin's parameter list: `name:kind` (`target:file`) or
+    `name:values` (`access:view|edit|own`).
+  - A bare `name` takes the kind its name spells, so an existing `file`
+    or `command` argument needs no change.
+  - Core commands list their values. They are derived from the enum the
+    handler parses where the names match (`ArgSpec.oneOf`).
+  - `wl_command_arg_takes` reads it.
+- A kind is answered on its own slot, `arg/<kind>`, by whichever plugins
+  answer it (`plugin_lib/args`: one schema, both halves).
+  - The palette answers `command`.
+  - The files plugin answers `file` by walking the place. It answers in
+    parts as the walk finds them, and stops the walk once the asker is
+    done.
+  - A kind nobody answers is the ordinary answer: the argument is typed.
+- A provider of several slots learns which one fired it (`wl_slot_name`).
+  The plugin that fired is woken when a later answer lands, through the
+  slot host's pool and per-plugin `slots_fired`. The SDK hands answers
+  over as they arrive (`weft.listen`).
+- The asker (`plugin_lib/invoke`) opens the picker every list uses
+  whenever an argument has values to offer:
+  - free text is still accepted;
+  - the kind is the pick's category, so annotators note the rows;
+  - rows stream in.
+  An argument with nothing to offer is asked on the prompt bar, as
+  before.
+- A shell command parameter is `command:shell-command`, not an editor
+  command. Nothing answers that kind yet; shell history could.
+
+Left:
+
+- JS plugin commands cannot read their arguments, so a JS command can
+  declare what an argument takes but not use what it is handed.
+- More kinds want answering: `buffer`, `mode`, `fingerprint` (known
+  peers), `register`, `language`.
+- The `:` line's Tab completes command names only. Completing an
+  argument from the same `arg/<kind>` answers is the obvious next use.
+
 ## Left
 
 - **Browse Remote Files** (`fs_source.RemoteDir`) is still a native pick

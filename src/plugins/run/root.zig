@@ -30,7 +30,7 @@ const Cmd = struct {
     summary: []const u8 = "",
 };
 const cmds = [_]weft.CommandEntry{
-    .{ .name = "run.command", .call = runCommand, .arity = .whole, .params = "command", .summary = "Run a shell command, streaming its output into *output*.", .label = "Run Command", .menu = "Terminal", .group = "run", .order = 1, .prompts = true },
+    .{ .name = "run.command", .call = runCommand, .arity = .whole, .params = "command:shell-command", .summary = "Run a shell command, streaming its output into *output*.", .label = "Run Command", .menu = "Terminal", .group = "run", .order = 1, .prompts = true },
     .{ .name = "run.line", .arity = .one, .call = runLine, .summary = "Run the current line as a shell command.", .label = "Run Line", .menu = "Run", .group = "run", .order = 2 },
     .{ .name = "run.visit-output", .call = output.visit, .arity = .one, .summary = "Open the location the focused output row names.", .internal = true },
 };

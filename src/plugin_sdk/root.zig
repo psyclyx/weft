@@ -210,6 +210,10 @@ pub const WalkHandlers = @import("walk.zig").Handlers;
 pub const Walk = @import("walk.zig").Walk;
 pub const walk = @import("walk.zig").walk;
 pub const walkWith = @import("walk.zig").walkWith;
+pub const AnswerHandlers = @import("answers.zig").Handlers;
+pub const Listening = @import("answers.zig").Listening;
+pub const listen = @import("answers.zig").listen;
+pub const listenWith = @import("answers.zig").listenWith;
 pub const execWith = @import("exec.zig").execWith;
 
 // ── ask: a question with a continuation, not a pick id to demux ───────
@@ -1207,6 +1211,14 @@ pub fn commandAt(where: OfferContext, name: []const u8) ?Standing {
 /// asking for the next.
 pub fn commandArg(i: usize, k: usize) ?[]const u8 {
     const n = e.wl_command_arg(@intCast(i), @intCast(k), p(&param_scratch), param_scratch.len);
+    if (n < 0) return null;
+    return read_life.keep(param_scratch[0..@intCast(n)]);
+}
+/// What the `i`-th command's `k`-th argument takes: a kind (`file`,
+/// `command` — answered on the `arg/<kind>` slot) or `|`-separated values
+/// (`read|edit`); its name when it declared neither.
+pub fn commandArgTakes(i: usize, k: usize) ?[]const u8 {
+    const n = e.wl_command_arg_takes(@intCast(i), @intCast(k), p(&param_scratch), param_scratch.len);
     if (n < 0) return null;
     return read_life.keep(param_scratch[0..@intCast(n)]);
 }
@@ -3732,6 +3744,16 @@ pub const Fire = struct {
         e.wl_slot_finish(@bitCast(self.session));
     }
 };
+
+/// The slot a fired session asks (`wl_slot_name`) — for a provider binding
+/// several slots, whose one `on_slot_fire` answers them all. Null for no such
+/// session.
+pub fn slotName(session: u32) ?[]const u8 {
+    var buf: [256]u8 = undefined;
+    const n = e.wl_slot_name(@bitCast(session), p(&buf), buf.len);
+    if (n < 0) return null;
+    return read_life.keep(buf[0..@intCast(n)]);
+}
 
 /// Separate from `slot_scratch` so a caller can hold a payload and its
 /// provider name at the same time — the obvious thing to want, and a shared

@@ -85,6 +85,32 @@ pub const ArgSpec = struct {
     /// then stop at the first optional and still have a legal call, which is
     /// exactly what "ask me for what you still need" needs to know.
     optional: bool = false,
+    /// What values it takes, for whoever asks a person for it: a KIND
+    /// (`file`, `command`, `buffer` — answered by whichever plugins answer the
+    /// `arg/<kind>` slot) or the values themselves, `|`-separated
+    /// (`read|edit`). Empty: the kind its name spells, so a `file` argument
+    /// is offered files without saying so twice. Nothing answering a kind is
+    /// an ordinary answer: the argument is typed.
+    takes: []const u8 = "",
+
+    /// The kind, or `|`-separated values, this argument takes (`takes`).
+    pub fn kind(self: ArgSpec) []const u8 {
+        return if (self.takes.len > 0) self.takes else self.name;
+    }
+
+    /// `takes` for an argument whose handler parses enum `E` by its tag
+    /// names (`std.meta.stringToEnum`): the names, `|`-separated — read off
+    /// the type, so the values offered are the values accepted. `inline` so
+    /// its answer is comptime-known: an `.args = &.{…}` literal using it
+    /// stays a constant rather than becoming a stack temporary that dangles.
+    pub inline fn oneOf(comptime E: type) []const u8 {
+        const joined = comptime blk: {
+            var out: []const u8 = "";
+            for (std.meta.fieldNames(E), 0..) |n, i| out = out ++ (if (i > 0) "|" else "") ++ n;
+            break :blk out;
+        };
+        return joined;
+    }
 };
 
 /// Everything a handler may touch — the whole editor surface, because
