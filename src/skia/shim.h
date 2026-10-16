@@ -8,6 +8,7 @@
 //   - shim.cpp         the canvas, the frame, and the CPU raster backend;
 //   - shim_vulkan.cpp  Ganesh on weft's VkDevice (GrDirectContexts::MakeVulkan);
 //   - shim_gl.cpp      Ganesh on the caller's current OpenGL context.
+// (shim_svg.cpp, beside them, draws an SVG document on the CPU.)
 // Two kinds of frame target, same draw calls: an internal surface the caller
 // reads back (`begin`/`end` — the Vulkan copy and every headless capture), or
 // the caller's own OpenGL framebuffer drawn in place (`begin_framebuffer`/
@@ -113,6 +114,15 @@ const uint8_t* weft_skia_end(WeftSkia*, size_t* row_bytes);
 // Flush and submit a `weft_skia_begin_framebuffer` frame to the GL context;
 // the caller presents it (swaps buffers). Returns 0 on success.
 int weft_skia_flush(WeftSkia*);
+
+// Render the SVG document `svg` (`len` bytes) through Skia's SVG module onto
+// a `width`x`height` RGBA8888 premultiplied buffer of `row_bytes` per row,
+// cleared to transparent first. `width`x`height` is the container relative
+// units resolve against; absolute ones are the document's own. <text> draws
+// nothing (no font manager). Returns 0 on success. (shim_svg.cpp; nothing
+// draws icons through it yet — it is what proves the module is built in.)
+int weft_skia_svg_render(const uint8_t* svg, size_t len, uint32_t width, uint32_t height,
+                         uint8_t* rgba, size_t row_bytes);
 
 #ifdef __cplusplus
 }

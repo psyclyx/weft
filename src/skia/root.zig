@@ -74,6 +74,16 @@ extern fn weft_skia_draw_rrect(s: ?*Shim, rrect: *const RRect) void;
 extern fn weft_skia_clip(s: ?*Shim, on: c_int, x: f32, y: f32, w: f32, h: f32) void;
 extern fn weft_skia_end(s: ?*Shim, row_bytes: *usize) ?[*]const u8;
 extern fn weft_skia_flush(s: ?*Shim) c_int;
+extern fn weft_skia_svg_render(svg: [*]const u8, len: usize, width: u32, height: u32, rgba: [*]u8, row_bytes: usize) c_int;
+
+/// Render the SVG document `svg` through Skia's SVG module onto `rgba`, a
+/// `width`x`height` RGBA8888 premultiplied buffer, cleared to transparent
+/// first. `<text>` draws nothing.
+pub fn renderSvg(svg: []const u8, width: u32, height: u32, rgba: []u8) !void {
+    std.debug.assert(rgba.len == @as(usize, width) * height * 4);
+    if (weft_skia_svg_render(svg.ptr, svg.len, width, height, rgba.ptr, @as(usize, width) * 4) != 0)
+        return error.SkiaSvgFailed;
+}
 
 /// A rasterized frame: pointer into the shim's buffer (valid until the next
 /// `begin`/`deinit`) plus its dimensions and stride.
@@ -234,3 +244,40 @@ pub const Skia = struct {
         if (weft_skia_flush(self.shim) != 0) return error.SkiaFlushFailed;
     }
 };
+
+test "an SVG document draws through Skia's SVG module" {
+    // A vertical stroke with square caps (which reach half the stroke width
+    // past each end point) and a filled circle, each checked where only that
+    // feature puts paint.
+    const svg =
+        \\<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32">
+        \\  <path d="M8 4 L8 12" stroke="#ff0000" stroke-width="4" stroke-linecap="square"/>
+        \\  <circle cx="22" cy="22" r="6" fill="#0000ff"/>
+        \\</svg>
+    ;
+    var rgba: [32 * 32 * 4]u8 = undefined;
+    try renderSvg(svg, 32, 32, &rgba);
+    const px = struct {
+        fn at(buf: []const u8, x: usize, y: usize) [4]u8 {
+            return buf[(y * 32 + x) * 4 ..][0..4].*;
+        }
+    }.at;
+    const red: [4]u8 = .{ 255, 0, 0, 255 };
+    const blue: [4]u8 = .{ 0, 0, 255, 255 };
+    const clear: [4]u8 = .{ 0, 0, 0, 0 };
+    try std.testing.expectEqual(red, px(&rgba, 8, 8)); // the stroke
+    try std.testing.expectEqual(red, px(&rgba, 7, 2)); // the top cap: y 2..4
+    try std.testing.expectEqual(red, px(&rgba, 9, 13)); // the bottom cap: y 12..14
+    try std.testing.expectEqual(clear, px(&rgba, 8, 1)); // past the cap
+    try std.testing.expectEqual(clear, px(&rgba, 8, 14));
+    try std.testing.expectEqual(clear, px(&rgba, 5, 8)); // beside the stroke: x 6..10
+    try std.testing.expectEqual(blue, px(&rgba, 22, 22)); // the circle
+    try std.testing.expectEqual(blue, px(&rgba, 22, 17));
+    try std.testing.expectEqual(clear, px(&rgba, 22, 29)); // r 6: y 16..28
+    try std.testing.expectEqual(clear, px(&rgba, 31, 31));
+}
+
+test "a document that is not SVG is an error, not a blank" {
+    var rgba: [4 * 4 * 4]u8 = undefined;
+    try std.testing.expectError(error.SkiaSvgFailed, renderSvg("not svg", 4, 4, &rgba));
+}

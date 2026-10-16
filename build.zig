@@ -1034,6 +1034,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(platform_tests).step);
     b.step("test-platform", "Run the platform module's tests (contract, keysyms, pointer, clipboard)").dependOn(&b.addRunArtifact(platform_tests).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = font_ttc_mod })).step);
+    // The Skia binding's own tests: the SVG module drawing a document.
+    const skia_tests = b.addRunArtifact(b.addTest(.{ .root_module = skia_mod }));
+    test_step.dependOn(&skia_tests.step);
+    b.step("test-skia", "Run the Skia binding's tests (Skia itself compiled from source)").dependOn(&skia_tests.step);
     // The GL binding owns its tests too (an offscreen context comes up and
     // resolves GL), in a build that renders through it.
     if (gl_mod) |mod| test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mod })).step);
@@ -1886,8 +1890,9 @@ fn addHostTestDirs(b: *std.Build, mod: *std.Build.Module) void {
 
 /// Skia: compiled from its pinned source by Zig (src/skia/library.zig), and
 /// the C++ shim (src/skia/) compiled against it. The shim is the drawing unit,
-/// and the one backend this build renders through (`shim_vulkan.cpp` or
-/// `shim_gl.cpp`); only the C ABI in shim.h crosses to Zig.
+/// the one backend this build renders through (`shim_vulkan.cpp` or
+/// `shim_gl.cpp`) and the SVG check (`shim_svg.cpp`); only the C ABI in
+/// shim.h crosses to Zig.
 ///
 /// Everything C++ here is Zig's: its clang compiles Skia and the shim alike
 /// against its own libc++, which is the one C++ runtime linked — on Linux and
@@ -1914,6 +1919,7 @@ fn addSkia(b: *std.Build, mod: *std.Build.Module, gpu: Gpu, macos_sdk: ?[]const 
     mod.addCSourceFiles(.{
         .files = &.{
             "src/skia/shim.cpp",
+            "src/skia/shim_svg.cpp",
             switch (gpu) {
                 .vulkan => "src/skia/shim_vulkan.cpp",
                 .opengl => "src/skia/shim_gl.cpp",
