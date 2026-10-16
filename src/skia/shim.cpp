@@ -12,19 +12,19 @@
 #include <algorithm>
 #include <new>
 
-#include "core/SkBlurTypes.h"
-#include "core/SkColorSpace.h"
-#include "core/SkData.h"
-#include "core/SkFont.h"
-#include "core/SkImageInfo.h"
-#include "core/SkMaskFilter.h"
-#include "core/SkPaint.h"
-#include "core/SkPathBuilder.h"
-#include "core/SkRRect.h"
-#include "gpu/GpuTypes.h"
-#include "gpu/ganesh/GrTypes.h"
-#include "gpu/ganesh/SkSurfaceGanesh.h"
-#include "ports/SkFontMgr_empty.h"
+#include "include/core/SkBlurTypes.h"
+#include "include/core/SkColorSpace.h"
+#include "include/core/SkData.h"
+#include "include/core/SkFont.h"
+#include "include/core/SkImageInfo.h"
+#include "include/core/SkMaskFilter.h"
+#include "include/core/SkPaint.h"
+#include "include/core/SkPathBuilder.h"
+#include "include/core/SkRRect.h"
+#include "include/gpu/GpuTypes.h"
+#include "include/gpu/ganesh/GrTypes.h"
+#include "include/gpu/ganesh/SkSurfaceGanesh.h"
+#include "include/ports/SkFontMgr_empty.h"
 
 static_assert(sizeof(WeftSkiaPathCommand) == 28);
 static_assert(sizeof(WeftSkiaPathStyle) == 40);

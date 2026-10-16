@@ -5,10 +5,10 @@
 #include "shim.h"
 #include "shim_state.h"
 
-#include "gpu/ganesh/vk/GrVkDirectContext.h"
-#include "gpu/vk/VulkanBackendContext.h"
-#include "gpu/vk/VulkanExtensions.h"
-#include "third_party/vulkan/vulkan/vulkan_core.h"
+#include "include/gpu/ganesh/vk/GrVkDirectContext.h"
+#include "include/gpu/vk/VulkanBackendContext.h"
+#include "include/gpu/vk/VulkanExtensions.h"
+#include "include/third_party/vulkan/vulkan/vulkan_core.h"
 
 extern "C" WeftSkia* weft_skia_create_vulkan(const WeftSkiaVulkan* vk, int bgra) {
     if (!vk || !vk->get_instance_proc_addr) return nullptr;

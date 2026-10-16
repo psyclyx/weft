@@ -1,5 +1,6 @@
 const std = @import("std");
 const plugin_lib_tiers = @import("src/plugin_lib/tiers.zig");
+const skia_library = @import("src/skia/library.zig");
 
 /// One wasm guest: a shipped plugin (`src/plugins/<name>/root.zig`) or a test
 /// fixture (`src/plugin_fixtures/<name>.zig`).
@@ -533,10 +534,10 @@ const guests = [_]Guest{
 
 /// The GPU API Skia renders through (`-Dgpu`). Exactly one is compiled in:
 /// it decides the window's target, the headless target the e2e suite reads
-/// back, and which half of the Skia shim is linked. Vulkan presents to
-/// Wayland; OpenGL presents to Wayland through EGL and to Cocoa through
-/// NSOpenGL, and is the only API on macOS (nixpkgs' Darwin Skia has no
-/// Vulkan, and Vulkan there would mean MoltenVK).
+/// back, and which of Skia's Ganesh backends (and which half of the shim) is
+/// compiled. Vulkan presents to Wayland; OpenGL presents to Wayland through
+/// EGL and to Cocoa through NSOpenGL, and is the only API on macOS (Vulkan
+/// there would mean MoltenVK).
 const Gpu = enum { vulkan, opengl };
 
 pub fn build(b: *std.Build) void {
@@ -630,7 +631,7 @@ pub fn build(b: *std.Build) void {
     // The compiled C++ shim rides with the module that DECLARES these externs,
     // so it enters a link exactly once no matter how many modules import it.
     // Attaching it per-consumer instead gives duplicate symbol definitions.
-    addSkia(b, skia_mod, gpu, os);
+    addSkia(b, skia_mod, gpu, macos_sdk);
     const text_mod = b.createModule(.{
         .root_source_file = b.path("src/text/root.zig"),
         .target = target,
@@ -1883,71 +1884,49 @@ fn addHostTestDirs(b: *std.Build, mod: *std.Build.Module) void {
     }
 }
 
-/// Skia: compile the C++ shim (src/skia/) against Skia's headers, then link it
-/// with libskia. Resolved via **pkg-config** (Skia ships a `skia.pc`) — no env
-/// var; skia is a shell.nix buildInput, so its pkgconfig is on PKG_CONFIG_PATH,
-/// the same idiom every other dep uses. The shim is the drawing unit plus the
-/// one backend this build renders through (`shim_vulkan.cpp` or
+/// Skia: compiled from its pinned source by Zig (src/skia/library.zig), and
+/// the C++ shim (src/skia/) compiled against it. The shim is the drawing unit,
+/// and the one backend this build renders through (`shim_vulkan.cpp` or
 /// `shim_gl.cpp`); only the C ABI in shim.h crosses to Zig.
 ///
-/// The compiler follows the C++ runtime Skia was built against, because the
-/// shim shares objects with it:
-/// - Linux: g++ (not Zig's clang), so the shim resolves GNU libstdc++'s ABI —
-///   which Skia's Ganesh Vulkan init requires (it hands Skia a std::function);
-///   the real libstdc++.so is linked positionally.
-/// - macOS: Zig's clang against the SDK's libc++ headers, linked to the
-///   system libc++ — the one nixpkgs' Darwin Skia links. Zig's own bundled
-///   libc++ would be a second copy with its own allocator and globals.
-fn addSkia(b: *std.Build, mod: *std.Build.Module, gpu: Gpu, os: std.Target.Os.Tag) void {
-    const sources = [_][]const u8{
-        "src/skia/shim.cpp",
-        switch (gpu) {
-            .vulkan => "src/skia/shim_vulkan.cpp",
-            .opengl => "src/skia/shim_gl.cpp",
-        },
+/// Everything C++ here is Zig's: its clang compiles Skia and the shim alike
+/// against its own libc++, which is the one C++ runtime linked — on Linux and
+/// macOS, native or cross.
+fn addSkia(b: *std.Build, mod: *std.Build.Module, gpu: Gpu, macos_sdk: ?[]const u8) void {
+    const vma = switch (gpu) {
+        .vulkan => b.lazyDependency("vulkan_memory_allocator", .{}) orelse return,
+        .opengl => null,
     };
-    // Skia's include dir (`include/skia`) from its pkg-config.
-    const includes = b.run(&.{ "pkg-config", "--cflags-only-I", "skia" });
-    // -fno-exceptions/-fno-rtti match how nixpkgs builds Skia and keep the
-    // shim from pulling the unwinder (_Unwind_Resume) into the Zig link.
-    const common = [_][]const u8{ "-std=c++17", "-O2", "-fno-rtti", "-fno-exceptions" };
-
-    if (os == .macos) {
-        // nixpkgs keeps the system libc++ (its headers, and the stub for
-        // /usr/lib/libc++.1.dylib) beside the SDK rather than in it.
-        const libcxx = b.graph.environ_map.get("WEFT_LIBCXX") orelse
-            @panic("WEFT_LIBCXX not set — build inside the nix shell");
-        var flags: std.ArrayList([]const u8) = .empty;
-        flags.appendSlice(b.allocator, &common) catch @panic("OOM");
-        // `-I`, not `-isystem`: libc++'s headers must be searched before the C
-        // library's, and Zig's own libc directories are system ones.
-        flags.appendSlice(b.allocator, &.{ "-nostdinc++", "-I", b.pathJoin(&.{ libcxx, "include/c++/v1" }) }) catch @panic("OOM");
-        var it = std.mem.tokenizeAny(u8, includes, " \t\r\n");
-        while (it.next()) |tok| flags.append(b.allocator, b.dupe(tok)) catch @panic("OOM");
-        mod.addCSourceFiles(.{ .files = &sources, .flags = flags.items });
-        // Positionally, as Linux does with libstdc++: `linkSystemLibrary("c++")`
-        // would mean Zig's bundled libc++.
-        mod.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ libcxx, "lib/libc++.1.tbd" }) });
-    } else {
-        // libstdc++'s real path — `zig cc`'s `-lstdc++` substitutes LLVM libc++
-        // (missing the GNU symbols), so link the real .so positionally instead;
-        // lld adds it as a DT_NEEDED, resolved at run time via LD_LIBRARY_PATH.
-        const libstdcpp = std.mem.trim(u8, b.run(&.{ "g++", "-print-file-name=libstdc++.so" }), " \t\r\n");
-        for (sources) |source| {
-            const cc = b.addSystemCommand(&.{ "g++", "-c", "-fPIC" });
-            cc.addArgs(&common);
-            var it = std.mem.tokenizeAny(u8, includes, " \t\r\n");
-            while (it.next()) |tok| cc.addArg(b.dupe(tok));
-            cc.addFileArg(b.path(source));
-            // Edits to the shared private header must rebuild every unit.
-            cc.addFileInput(b.path("src/skia/shim_state.h"));
-            cc.addFileInput(b.path("src/skia/shim.h"));
-            cc.addArg("-o");
-            mod.addObjectFile(cc.addOutputFileArg(b.fmt("{s}.o", .{std.fs.path.stem(source)})));
-        }
-        mod.addObjectFile(.{ .cwd_relative = libstdcpp });
-    }
-    mod.linkSystemLibrary("skia", .{}); // -L/-lskia from pkg-config
+    const skia = skia_library.build(b, .{
+        .target = mod.resolved_target.?,
+        .backend = switch (gpu) {
+            .vulkan => .vulkan,
+            .opengl => .opengl,
+        },
+        .source = b.dependency("skia", .{}),
+        .vma = vma,
+        .macos_sdk = macos_sdk,
+    });
+    var flags: std.ArrayList([]const u8) = .empty;
+    flags.appendSlice(b.allocator, &skia_library.cxx_flags) catch @panic("OOM");
+    flags.appendSlice(b.allocator, skia.public_flags) catch @panic("OOM");
+    mod.addIncludePath(skia.root);
+    mod.addCSourceFiles(.{
+        .files = &.{
+            "src/skia/shim.cpp",
+            switch (gpu) {
+                .vulkan => "src/skia/shim_vulkan.cpp",
+                .opengl => "src/skia/shim_gl.cpp",
+            },
+        },
+        .flags = flags.items,
+        .language = .cpp,
+    });
+    mod.link_libcpp = true;
+    mod.linkLibrary(skia.library);
+    for (skia_library.system_libraries) |name| mod.linkSystemLibrary(name, .{});
+    if (macos_sdk) |sdk| addMacosSdk(b, mod, sdk);
+    for (skia.frameworks) |name| mod.linkFramework(name, .{});
 }
 
 /// Built once and shared by every module `addSyntax` touches. It must be ONE

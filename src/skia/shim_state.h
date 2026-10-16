@@ -9,13 +9,13 @@
 #include <unordered_map>
 #include <vector>
 
-#include "core/SkCanvas.h"
-#include "core/SkColor.h"
-#include "core/SkFontMgr.h"
-#include "core/SkFontTypes.h"
-#include "core/SkSurface.h"
-#include "core/SkTypeface.h"
-#include "gpu/ganesh/GrDirectContext.h"
+#include "include/core/SkCanvas.h"
+#include "include/core/SkColor.h"
+#include "include/core/SkFontMgr.h"
+#include "include/core/SkFontTypes.h"
+#include "include/core/SkSurface.h"
+#include "include/core/SkTypeface.h"
+#include "include/gpu/ganesh/GrDirectContext.h"
 
 struct WeftSkia {
     bool gpu = false;

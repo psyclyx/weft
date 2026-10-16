@@ -20,6 +20,22 @@
             .lazy = true,
         },
         .stemma_local = .{ .path = "../../lib/stemma", .lazy = true },
+        // Skia, compiled from source by build.zig (src/skia/library.zig): the
+        // revision nixpkgs' skia pins (chrome m148). googlesource serves any
+        // commit as a tarball; build.zig.zon.nix fetches the same tree as
+        // the same fetchgit nixpkgs uses, so a Nix build downloads nothing new.
+        .skia = .{
+            .url = "https://skia.googlesource.com/skia/+archive/e7c90ecca9444fe09598f1630ab7cee2c0ee027a.tar.gz",
+            .hash = "N-V-__8AAEYYSwpL-J-F6MwfVmiUdaOSd3CM1ppnpZObRdX8",
+        },
+        // The VulkanMemoryAllocator revision that Skia's DEPS names for this
+        // Skia (`third_party/externals/vulkanmemoryallocator`); header-only.
+        // Lazy: only `-Dgpu=vulkan` builds compile Skia's Vulkan backend.
+        .vulkan_memory_allocator = .{
+            .url = "https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator/archive/a6bfc237255a6bac1513f7c1ebde6d8aed6b5191.tar.gz",
+            .hash = "N-V-__8AAHeWOQABqWHSzsYkiKh9vr8y4hszFdUU0OKecnjX",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

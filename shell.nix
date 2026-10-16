@@ -57,10 +57,11 @@ pkgs.mkShell {
       harfbuzz
       dejavu_fonts # deterministic embedded default mono face
 
-      # Skia: the C++ 2D library. Ships a skia.pc, so build.zig
-      # resolves it through pkg-config (include for the shim, -L/-lskia for the
-      # link) — as a buildInput its pkgconfig is on PKG_CONFIG_PATH automatically.
-      skia
+      # Skia is compiled from source by build.zig (build.zig.zon pins it);
+      # these are the C libraries it calls into, found through pkg-config:
+      # FreeType for every font weft draws, expat for SVG.
+      freetype
+      expat
 
       # Syntax (milestone 7): incremental parsing + highlighting.
       tree-sitter
@@ -99,8 +100,8 @@ pkgs.mkShell {
         harfbuzz
         fontconfig
         wasmtime.lib # libwasmtime.so at runtime (test + run)
-        skia # libskia.so at runtime (the renderer shim links it)
-        stdenv.cc.cc.lib # libstdc++.so.6 for the Skia C++ shim at runtime
+        freetype # Skia's font rasterizer
+        expat # Skia's XML parser (SVG)
       ]
     )
   );
@@ -109,11 +110,6 @@ pkgs.mkShell {
   # pkg-config is shipped, so build.zig consumes these paths directly.
   WEFT_WASMTIME_DEV = "${pkgs.wasmtime.dev}";
   WEFT_WASMTIME_LIB = "${pkgs.wasmtime.lib}";
-
-  # macOS: the system libc++ (headers + the /usr/lib/libc++.1.dylib stub) that
-  # nixpkgs keeps beside the SDK — the one Darwin Skia links, and so the one the
-  # Skia shim must (build.zig `addSkia`).
-  WEFT_LIBCXX = pkgs.lib.optionalString isDarwin "${pkgs.stdenv.cc.libcxx}";
 
   # Renderer-independent default font bytes. Keeping this in the pinned Nix
   # environment makes layout/test geometry deterministic on Linux and Darwin;

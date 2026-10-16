@@ -2,11 +2,12 @@
   buildPackages,
   callPackage,
   dejavu_fonts,
+  expat,
   fontconfig,
+  freetype,
   harfbuzz,
   lib,
   pkg-config,
-  skia,
   stdenv,
   tree-sitter,
   vulkan-headers,
@@ -53,7 +54,10 @@ stdenv.mkDerivation (finalAttrs: {
   # come from the SDK (build.zig reads SDKROOT, which apple-sdk exports).
   buildInputs = [
     harfbuzz
-    skia
+    # Skia is compiled from source (build.zig.zon, fetched by
+    # build.zig.zon.nix); FreeType and expat are the libraries it calls.
+    freetype
+    expat
     tree-sitter
     wasmtime
   ]
@@ -64,7 +68,6 @@ stdenv.mkDerivation (finalAttrs: {
     vulkan-loader
     vulkan-headers
     fontconfig
-    stdenv.cc.cc.lib
   ]
   ++ lib.optionals isDarwin [ apple-sdk_15 ];
   WEFT_WASMTIME_DEV = "${wasmtime.dev}";
@@ -73,8 +76,6 @@ stdenv.mkDerivation (finalAttrs: {
   WEFT_QUICKJS_NG_SRC = "${srcOnly quickjs-ng}";
   WEFT_GHOSTTY_VT_WASM = "${libghostty-vt-wasm}";
   WEFT_SHELL_INTEGRATION = "${weft-shell-integration}";
-  # The system libc++ Darwin Skia links (see shell.nix).
-  WEFT_LIBCXX = lib.optionalString isDarwin "${stdenv.cc.libcxx}";
   # Grammar and query selection belong to config or trusted language plugins.
   # A packaged editor has no built-in language set.
   WEFT_GRAMMAR_PATH = "";

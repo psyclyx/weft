@@ -8,16 +8,16 @@
 #include "shim.h"
 #include "shim_state.h"
 
-#include "core/SkColorSpace.h"
-#include "core/SkSurfaceProps.h"
-#include "gpu/ganesh/GrBackendSurface.h"
-#include "gpu/ganesh/GrTypes.h"
-#include "gpu/ganesh/SkSurfaceGanesh.h"
-#include "gpu/ganesh/gl/GrGLAssembleInterface.h"
-#include "gpu/ganesh/gl/GrGLBackendSurface.h"
-#include "gpu/ganesh/gl/GrGLDirectContext.h"
-#include "gpu/ganesh/gl/GrGLInterface.h"
-#include "gpu/ganesh/gl/GrGLTypes.h"
+#include "include/core/SkColorSpace.h"
+#include "include/core/SkSurfaceProps.h"
+#include "include/gpu/ganesh/GrBackendSurface.h"
+#include "include/gpu/ganesh/GrTypes.h"
+#include "include/gpu/ganesh/SkSurfaceGanesh.h"
+#include "include/gpu/ganesh/gl/GrGLAssembleInterface.h"
+#include "include/gpu/ganesh/gl/GrGLBackendSurface.h"
+#include "include/gpu/ganesh/gl/GrGLDirectContext.h"
+#include "include/gpu/ganesh/gl/GrGLInterface.h"
+#include "include/gpu/ganesh/gl/GrGLTypes.h"
 
 // GL_RGBA8: the sized internal format of every framebuffer weft asks for.
 static constexpr GrGLenum kGlRgba8 = 0x8058;
