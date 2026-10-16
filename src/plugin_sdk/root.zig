@@ -1789,7 +1789,9 @@ pub const Placement = enum(u32) { bottom = 0, corner = 1, center = 2, caret = 3 
 /// A span's semantic color role. Mirrors core.surface.Role — the theme resolves
 /// each to a real color, so a colorscheme restyles the surface for free.
 /// `annotation` is a dimmed side note (rendering P2 — see doc/rendering.md).
-pub const Role = enum(u32) { normal = 0, accent = 1, group = 2, leaf = 3, effect = 4, muted = 5, annotation = 6 };
+/// `icon` names an icon: the text is `name` or `name\tfallback`, drawn as the
+/// theme's icon where it has one, else as the fallback text.
+pub const Role = enum(u32) { normal = 0, accent = 1, group = 2, leaf = 3, effect = 4, muted = 5, annotation = 6, icon = 9 };
 
 /// Begin (re)building this plugin's overlay at `placement` (`bottom`/
 /// `corner`/`center` — a `caret` popup begins with `surfaceCaret` instead,

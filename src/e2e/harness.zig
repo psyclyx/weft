@@ -2938,19 +2938,26 @@ pub fn completionPopup(ed: *Editor) ?*core.surface.Surface {
     return null;
 }
 
+/// A completion row's label: its first plain span (the kind's icon comes
+/// before it).
+pub fn completionLabel(row: core.surface.Row) ?[]const u8 {
+    for (row.spans.items) |sp| if (sp.role == .normal) return sp.text;
+    return null;
+}
+
 /// The label of the completion popup's chosen row, or null.
 pub fn completionChosen(ed: *Editor) ?[]const u8 {
     const surf = completionPopup(ed) orelse return null;
     const i = surf.selected orelse return null;
-    if (i >= surf.rows.items.len or surf.rows.items[i].spans.items.len == 0) return null;
-    return surf.rows.items[i].spans.items[0].text;
+    if (i >= surf.rows.items.len) return null;
+    return completionLabel(surf.rows.items[i]);
 }
 
 /// Whether the completion popup offers a row labelled `text`.
 pub fn completionOffers(ed: *Editor, text: []const u8) bool {
     const surf = completionPopup(ed) orelse return false;
     for (surf.rows.items) |row| {
-        if (row.spans.items.len > 0 and std.mem.eql(u8, row.spans.items[0].text, text)) return true;
+        if (completionLabel(row)) |l| if (std.mem.eql(u8, l, text)) return true;
     }
     return false;
 }

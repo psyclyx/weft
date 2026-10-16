@@ -53,11 +53,15 @@ pub const Role = enum(u32) {
     warning = 7,
     /// Something is wrong (an error's count): the diagnostic error colour.
     danger = 8,
+    /// The span NAMES an icon: its text is `name`, or `name\tfallback` —
+    /// drawn as that icon where the theme's set has it, else as the fallback
+    /// text, dimmed (a completion item's kind: `kind-function\tfn`).
+    icon = 9,
     _,
 
     pub fn fromInt(v: u32) Role {
         return switch (v) {
-            0, 1, 2, 3, 4, 5, 6, 7, 8 => @enumFromInt(v),
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9 => @enumFromInt(v),
             else => .normal,
         };
     }

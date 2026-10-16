@@ -132,7 +132,7 @@ test "e2e/docs-popup: a chosen completion shows its docs beside the list — its
         ed.press("C-SPC", "");
         ed.settle(3);
         const s = completionPopup(ed) orelse continue;
-        if (std.mem.indexOf(u8, s.rows.items[0].spans.items[0].text, "hermetic") != null) break;
+        if (std.mem.indexOf(u8, h.completionLabel(s.rows.items[0]) orelse "", "hermetic") != null) break;
     }
     // Asked for, the list opens with its first row chosen — and the chosen
     // row's docs are the popup's document.

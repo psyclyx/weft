@@ -67,7 +67,7 @@ pub fn textCaretSurface(scratch: Allocator, text: []const u8, off: usize, max_ro
 /// (de)serialize non-exhaustive enums. `layoutCaretSurface`'s output feeds
 /// the popup-layout e2e gate's committed golden files, so its column-0 color
 /// identity is this small, exhaustive, ZON-friendly copy instead.
-pub const SpanRole = enum { normal, accent, group, leaf, effect, muted, annotation };
+pub const SpanRole = enum { normal, accent, group, leaf, effect, muted, annotation, icon };
 
 fn fromRole(r: core.surface.Role) SpanRole {
     return switch (r) {
@@ -77,8 +77,24 @@ fn fromRole(r: core.surface.Role) SpanRole {
         .effect => .effect,
         .muted => .muted,
         .annotation => .annotation,
+        .icon => .icon,
         else => .normal, // .normal, and any future/unknown tag
     };
+}
+
+/// An icon span's name and its fallback text (`name\tfallback`; the name
+/// alone falls back to nothing).
+fn iconParts(text: []const u8) struct { []const u8, []const u8 } {
+    const tab = std.mem.indexOfScalar(u8, text, '\t') orelse return .{ text, "" };
+    return .{ text[0..tab], text[tab + 1 ..] };
+}
+
+/// The cells an icon span takes: two for the icon where the theme's set has
+/// it, else its fallback text's.
+fn iconCells(v: *const View, text: []const u8) usize {
+    const name, const fallback = iconParts(text);
+    if (v.icon(name) != null) return 2;
+    return std.unicode.utf8CountCodepoints(fallback) catch fallback.len;
 }
 
 /// Mirrors `Theme.roleColor` over `SpanRole` instead of `core.surface.Role` —
@@ -90,7 +106,7 @@ fn spanRoleColor(v: *const View, role: SpanRole) [4]f32 {
         .group => v.theme.heading,
         .effect => v.theme.md_link,
         .muted => v.theme.status,
-        .annotation => v.theme.syn_comment,
+        .annotation, .icon => v.theme.syn_comment,
         .normal, .leaf => v.theme.foreground,
     };
 }
@@ -214,7 +230,7 @@ pub fn layoutCaretSurface(
     @memset(col_w, 0);
     col_w[0] = 8;
     for (surf.rows.items) |row| for (row.spans.items) |sp| {
-        const w = std.unicode.utf8CountCodepoints(sp.text) catch sp.text.len;
+        const w = if (sp.role == .icon) iconCells(v, sp.text) else std.unicode.utf8CountCodepoints(sp.text) catch sp.text.len;
         col_w[sp.column] = @max(col_w[sp.column], w);
     };
     // Lay columns left→right: 1-cell pad, a 2-cell gap before each column
@@ -327,6 +343,13 @@ pub fn drawCaretSurface(
         if (row.selected) try chrome.paintSelected(sink, .{ .x = cl.x, .y = row.y, .w = cl.w, .h = v.line_h }, v.theme.accent);
         for (row.spans) |sp| {
             const color = if (row.selected) v.theme.background else spanRoleColor(v, sp.role);
+            if (sp.role == .icon) {
+                const name, const fallback = iconParts(sp.text);
+                const side = chrome.iconSide(v);
+                if (try chrome.drawIcon(sink, name, sp.x + v.cell_w, row.y + v.line_h / 2, side, color)) continue;
+                try propLine(v, scratch, runs, fallback, sp.x, row.y + v.ascent, color);
+                continue;
+            }
             try propLine(v, scratch, runs, sp.text, sp.x, row.y + v.ascent, color);
         }
     }
@@ -579,4 +602,18 @@ pub fn drawSurfaces(
             }
         }
     }
+}
+
+test "popup: an icon span takes an icon's two cells where the theme's set draws it, else its fallback text's" {
+    const font_provider = @import("weft_font_provider");
+    var v = try View.init(std.testing.allocator, font_provider.defaultMono(), 16);
+    defer v.deinit();
+    v.chrome = .text_icons;
+    // The bundled set has `save`; nobody has `kind-nonesuch`.
+    try std.testing.expectEqual(@as(usize, 2), iconCells(&v, "save\tsv"));
+    try std.testing.expectEqual(@as(usize, 3), iconCells(&v, "kind-nonesuch\tvar"));
+    // A style that draws no icons reads the fallback.
+    v.chrome = .text;
+    try std.testing.expectEqual(@as(usize, 2), iconCells(&v, "save\tsv"));
+    try std.testing.expectEqual(@as(usize, 0), iconCells(&v, "save"));
 }

@@ -297,10 +297,12 @@ fn redraw() void {
     for (shown.items[top..end]) |i| {
         const it = items.items[i];
         weft.surfaceRow();
-        weft.surfaceSpanAt(it.name(), .normal, 0);
-        if (it.detail.len > 0) weft.surfaceSpanAt(cut(&detail_buf, firstLine(it.detail)), .annotation, 1);
-        const tag = kindTag(it.kind);
-        if (tag.len > 0) weft.surfaceSpanAt(tag, .annotation, 2);
+        // The kind first, as an icon where the theme's set draws one, its
+        // short name where it does not.
+        const kind = kindOf(it.kind);
+        if (kind.tag.len > 0) weft.surfaceSpanAt(kind.icon, .icon, 0);
+        weft.surfaceSpanAt(it.name(), .normal, 1);
+        if (it.detail.len > 0) weft.surfaceSpanAt(cut(&detail_buf, firstLine(it.detail)), .annotation, 2);
     }
     if (chosen) |c| {
         const it = items.items[shown.items[c]];
@@ -365,21 +367,41 @@ fn cut(buf: []u8, s: []const u8) []const u8 {
 }
 
 /// What a `CompletionItemKind` (LSP's numbering, the caps contract's) is
-/// called in the list.
-fn kindTag(kind: u8) []const u8 {
+/// called in the list: its icon, `kind-<name>` with its short tag after a
+/// tab for a theme without one (`Role.icon`), and the tag alone.
+const Kind = struct { icon: []const u8, tag: []const u8 };
+
+fn kindOf(kind: u8) Kind {
     return switch (kind) {
-        2, 3 => "fn", // Method, Function
-        4 => "new", // Constructor
-        5, 10 => "field", // Field, Property
-        6 => "var", // Variable
-        7, 22 => "type", // Class, Struct
-        8 => "iface", // Interface
-        9 => "mod", // Module
-        13, 20 => "enum", // Enum, EnumMember
-        14 => "kw", // Keyword
-        15 => "snip", // Snippet
-        21, 12 => "const", // Constant, Value
-        25 => "typaram", // TypeParameter
-        else => "", // Text/unknown → no tag
+        1 => k("text", "txt"),
+        2 => k("method", "fn"),
+        3 => k("function", "fn"),
+        4 => k("constructor", "new"),
+        5 => k("field", "field"),
+        6 => k("variable", "var"),
+        7 => k("class", "type"),
+        8 => k("interface", "iface"),
+        9 => k("module", "mod"),
+        10 => k("property", "prop"),
+        11 => k("unit", "unit"),
+        12 => k("value", "val"),
+        13 => k("enum", "enum"),
+        14 => k("keyword", "kw"),
+        15 => k("snippet", "snip"),
+        16 => k("color", "color"),
+        17 => k("file", "file"),
+        18 => k("reference", "ref"),
+        19 => k("folder", "dir"),
+        20 => k("enum-member", "enum"),
+        21 => k("constant", "const"),
+        22 => k("struct", "type"),
+        23 => k("event", "event"),
+        24 => k("operator", "op"),
+        25 => k("type-parameter", "typaram"),
+        else => .{ .icon = "", .tag = "" },
     };
+}
+
+fn k(comptime name: []const u8, comptime tag: []const u8) Kind {
+    return .{ .icon = "kind-" ++ name ++ "\t" ++ tag, .tag = tag };
 }
