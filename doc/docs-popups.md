@@ -52,3 +52,33 @@ caret moved or the mode changed.
    (`on_resolve` → `wl_caps_item_doc`) for the selected item.
 
 Each phase lands with its e2e test before the next starts.
+
+## Landed (2026-10-15, branch `arc/ui-style`)
+
+Phases 1–4 as planned, with these decisions on the way:
+
+- **Wrap is the pane's,** not the editor's: `Pane.wrap` (toggled by
+  `window.toggle-wrap`), else the entry's `view.wrap`, else prose wraps.
+  Vim's `j`/`k` stay logical; `cursor.up`/`down` step visual lines.
+- **Signature help opens on the caret, not only on typing.** A bracket an
+  autopair inserted is not typed text, so `input.caret` landing just past a
+  trigger character asks too.
+- **The completion UI is the `complete` plugin** (`src/plugins/complete/`):
+  `popup.zig` races the providers through `wl_caps_fire`/`poll`/`merged`/
+  `finish`, draws the list as a caret surface (label, detail, kind) with the
+  chosen item's docs as its document, lends its keys through
+  `wl_key_layers` (`complete`, `complete-chosen`), and follows the typing
+  over `input.typed`/`caret`/`mode`. A fired race raises the plugin's
+  `on_poll` when answers land (`capability.raceReady`). `core/complete_ui.zig`
+  and the pick's inline and caret modes are gone; one popup kind remains —
+  `complete.show` (C-SPC) opens the same inline list the auto-trigger does.
+  Kinds are named in the popup (`kindTag`), not by `lsp`'s annotator.
+
+Left for later:
+
+- **`completionItem/resolve`** — a server that sends docs only on request
+  (rust-analyzer, typescript-language-server) shows none. It wants a
+  provider door: the popup asks for the chosen item (`wl_caps_resolve`), the
+  host asks the provider that answered it (`on_resolve`), and the provider
+  fills the item's docs in (`wl_caps_item_doc`).
+- **Kind icons** instead of tags, once an icon set has them.

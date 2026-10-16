@@ -1093,7 +1093,6 @@ fn pathCubic(x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32) scene.PathCom
 /// same discipline `panelRows` uses. Zero when no pick is open.
 pub fn pickDockHeight(self: *const View, pick: ?*const core.Pick) f32 {
     const p = pick orelse return 0;
-    if (p.caret_anchor != null) return 0; // a caret popup (completion), not a dock
     const shown = @min(p.filtered.items.len, Hud.max_pick_rows);
     return @as(f32, @floatFromInt(1 + shown)) * self.line_h;
 }

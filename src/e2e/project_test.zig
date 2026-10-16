@@ -746,9 +746,8 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     proj.capture(&ed, "spine-project-root");
     ed.press("C-SPC", "");
     ed.settle(40);
-    try t.expect(ed.pick.active);
     var item_buf: [64]u8 = undefined;
-    try t.expectEqualStrings(hermetic_lsp.item(&item_buf), ed.pick.selection() orelse return error.CompletionHasNoVisibleCandidate);
+    try t.expectEqualStrings(hermetic_lsp.item(&item_buf), h.completionChosen(&ed) orelse return error.CompletionHasNoVisibleCandidate);
     proj.capture(&ed, "spine-completion");
     ed.press("Escape", "");
 

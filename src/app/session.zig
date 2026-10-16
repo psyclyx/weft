@@ -104,9 +104,6 @@ pub const Session = struct {
     /// by path.
     file_opener: ?@import("buffers_cmds.zig").FileOpener = null,
 
-    // ── Capability-consumer UIs (written against capability names only) ──
-    completion_ui: core.complete_ui.CompletionUi,
-
     // ── Caret / which-key config (set declaratively by config at load time) ──
     cursor_cfg: cursor_config.CursorConfig,
 
@@ -175,9 +172,7 @@ pub const Session = struct {
         // switch commands bind it live (doc/chrome.md §3.2).
         try view_mod.View.declareChromeSlots(&self.system.container);
         try theme_cmds.register(gpa, &self.system.commands);
-        // Capability consumers — written against capability names only.
-        self.completion_ui = .empty;
-        try setup.registerCapabilityConsumers(gpa, &self.system.commands, &self.completion_ui, grammars);
+        try setup.registerCapabilityConsumers(gpa, &self.system.commands, grammars);
         // Caret config commands, registered before the config runs so it can
         // set per-mode styles at load time.
         self.cursor_cfg = .{ .gpa = gpa };
@@ -187,7 +182,7 @@ pub const Session = struct {
     /// Free in the exact reverse order `main()`'s defers used to run:
     /// cursor_cfg, head (echo+pick), then every hosted system (`host.deinit`
     /// — buffers/caps/keymap/commands/plugins/..., per-system, in
-    /// `System.destroy`'s documented order). (completion_ui owns no heap.)
+    /// `System.destroy`'s documented order).
     pub fn deinit(self: *Session, gpa: std.mem.Allocator) void {
         // Cancellation is plugin code and may dispatch through any registered
         // service. Terminate before releasing even the first callback-visible

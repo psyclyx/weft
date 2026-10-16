@@ -25,30 +25,16 @@
 //! assertion is for).
 //!
 //! Every scenario drives the REAL pipeline: a headless `Editor` (the real
-//! `app_session.Session` — builtins, buffer commands, the completion caps
-//! consumer, pick commands — everything `Session.init` wires unconditionally,
-//! deliberately WITHOUT loading a config or any plugins: the shipped
-//! buffer-word completion plugin (`src/plugins/complete/root.zig`) is a SYNCHRONOUS
-//! source ("it answers before returning" — see its own doc comment), so if
-//! it were loaded it would race the fixture provider below and contaminate
-//! the golden with real buffer words), a synthetic `edit/completion` caps
-//! PROVIDER (`fireCompletion` below) registered the same way
-//! `core/tests.zig`'s `instantWords` fixture is (an `.instant`-latency
-//! handler that `push`es straight into the session — no LSP/zls dependency,
-//! so this gate stays fast and deterministic), and the real
-//! `Pick`/`caret_anchor` it produces. `ed.pick.buildSurface` builds the
-//! `Surface` from that live state — never a hand-built `Surface` literal —
-//! and `layoutCaretSurface`/`layoutDockSurface` lay it out exactly as
-//! `View.build` (via `popup.drawSurfaces`) would. The hover scenario is the
-//! one exception: driving the REAL `lsp` guest plugin against a live
-//! language server is out of scope for a fast, deterministic gate (same
-//! reasoning `fireCompletion`'s fixture exists for completion), so it builds
-//! a `Surface` directly with `popup.textCaretSurface` — a plain "lines of
-//! text anchored at an offset" builder, the same shape the `lsp` plugin's
-//! own `wl_surface_caret`/`wl_surface_row`/`wl_surface_span` calls produce
-//! on the other side of the membrane (see `src/plugins/lsp/root.zig`'s
-//! `presentHover`) — the same way `gfx/harness.zig`'s own tests hand a `Hud`
-//! straight to `View.build`.
+//! `app_session.Session` — builtins, buffer commands, pick commands —
+//! everything `Session.init` wires unconditionally, deliberately WITHOUT
+//! loading a config or any plugins. A completion list at the caret is a
+//! PLUGIN's caret surface now (the `complete` plugin, doc/docs-popups.md), so
+//! the completion cases build one the way it draws (`caretList`): its rows,
+//! its annotation column, its window, its document. The dock cases build
+//! from a live `Pick` (`ed.pick.buildSurface`). The hover scenario builds a
+//! `Surface` with `popup.textCaretSurface`, plain lines at an offset. Each is
+//! laid out by `layoutCaretSurface`/`layoutDockSurface` exactly as
+//! `View.build` (via `popup.drawSurfaces`) would.
 //!
 //! RECORD FLAG: mirrors `latency_test.zig`/build.zig's `-Drecord-latency`
 //! idiom exactly — see build.zig's `instrument_mod` for why record mode is a
@@ -89,32 +75,34 @@ fn openFixtureBuffer(gpa: std.mem.Allocator, ed: *Editor, name: []const u8, text
     try ed.buffers.active().textEditor().?.insertText(gpa, text);
 }
 
-/// A synthetic `edit/completion` provider: pushes whatever `data` points at,
-/// synchronously, ignoring the request entirely — deterministic, and (being
-/// `.instant`) answered inline during `fire()`, before `complete`'s handler
-/// even returns (see `core/complete_ui.zig`'s `fireHandler`, which polls
-/// once right after firing). No settle() loop needed, and no real
-/// buffer-word/LSP provider races it (those are async plugins, so they
-/// haven't answered yet by the time this test inspects the pick).
-fn fixtureCompletionHandler(data: ?*anyopaque, caps: *core.Caps, req: *const capability.Request) anyerror!void {
-    const items: *[]capability.CompletionItem = @ptrCast(@alignCast(data.?));
-    caps.push(req.session, .{ .id = "fixture.popup-layout", .latency = .instant }, .{ .completion = items.* }) catch {};
-}
-
-/// Place the cursor at `cursor_off`, register the fixture provider (`items`
-/// must outlive this call — a stack local in the caller is fine, since the
-/// handler above runs SYNCHRONOUSLY inside `run("complete")`), and fire the
-/// real `complete` command — the same command `C-n`/LSP completion binds to.
-fn fireCompletion(ed: *Editor, items: *[]capability.CompletionItem, cursor_off: usize) !void {
-    ed.buffers.active().textEditor().?.placeCursor(cursor_off);
-    try ed.caps.register(.{
-        .capability = "edit/completion",
-        .id = "fixture.popup-layout",
-        .latency = .instant,
-        .handler = fixtureCompletionHandler,
-        .data = @ptrCast(items),
-    });
-    ed.run("complete.show");
+/// A completion list as the `complete` plugin draws it (doc/docs-popups.md):
+/// a caret surface at `anchor`, one row per item — its text, then its detail
+/// as an annotation column — a window of `max_rows` keeping `selected` on
+/// screen, and the selected item's docs (its detail as code, then its
+/// documentation) as the surface's document. Built here, in the test's
+/// arena, so the renderer is exercised exactly as a plugin's surface would.
+fn caretList(scratch: std.mem.Allocator, items: []const capability.CompletionItem, anchor: usize, selected: usize) !core.surface.Surface {
+    const max_rows = view.Hud.max_pick_rows;
+    const shown = @min(items.len, max_rows);
+    const start = if (selected >= shown) selected + 1 - shown else 0;
+    var surf: core.surface.Surface = .{};
+    surf.begin(scratch, .caret);
+    for (items[start .. start + shown]) |it| {
+        surf.addRow(scratch);
+        surf.addSpanCol(scratch, it.text, .normal, 0);
+        if (it.detail.len > 0) surf.addSpanCol(scratch, it.detail, .annotation, 1);
+    }
+    surf.end(scratch, selected - start);
+    surf.anchor = anchor;
+    const it = items[selected];
+    if (it.detail.len > 0 or it.documentation.len > 0) {
+        const doc = if (it.detail.len > 0)
+            try std.fmt.allocPrint(scratch, "```\n{s}\n```\n\n{s}", .{ it.detail, it.documentation })
+        else
+            it.documentation;
+        surf.setInfo(scratch, doc);
+    }
+    return surf;
 }
 
 const Frame = struct { v: *view.View, built: view.Built };
@@ -276,19 +264,15 @@ test "e2e/popup-layout: caret-popup layout goldens" {
             .{ .text = @constCast("echo"), .detail = @constCast("i32"), .kind = 6, .rank = 4 },
             .{ .text = @constCast("foxtrot"), .detail = @constCast("i32"), .kind = 6, .rank = 5 },
         };
-        var items_slice: []capability.CompletionItem = &items;
-        try fireCompletion(ed, &items_slice, cur_off);
-        try t.expect(ed.pick.active);
-        try t.expect(ed.pick.caret_anchor != null);
-        ed.run("pick.next");
-        ed.run("pick.next"); // selected = 2, mid-list
+        const items_slice: []capability.CompletionItem = &items;
+        const selected: usize = 2; // mid-list
 
         const fw: u32 = 800;
         const fh: u32 = 600;
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, fw, fh);
         defer fr.built.deinit(gpa);
 
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
+        const surf = try caretList(scratch, items_slice, cur_off, selected);
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         try t.expect(!cl.flipped_above);
@@ -328,13 +312,12 @@ test "e2e/popup-layout: caret-popup layout goldens" {
             .{ .text = @constCast("i2"), .rank = 2 },
             .{ .text = @constCast("i3"), .rank = 3 },
         };
-        var items_slice: []capability.CompletionItem = &items;
-        try fireCompletion(ed, &items_slice, cur_off);
-        try t.expect(ed.pick.active);
+        const items_slice: []capability.CompletionItem = &items;
+        const selected: usize = 0;
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, fw, fh);
         defer fr.built.deinit(gpa);
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
+        const surf = try caretList(scratch, items_slice, cur_off, selected);
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         try t.expect(cl.flipped_above);
@@ -357,12 +340,12 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         const cur_off = rope.lineRange(0).start + 25; // column 25 — well past body_cols - box_w
 
         var items = [_]capability.CompletionItem{.{ .text = @constCast("ok"), .rank = 0 }};
-        var items_slice: []capability.CompletionItem = &items;
-        try fireCompletion(ed, &items_slice, cur_off);
+        const items_slice: []capability.CompletionItem = &items;
+        const selected: usize = 0;
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, fw, fh);
         defer fr.built.deinit(gpa);
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
+        const surf = try caretList(scratch, items_slice, cur_off, selected);
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         // Clamped flush to the body's right edge, never past it.
@@ -384,12 +367,12 @@ test "e2e/popup-layout: caret-popup layout goldens" {
             .{ .text = @constCast("alpha"), .documentation = @constCast("First line of docs.\nSecond, longer line of docs."), .rank = 0 },
             .{ .text = @constCast("bravo"), .rank = 1 },
         };
-        var items_slice: []capability.CompletionItem = &items;
-        try fireCompletion(ed, &items_slice, cur_off); // selected = 0 (has documentation)
+        const items_slice: []capability.CompletionItem = &items;
+        const selected: usize = 0; // has documentation
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, 800, 600);
         defer fr.built.deinit(gpa);
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
+        const surf = try caretList(scratch, items_slice, cur_off, selected);
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         const info = cl.info orelse return error.NoInfoPanel;
@@ -418,12 +401,12 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         var items = [_]capability.CompletionItem{
             .{ .text = @constCast("ok"), .documentation = @constCast("Docs here.\nMore docs."), .rank = 0 },
         };
-        var items_slice: []capability.CompletionItem = &items;
-        try fireCompletion(ed, &items_slice, cur_off);
+        const items_slice: []capability.CompletionItem = &items;
+        const selected: usize = 0;
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, fw, fh);
         defer fr.built.deinit(gpa);
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
+        const surf = try caretList(scratch, items_slice, cur_off, selected);
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         // No room beside the list on either side: the panel goes below (or
@@ -481,12 +464,12 @@ test "e2e/popup-layout: caret-popup layout goldens" {
             .{ .text = @constCast("plain2"), .rank = 1 },
             .{ .text = @constCast("plain3"), .rank = 2 },
         };
-        var items_slice: []capability.CompletionItem = &items;
-        try fireCompletion(ed, &items_slice, cur_off);
+        const items_slice: []capability.CompletionItem = &items;
+        const selected: usize = 0;
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, 800, 600);
         defer fr.built.deinit(gpa);
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
+        const surf = try caretList(scratch, items_slice, cur_off, selected);
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         try t.expectEqual(@as(usize, 1), cl.col_x.len);
@@ -507,14 +490,12 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         inline for (0..12) |i| {
             items[i] = .{ .text = @constCast(std.fmt.comptimePrint("item{d:0>2}", .{i})), .rank = i };
         }
-        var items_slice: []capability.CompletionItem = &items;
-        try fireCompletion(ed, &items_slice, cur_off);
-        for (0..10) |_| ed.run("pick.next"); // 0 -> 10
-        try t.expectEqual(@as(usize, 10), ed.pick.selected);
+        const items_slice: []capability.CompletionItem = &items;
+        const selected: usize = 10;
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, 800, 600);
         defer fr.built.deinit(gpa);
-        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows, .dock) orelse return error.NoSurface;
+        const surf = try caretList(scratch, items_slice, cur_off, selected);
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         try t.expectEqual(@as(usize, view.Hud.max_pick_rows), cl.rows.len);
@@ -548,7 +529,6 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         ed.run("pick.next");
         ed.run("pick.next"); // selected = 2 ("charlie")
         try t.expect(ed.pick.active);
-        try t.expect(ed.pick.caret_anchor == null); // the dock, not a caret popup
 
         const v = try ed.ensureView();
         const dock_h = v.pickDockHeight(ed.pick);

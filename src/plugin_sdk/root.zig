@@ -1824,6 +1824,11 @@ pub fn surfaceRow() void {
 pub fn surfaceSpan(text: []const u8, role: Role) void {
     e.wl_surface_span(p(text.ptr), @intCast(text.len), @intFromEnum(role));
 }
+/// `surfaceSpan` in a caret surface's `column` (0 the main content, 1+ an
+/// annotation beside it), aligned with the same column in every row.
+pub fn surfaceSpanAt(text: []const u8, role: Role, column: u8) void {
+    e.wl_surface_span(p(text.ptr), @intCast(text.len), @intFromEnum(role) | (@as(u32, column) << 8));
+}
 /// Commit the built rows and show the surface. `selected` highlights a row
 /// (a picker/files cursor), or -1 for none.
 pub fn surfaceEnd(selected: i32) void {
@@ -2020,6 +2025,63 @@ pub fn capsItem(session: u32, it: Completion) void {
 pub fn capsCommit(session: u32) void {
     e.wl_caps_commit(@bitCast(session));
 }
+// ── Racing the providers: the consumer side ──────────────────────────
+/// Race the completion providers over the active entry at `offset`, the word
+/// typed so far being `prefix`. The session, or null. One race per plugin: a
+/// new one finishes the last.
+pub fn capsFire(offset: usize, prefix: []const u8) ?u32 {
+    const id = e.wl_caps_fire(0, @intCast(offset), p(prefix.ptr), @intCast(prefix.len));
+    return if (id < 0) null else @intCast(id);
+}
+/// What the race has merged so far: how many items, and whether every
+/// provider has answered. Null when the session is gone.
+pub const CapsPoll = struct { count: usize, done: bool };
+pub fn capsPoll(session: u32) ?CapsPoll {
+    const r = e.wl_caps_poll(@bitCast(session));
+    if (r < 0) return null;
+    return .{ .count = @intCast(r & 0xffff), .done = r & (1 << 30) != 0 };
+}
+/// A merged item's field, copied into `gpa`-owned memory. Fields: `text`
+/// (what accepting inserts), `label`, `detail`, `documentation`.
+pub const CapsField = enum(u32) { text = 0, label = 1, detail = 2, documentation = 3 };
+pub fn capsMerged(gpa: std.mem.Allocator, session: u32, i: usize, field: CapsField) ![]u8 {
+    const n = e.wl_caps_merged(@bitCast(session), @intCast(i), @intFromEnum(field), 0, 0);
+    if (n < 0) return error.NoSuchItem;
+    const buf = try gpa.alloc(u8, @intCast(n));
+    errdefer gpa.free(buf);
+    if (n == 0) return buf;
+    const got = e.wl_caps_merged(@bitCast(session), @intCast(i), @intFromEnum(field), p(buf.ptr), @intCast(buf.len));
+    if (got != n) return error.NoSuchItem;
+    return buf;
+}
+/// A merged item's kind (`Completion.kind`: LSP's numbering), 0 unknown.
+pub fn capsMergedKind(session: u32, i: usize) u8 {
+    const n = e.wl_caps_merged(@bitCast(session), @intCast(i), 4, 0, 0);
+    return if (n < 0) 0 else @intCast(@min(n, 255));
+}
+/// The race is done with.
+pub fn capsFinish(session: u32) void {
+    e.wl_caps_finish(@bitCast(session));
+}
+
+/// The keymap layers the dispatching head offers a key to before the
+/// grammar, for this plugin, in order — a popup's keys while it shows (Tab
+/// through a list); none (`&.{}`) clears them. Head-gated: a dispatch's.
+pub fn keyLayers(names: []const []const u8) void {
+    var buf: [256]u8 = undefined;
+    var n: usize = 0;
+    for (names) |name| {
+        if (n + name.len + 1 > buf.len) break;
+        if (n > 0) {
+            buf[n] = '\n';
+            n += 1;
+        }
+        @memcpy(buf[n..][0..name.len], name);
+        n += name.len;
+    }
+    e.wl_key_layers(p(&buf), @intCast(n));
+}
+
 /// Answer `session` with nothing (unsupported / no results / dead).
 pub fn capsDecline(session: u32) void {
     e.wl_caps_decline(@bitCast(session));

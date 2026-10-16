@@ -127,7 +127,6 @@ pub const status_feed = @import("status_feed.zig");
 pub const viewport = @import("viewport.zig");
 pub const context = @import("context.zig");
 pub const placement = @import("placement.zig");
-pub const complete_ui = @import("complete_ui.zig");
 // nav_ui (hover/definition/symbols consumers) removed — moved to the `lsp` plugin.
 pub const secure = @import("secure.zig");
 pub const identity = @import("identity.zig");

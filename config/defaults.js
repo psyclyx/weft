@@ -28,14 +28,14 @@ weft.bind("pick", "S-Return", "pick.accept-input");
 // Closing it is each grammar's: in a modal one Escape leaves insert, which
 // closes the popup with it (one press, the way nvim-cmp and helix do it); a
 // modeless config binds Escape to close the popup alone (ide.js).
-weft.bind("complete", "Tab", "pick.next");
-weft.bind("complete", "S-Tab", "pick.prev");
-weft.bind("complete", "ISO_Left_Tab", "pick.prev"); // Shift+Tab, as xkb names it
-weft.bind("complete", "Down", "pick.next");
-weft.bind("complete", "Up", "pick.prev");
-weft.bind("complete", "C-n", "pick.next");
-weft.bind("complete", "C-p", "pick.prev");
-weft.bind("complete-chosen", "Return", "pick.accept");
+weft.bind("complete", "Tab", "complete.next");
+weft.bind("complete", "S-Tab", "complete.prev");
+weft.bind("complete", "ISO_Left_Tab", "complete.prev"); // Shift+Tab, as xkb names it
+weft.bind("complete", "Down", "complete.next");
+weft.bind("complete", "Up", "complete.prev");
+weft.bind("complete", "C-n", "complete.next");
+weft.bind("complete", "C-p", "complete.prev");
+weft.bind("complete-chosen", "Return", "complete.accept");
 
 // ── which-key navigation keys ─────────────────────────────────────────
 // META keys that act on the which-key hint while you're mid-chord, WITHOUT

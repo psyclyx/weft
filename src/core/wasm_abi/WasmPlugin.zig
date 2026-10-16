@@ -454,6 +454,15 @@ cur_prefix: []const u8 = &.{},
 /// freed after the push (which deep-copies) or on teardown.
 caps_builder: std.ArrayList(capability.CompletionItem) = .empty,
 caps_builder_session: u64 = 0,
+/// The CONSUMER side (`wl_caps_fire`/`poll`/`merged`/`finish`): the session
+/// this plugin fired, and its results as last merged — pointers into the
+/// session's own results, so they live exactly as long as it does
+/// (`capsConsumerDrop` runs before any finish). gpa-owned slice.
+caps_fired: u64 = 0,
+/// The fired race's end has been told (`on_poll`): it is told once, so a race
+/// left open after it ended does not keep the plugin polled.
+caps_done_told: bool = false,
+caps_merged: []*const capability.CompletionItem = &.{},
 
 // ── D2's generic schema-directed slot verbs (core/slot.zig, wasm_host/
 // slot.zig) — `wl_slot_declare`'s host-owned parsed schema trees and
@@ -701,6 +710,12 @@ pub fn clearRetiredResultBuffers(self: *WasmPlugin) void {
 }
 
 /// Drop the pending completion batch, freeing each item's owned bytes.
+/// Let go of the last merged view of the fired session.
+pub fn capsConsumerDrop(self: *WasmPlugin) void {
+    self.gpa.free(self.caps_merged);
+    self.caps_merged = &.{};
+}
+
 pub fn capsBuilderClear(self: *WasmPlugin) void {
     const gpa = self.gpa;
     for (self.caps_builder.items) |it| {
@@ -798,6 +813,9 @@ pub fn principal(self: *WasmPlugin) command.Principal {
 
 pub fn deinit(self: *WasmPlugin) void {
     const gpa = self.gpa;
+    // A session this plugin fired is finished with it: nothing else holds it.
+    if (self.caps_fired != 0) self.activeCtx().caps.finish(self.caps_fired);
+    self.capsConsumerDrop();
     // An OPEN PICK holds a `WasmBoundPick` whose `.plugin` is this pointer, and
     // the head cancels its pick when IT is torn down — which, for a plugin
     // unloaded first, is after this memory is gone. The cancellation then

@@ -90,7 +90,7 @@ pub const State = struct {
 pub fn rowsTakeKeys(services: *const Services, km: *const Keymap, head: *const Head, entry: *Buffers.Buffer) bool {
     const mode = head.currentMode();
     if (services.granularityIn(mode) != .row) return false;
-    if (head.pick.holdsKeys() or head.interactions.active() != null) return false;
+    if (head.pick.active or head.interactions.active() != null) return false;
     const scene = head.scene_selection.path() != null;
     if (scene_edit.textCommit(services, km, head, mode) != null) {
         // A focused scene holds none of its entry's text: the commit a

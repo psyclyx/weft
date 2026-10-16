@@ -172,6 +172,11 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_bind_key", .handler = keymap.hBindKey },
     .{ .name = "wl_bind_keys", .handler = keymap.hBindKeys },
     .{ .name = "wl_set_mode", .handler = keymap.hSetMode },
+    .{ .name = "wl_key_layers", .handler = keymap.hKeyLayers },
+    .{ .name = "wl_caps_fire", .handler = capability.hCapsFire },
+    .{ .name = "wl_caps_poll", .handler = capability.hCapsPoll },
+    .{ .name = "wl_caps_merged", .handler = capability.hCapsMerged },
+    .{ .name = "wl_caps_finish", .handler = capability.hCapsFinish },
     .{ .name = "wl_set_fallback", .handler = keymap.hSetFallback },
     .{ .name = "wl_text_input", .handler = keymap.hTextInput },
     .{ .name = "wl_menu_mode", .handler = keymap.hMenuMode },
@@ -700,6 +705,7 @@ test "membrane contract: table .perm metadata agrees with the handlers' actual r
 /// walk a function body at comptime" rationale as `perm_gated`'s doc).
 const head_gated_list = [_][]const u8{
     "wl_set_mode", // keymap.zig hSetMode
+    "wl_key_layers", // keymap.zig hKeyLayers
     "wl_exit_to_resting", // keymap.zig hExitToResting
     "wl_declare_posture", // keymap.zig hDeclarePosture
     "wl_declare_capture", // pty.zig hDeclareCapture

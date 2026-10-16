@@ -35,18 +35,13 @@ fn expectText(ed: *Editor, want: []const u8) !void {
     try t.expectEqualStrings(want, got);
 }
 
-/// The inline popup is open: a pick that left the keyboard to the grammar.
+/// The popup is open — it leaves the keyboard to the grammar.
 fn inlineOpen(ed: *Editor) bool {
-    return ed.pick.active and ed.pick.inline_keys != null;
+    return h.completionPopup(ed) != null;
 }
 
-/// Whether the popup offers `text` right now.
-fn offers(ed: *Editor, text: []const u8) bool {
-    for (ed.pick.filtered.items) |i| {
-        if (std.mem.eql(u8, ed.pick.items.items[i], text)) return true;
-    }
-    return false;
-}
+const offers = h.completionOffers;
+const chosenRow = h.completionChosen;
 
 test "e2e/complete-auto: a typed prefix pops the list up after the pause, and typing goes on into the buffer" {
     const gpa = t.allocator;
@@ -58,15 +53,15 @@ test "e2e/complete-auto: a typed prefix pops the list up after the pause, and ty
 
     ed.typeText(" al");
     // Nothing yet: the word is long enough, but typing has not paused.
-    try t.expect(!ed.pick.active);
+    try t.expect(!inlineOpen(ed));
     ed.advanceClock(delay_ms - 1);
-    try t.expect(!ed.pick.active);
+    try t.expect(!inlineOpen(ed));
     ed.advanceClock(1);
     try t.expect(inlineOpen(ed));
     try t.expect(offers(ed, "alphabet") and offers(ed, "alpine"));
     // The keyboard is still vim's insert mode, and nothing is preselected.
     try t.expectEqualStrings("insert", ed.mode());
-    try t.expect(ed.pick.selection() == null);
+    try t.expect(chosenRow(ed) == null);
 
     // Typing lands in the BUFFER and narrows the list from what is there.
     ed.typeText("pi");
@@ -76,7 +71,7 @@ test "e2e/complete-auto: a typed prefix pops the list up after the pause, and ty
     // Typed out in full, the one match is what is already there: it closes.
     ed.typeText("ne");
     try expectText(ed, "alphabet alpine beta alpine");
-    try t.expect(!ed.pick.active);
+    try t.expect(!inlineOpen(ed));
 }
 
 test "e2e/complete-auto: each keystroke moves the pause, and a non-word character drops it" {
@@ -91,20 +86,20 @@ test "e2e/complete-auto: each keystroke moves the pause, and a non-word characte
     ed.advanceClock(delay_ms - 20);
     ed.typeText("p"); // fast typing: the pause starts over
     ed.advanceClock(delay_ms - 20);
-    try t.expect(!ed.pick.active);
+    try t.expect(!inlineOpen(ed));
     ed.advanceClock(20);
     try t.expect(inlineOpen(ed));
     try t.expect(offers(ed, "alpine"));
 
     // A space ends the word: the popup closes and nothing is pending.
     ed.typeText(" ");
-    try t.expect(!ed.pick.active);
+    try t.expect(!inlineOpen(ed));
     ed.advanceClock(10 * delay_ms);
-    try t.expect(!ed.pick.active);
+    try t.expect(!inlineOpen(ed));
     // Below `auto-prefix` characters it never asks.
     ed.typeText("a");
     ed.advanceClock(10 * delay_ms);
-    try t.expect(!ed.pick.active);
+    try t.expect(!inlineOpen(ed));
 }
 
 test "e2e/complete-auto: Return types a newline until a row is chosen; Tab chooses, Return accepts" {
@@ -122,7 +117,7 @@ test "e2e/complete-auto: Return types a newline until a row is chosen; Tab choos
     // with the word it was about.
     ed.press("Return", "\n");
     try expectText(ed, "alphabet alpine beta al\n");
-    try t.expect(!ed.pick.active);
+    try t.expect(!inlineOpen(ed));
     try t.expectEqualStrings("insert", ed.mode());
 
     ed.typeText("al");
@@ -130,12 +125,12 @@ test "e2e/complete-auto: Return types a newline until a row is chosen; Tab choos
     try t.expect(inlineOpen(ed));
     // Tab moves INTO the list (the first row), not a tab into the text…
     ed.press("Tab", "\t");
-    const chosen = try gpa.dupe(u8, ed.pick.selection() orelse return error.NothingChosen);
+    const chosen = try gpa.dupe(u8, chosenRow(ed) orelse return error.NothingChosen);
     defer gpa.free(chosen);
     try expectText(ed, "alphabet alpine beta al\nal");
     // …and now Return accepts it, replacing the typed word.
     ed.press("Return", "\n");
-    try t.expect(!ed.pick.active);
+    try t.expect(!inlineOpen(ed));
     const want = try std.fmt.allocPrint(gpa, "alphabet alpine beta al\n{s}", .{chosen});
     defer gpa.free(want);
     try expectText(ed, want);
@@ -155,7 +150,7 @@ test "e2e/complete-auto: in vim, one Escape closes the popup and leaves insert" 
     try t.expect(inlineOpen(ed));
     ed.press("Escape", "");
     try t.expectEqualStrings("normal", ed.mode());
-    try t.expect(!ed.pick.active);
+    try t.expect(!inlineOpen(ed));
     try expectText(ed, "alphabet alpine beta al");
 }
 
@@ -171,12 +166,12 @@ test "e2e/complete-auto: nothing pops up in normal mode, after a paste, or with 
     ed.typeText(" al");
     ed.press("Escape", "");
     ed.advanceClock(10 * delay_ms);
-    try t.expect(!ed.pick.active);
+    try t.expect(!inlineOpen(ed));
     // Normal-mode keys are commands, never typing.
     ed.press("b", "");
     ed.press("e", "");
     ed.advanceClock(10 * delay_ms);
-    try t.expect(!ed.pick.active);
+    try t.expect(!inlineOpen(ed));
 
     // A paste in insert mode inserts a word-prefix the caret sits after, but
     // it was not typed.
@@ -187,16 +182,19 @@ test "e2e/complete-auto: nothing pops up in normal mode, after a paste, or with 
     ed.run("vim.paste-before");
     try t.expect(std.mem.endsWith(u8, try textTail(ed), "alphabet"));
     ed.advanceClock(10 * delay_ms);
-    try t.expect(!ed.pick.active);
+    try t.expect(!inlineOpen(ed));
 
     // auto = off: typing never opens it, however long the pause.
     try ed.setConfig("complete", "auto", "off");
     ed.typeText(" al");
     ed.advanceClock(10 * delay_ms);
-    try t.expect(!ed.pick.active);
-    // …and the manual key still does.
+    try t.expect(!inlineOpen(ed));
+    // …and the manual key still does: the same popup, the keyboard still
+    // the grammar's.
     ed.press("C-SPC", "");
-    try t.expect(ed.pick.active and ed.pick.inline_keys == null);
+    ed.advanceClock(0);
+    try t.expect(inlineOpen(ed));
+    try t.expectEqualStrings("insert", ed.mode());
 }
 
 var tail_buf: [256]u8 = undefined;
@@ -251,7 +249,7 @@ test "e2e/complete-auto: ide.js — Escape closes the popup and the editor keeps
     ed.advanceClock(delay_ms);
     try t.expect(inlineOpen(ed));
     ed.press("Escape", "");
-    try t.expect(!ed.pick.active);
+    try t.expect(!inlineOpen(ed));
     try t.expectEqualStrings("ide", ed.mode());
     // Typing carries on where it was.
     ed.typeText("x");

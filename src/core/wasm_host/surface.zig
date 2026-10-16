@@ -58,7 +58,10 @@ pub fn hSurfaceSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const text = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(text);
-    p.surface.addSpan(p.gpa, text, surface_mod.Role.fromInt(@bitCast(args[2])));
+    // The role in the low byte; the next one is the span's column (a caret
+    // surface's alignment hint: 0 main, 1+ annotations beside it).
+    const packed_role: u32 = @bitCast(args[2]);
+    p.surface.addSpanCol(p.gpa, text, surface_mod.Role.fromInt(packed_role & 0xff), @intCast((packed_role >> 8) & 0xff));
 }
 pub fn hSurfaceEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;

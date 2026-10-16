@@ -469,7 +469,7 @@ const guests = [_]Guest{
     .{ .name = "surround", .import = "guest_surround_wasm", .install = true },
     .{ .name = "vim", .import = "guest_vim_wasm", .install = true, .libraries = &.{ .ex, .regex } },
     .{ .name = "comment", .import = "guest_comment_wasm", .install = true },
-    .{ .name = "lsp", .import = "guest_lsp_wasm", .install = true, .libraries = &.{ .jsonrpc, .prompt, .annotate } },
+    .{ .name = "lsp", .import = "guest_lsp_wasm", .install = true, .libraries = &.{ .jsonrpc, .prompt } },
     .{ .name = "indent", .import = "guest_indent_wasm", .install = true, .libraries = &.{.statusline} },
     .{ .name = "whitespace", .import = "guest_whitespace_wasm", .install = true },
     .{ .name = "numbers", .import = "guest_numbers_wasm", .install = true },

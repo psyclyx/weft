@@ -40,23 +40,60 @@ const auto_signal = "complete.auto";
 /// Where a language server's trigger characters are published (`lsp`).
 const trigger_key = "lsp.trigger-characters";
 
+const popup = @import("popup.zig");
+
 var typed_id: ?u32 = null;
 var auto_id: ?u32 = null;
+var caret_id: ?u32 = null;
+var mode_id: ?u32 = null;
+
+/// The popup's verbs. What opens it by itself is the auto-trigger below;
+/// these are what keys and the palette reach.
+const cmds = [_]weft.CommandEntry{
+    .{ .name = "complete.show", .call = popup.showChosen, .arity = .whole, .summary = "Show completions for the word at the cursor.", .label = "Trigger Completion", .icon = "sparkles" },
+    .{ .name = "complete.show-inline", .call = showInline, .arity = .whole, .summary = "Show completions for the word being typed, unless they show already.", .internal = true },
+    .{ .name = "complete.next", .call = next, .arity = .whole, .summary = "Choose the next completion.", .internal = true },
+    .{ .name = "complete.prev", .call = prev, .arity = .whole, .summary = "Choose the previous completion.", .internal = true },
+    .{ .name = "complete.accept", .call = popup.accept, .arity = .whole, .summary = "Put the chosen completion in place of the word.", .internal = true },
+    .{ .name = "complete.dismiss", .call = popup.close, .arity = .whole, .summary = "Close the completion list.", .internal = true },
+    // Internal: what a heard signal or a loop's poll does, run as a dispatch
+    // (the popup's doors are a dispatching head's).
+    .{ .name = "complete.follow", .call = popup.follow, .arity = .whole, .summary = "Narrow the completion list to the word being typed.", .internal = true },
+    .{ .name = "complete.tick", .call = popup.tick, .arity = .whole, .summary = "Fold slower completion answers into the list.", .internal = true },
+};
+
+fn showInline() void {
+    if (popup.isOpen()) return popup.follow();
+    popup.show();
+}
+fn next() void {
+    popup.move(1);
+}
+fn prev() void {
+    popup.move(-1);
+}
 
 /// What the armed timer is FOR: the caret and the document length when it
 /// was armed. Any edit or motion since makes it stale.
 var armed_cursor: usize = 0;
 var armed_len: usize = 0;
 
-fn describe() callconv(.c) void {
+fn describe() void {
     weft.declareCapability("edit/completion");
     weft.requestPerm(.timer);
 }
 
-fn init() callconv(.c) void {
+fn init() void {
     weft.provideCompletion();
     typed_id = weft.signalSubscribe(weft.typed_signal);
     auto_id = weft.signalSubscribe(auto_signal);
+    caret_id = weft.signalSubscribe(weft.caret_signal);
+    mode_id = weft.signalSubscribe(weft.mode_signal);
+}
+
+/// Each loop: a race still running may have answers to fold in.
+fn on_poll() callconv(.c) void {
+    if (popup.racing()) weft.run("complete.tick");
 }
 
 fn on_complete(session: u32) callconv(.c) void {
@@ -80,14 +117,25 @@ fn on_complete(session: u32) callconv(.c) void {
 fn on_signal(id: i32) callconv(.c) void {
     if (id < 0) return;
     const sig: u32 = @intCast(id);
-    if (typed_id == sig) return typed();
+    if (mode_id == sig) {
+        // The typing a pending ask or an open list was about is over.
+        weft.signalCancel(auto_signal);
+        if (popup.isOpen()) weft.run("complete.dismiss");
+        return;
+    }
+    if (caret_id == sig) {
+        if (popup.isOpen()) weft.run("complete.follow");
+        return;
+    }
+    if (typed_id == sig) {
+        // An open list follows the typing; a closed one may be due.
+        if (popup.isOpen()) return weft.run("complete.follow");
+        return typed();
+    }
     if (auto_id == sig) return due();
 }
 
-/// A word byte, as the editor reads a completion prefix (`Editor.wordChar`).
-fn wordByte(b: u8) bool {
-    return std.ascii.isAlphanumeric(b) or b == '_' or b >= 0x80;
-}
+const wordByte = popup.wordByte;
 
 /// A person typed: arm the timer, move it, or drop it.
 fn typed() void {
@@ -161,8 +209,11 @@ fn orDefaultNum(key: []const u8, default: u32) u32 {
 }
 
 comptime {
-    weft.exportCallback("describe", &describe);
-    weft.exportCallback("init", &init);
+    weft.plugin(&cmds, .{ .describe = describe, .init = init }).exportAll();
+}
+
+comptime {
     weft.exportCallback("on_complete", &on_complete);
     weft.exportCallback("on_signal", &on_signal);
+    weft.exportCallback("on_poll", &on_poll);
 }

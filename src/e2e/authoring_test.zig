@@ -471,9 +471,9 @@ test "authoring: `C-n` completes a word already in the buffer" {
     // Establish a distinctive word, then start typing its prefix and complete.
     ed.typeText("const greeting = 1;\n");
     ed.typeText("gre");
-    ed.press("C-n", ""); // opens the buffer-word completion pick (mode → pick)
+    ed.press("C-n", ""); // opens the completion list, its first row chosen
     ed.settle(30); // let the async candidate source stream in
-    ed.press("Return", ""); // pick.accept: commit the selected candidate
+    ed.press("Return", ""); // complete.accept: commit the chosen candidate
     ed.press("Escape", ""); // leave insert
 
     // Save and read back: if completion committed, "greeting" appears twice.
@@ -920,19 +920,17 @@ test "complete: the caret popup narrows as you type" {
     // trailing `al`, which is the completion prefix.
     const core_ed = ed.buffers.active().textEditor().?;
     try core_ed.insertText(gpa, "alphabet alpine beta al");
+    ed.press("A", ""); // typing goes into the buffer, the list beside it
     ed.run("complete.show");
-    try t.expect(ed.pick.active); // the popup opened (in "pick" mode)
-    const before = ed.pick.filtered.items.len;
-    try t.expect(before >= 2); // alphabet, alpine
+    ed.settle(3);
+    try t.expect(h.completionOffers(ed, "alphabet") and h.completionOffers(ed, "alpine"));
 
-    // Typing narrows via the pick query: only `alpine` contains an `i`.
-    ed.press("i", "i");
-    try t.expect(ed.pick.filtered.items.len < before);
-    var has_alpine = false;
-    for (ed.pick.filtered.items) |idx| {
-        if (std.mem.indexOf(u8, ed.pick.items.items[idx], "alpine") != null) has_alpine = true;
-    }
-    try t.expect(has_alpine);
+    // Typing narrows it to the word being typed: only `alpine` runs through
+    // `ali`.
+    ed.typeText("i");
+    ed.settle(3);
+    try t.expect(h.completionOffers(ed, "alpine"));
+    try t.expect(!h.completionOffers(ed, "alphabet"));
 }
 
 test "lsp: didChange — an edit after open syncs, so completion sees new symbols — real zls" {

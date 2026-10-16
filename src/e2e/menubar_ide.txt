@@ -164,3 +164,4 @@ View/Editor Layout	move	40	Move Window Down	window.move-down
 View/Editor Layout	split	10	Split Editor Right	window.split-right
 View/Editor Layout	split	20	Split Editor Down	window.split-below
 View/Editor Layout	split	30	Close Window	window.close
+View/Editor Layout	wrap	10	Toggle Word Wrap	window.toggle-wrap

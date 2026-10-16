@@ -107,3 +107,46 @@ test "e2e/docs-popup: typing a call opens its signature's help above the caret, 
     ed.settle(3);
     try t.expect(docSurface(ed) == null);
 }
+
+const completionPopup = h.completionPopup;
+
+test "e2e/docs-popup: a chosen completion shows its docs beside the list — its detail as code, then its documentation — and accepting puts it in place of the word" {
+    const gpa = t.allocator;
+    var app: h.App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    const peer = try lang.Peer.init(gpa, "cdoc");
+    defer peer.deinit(gpa);
+    try openWithPeer(&app, peer, "fn f() void {\n    her\n}\n");
+
+    const text = try ed.textAlloc();
+    defer gpa.free(text);
+    ed.buffers.active().textEditor().?.placeCursor(std.mem.indexOf(u8, text, "her\n").? + 3);
+    ed.press("i", "");
+    var item_buf: [64]u8 = undefined;
+    const item = peer.item(&item_buf);
+    // The race at the caret; the server's answer lands off a later poll.
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        ed.press("C-SPC", "");
+        ed.settle(3);
+        const s = completionPopup(ed) orelse continue;
+        if (std.mem.indexOf(u8, s.rows.items[0].spans.items[0].text, "hermetic") != null) break;
+    }
+    // Asked for, the list opens with its first row chosen — and the chosen
+    // row's docs are the popup's document.
+    const chosen = completionPopup(ed) orelse return error.NoList;
+    try t.expectEqual(@as(?usize, 0), chosen.selected);
+    try t.expect(std.mem.indexOf(u8, chosen.info, "```\nfn hermetic_detail(n: usize) void\n```") != null);
+    try t.expect(std.mem.indexOf(u8, chosen.info, "Hermetic completion **docs**.") != null);
+
+    // Return accepts: the word is the item, and the list is gone.
+    ed.press("Return", "\n");
+    ed.settle(2);
+    try t.expect(completionPopup(ed) == null);
+    const after = try ed.textAlloc();
+    defer gpa.free(after);
+    try t.expect(std.mem.indexOf(u8, after, item) != null);
+    try t.expect(std.mem.indexOf(u8, after, "\n    her\n") == null);
+}

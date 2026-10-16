@@ -168,7 +168,10 @@ platform"; neither touches the scene vocabulary or any plugin.
 - **P4 — UI-as-plugin.** The completion CONSUMER moves to a guest plugin emitting
   the caret-surface scene through the membrane (needs the caps-fire + live-narrow
   membrane from [[completion-ux-roadmap]]). The completion UI is a plugin, drawn
-  through the same seam as which-key.
+  through the same seam as which-key. *(DONE 2026-10-15: the `complete` plugin,
+  over `wl_caps_fire`/`poll`/`merged`/`finish` and `wl_key_layers`; hover and
+  signature help are the `lsp` plugin's markdown documents through
+  `wl_surface_doc` — doc/docs-popups.md.)*
 - **P5 — the editor view as a bundled scene client (core goes rendering-free).**
   Only after P1–P4 prove the ABI on the popups + a perf check: the main buffer
   view emits its viewport as a scene (in-process, native speed via the abi.zig

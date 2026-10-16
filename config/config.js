@@ -458,7 +458,7 @@ weft.set("complete", "auto", "on");        // "off": only C-SPC opens it
 weft.set("complete", "auto-prefix", "2");  // word characters before it pops up
 weft.set("complete", "auto-delay", "120"); // ms of pause first
 weft.set("complete", "auto-quiet-in", ["comment", "string"]);
-weft.bind("complete", "C-e", "pick.cancel");
+weft.bind("complete", "C-e", "complete.dismiss");
 
 // ── Actions: abstract intents resolved by CONTEXT ────────────────────
 // The dispatch middle tier. weft.action(name) declares an intent a key binds

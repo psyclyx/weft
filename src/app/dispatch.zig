@@ -574,14 +574,17 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
     // whatever the grammar binds it to.
     if (claimedKey(ctx, spec, commit)) return;
 
-    // An INLINE pick (completion while typing) answers the few keys its
-    // layers bind — Tab, Down, Return once a row is chosen — before the
-    // grammar sees them; every other key is the grammar's, so typing goes on.
-    // Not mid-chord: a held prefix is the grammar's sequence. Before
-    // dot-repeat: moving through a list is not a change to repeat.
-    if (ctx.head.pending.len == 0) if (ctx.head.pick.keyLayers()) |layers| {
-        for (layers) |layer| {
-            const arms = ctx.keymap.layerArms(layer orelse continue, spec) orelse continue;
+    // A popup that leaves the keyboard to the grammar (completion while
+    // typing) answers the few keys its owner's layers bind (`wl_key_layers`)
+    // — Tab, Down, Return once a row is chosen — before the grammar sees
+    // them, newest owner first; every other key is the grammar's, so typing
+    // goes on. Not mid-chord: a held prefix is the grammar's sequence.
+    // Before dot-repeat: moving through a list is not a change to repeat.
+    if (ctx.head.pending.len == 0) for (ctx.head.key_layers.items) |kl| {
+        var names = std.mem.splitScalar(u8, kl.names, '\n');
+        while (names.next()) |layer| {
+            if (layer.len == 0) continue;
+            const arms = ctx.keymap.layerArms(layer, spec) orelse continue;
             if (chooseArm(ctx, arms)) |arm| invokeArm(ctx, arm);
             return;
         }

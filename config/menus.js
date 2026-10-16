@@ -66,7 +66,7 @@ weft.command("theme.chrome-widget", { menu: "View/Appearance/Chrome Style", grou
 weft.command("font.increase", { menu: "View/Appearance", group: "zoom", order: 10 });
 weft.command("font.decrease", { menu: "View/Appearance", group: "zoom", order: 20 });
 weft.command("font.reset", { menu: "View/Appearance", group: "zoom", order: 30 });
-weft.command("window.toggle-wrap", { menu: "View", group: "wrap", order: 1 });
+weft.command("window.toggle-wrap", { menu: "View/Editor Layout", group: "wrap", order: 10 });
 weft.command("font.set-size", { menu: "View/Appearance", group: "zoom", order: 40 });
 weft.command("window.split-right", { menu: "View/Editor Layout", group: "split", order: 10 });
 weft.command("window.split-below", { menu: "View/Editor Layout", group: "split", order: 20 });

@@ -15,17 +15,14 @@ const providers = @import("providers.zig");
 /// (syntax.add-grammar) onto `commands`. Each UI/registry is caller-owned (declared in
 /// `main()` with its own defer); this only wires the command specs, in
 /// registration order. hover / goto-definition / references / symbols / rename /
-/// format / diagnostics / completion are all the `lsp` PLUGIN's now — the only
-/// capability consumer left in core is the completion UI, and server commands are
-/// config, not a registry.
+/// format / diagnostics / completion are all the `lsp` PLUGIN's now, and the
+/// completion UI is the `complete` plugin's (doc/docs-popups.md): no capability
+/// consumer is left in core, and server commands are config, not a registry.
 pub fn registerCapabilityConsumers(
     gpa: std.mem.Allocator,
     commands: *core.command.Commands,
-    completion_ui: *core.complete_ui.CompletionUi,
     grammars: *core.syntax.Runtime,
 ) !void {
-    _ = try commands.bind(gpa, "complete.show", completion_ui.commandSpec());
-    _ = try commands.bind(gpa, "complete.show-inline", completion_ui.inlineCommandSpec());
     // Grammars are data: builtins seeded, config extends via command.
     _ = try commands.bind(gpa, "syntax.add-grammar", providers.grammarAddCommand(grammars));
 }

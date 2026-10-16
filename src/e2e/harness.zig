@@ -2928,3 +2928,29 @@ fn registerGrammars(rt: *core.syntax.Runtime, gpa: Allocator) !void {
     try rt.add(gpa, .{ .extensions = ".html,.htm", .grammar = "html", .symbol = "tree_sitter_html" });
     try rt.add(gpa, .{ .extensions = ".go", .grammar = "go", .symbol = "tree_sitter_go", .outline = q("go-outline") });
 }
+
+/// The `complete` plugin's completion popup, while it shows rows.
+pub fn completionPopup(ed: *Editor) ?*core.surface.Surface {
+    for (ed.plugins.items) |pl| {
+        if (!std.mem.eql(u8, pl.name, "complete")) continue;
+        if (pl.surface.active and pl.surface.placement == .caret and pl.surface.rows.items.len > 0) return &pl.surface;
+    }
+    return null;
+}
+
+/// The label of the completion popup's chosen row, or null.
+pub fn completionChosen(ed: *Editor) ?[]const u8 {
+    const surf = completionPopup(ed) orelse return null;
+    const i = surf.selected orelse return null;
+    if (i >= surf.rows.items.len or surf.rows.items[i].spans.items.len == 0) return null;
+    return surf.rows.items[i].spans.items[0].text;
+}
+
+/// Whether the completion popup offers a row labelled `text`.
+pub fn completionOffers(ed: *Editor, text: []const u8) bool {
+    const surf = completionPopup(ed) orelse return false;
+    for (surf.rows.items) |row| {
+        if (row.spans.items.len > 0 and std.mem.eql(u8, row.spans.items[0].text, text)) return true;
+    }
+    return false;
+}

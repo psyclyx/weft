@@ -144,6 +144,12 @@ key_serial: u32 = 0,
 /// should SET OFF (completion popping up, say) is a listener's business.
 typed: bool = false,
 
+/// Keymap layers an owner (a plugin) asks dispatch to offer a key to before
+/// the grammar — its popup's keys (Tab through a completion list) while it
+/// shows — set and cleared by the owner (`wl_key_layers`). Newest first;
+/// one entry per owner; the names are `\n`-separated, in order, owned.
+key_layers: std.ArrayList(KeyLayers) = .empty,
+
 /// What the last undo step this head began ran, as `step.zig` identifies it
 /// (mode and command) — how a `run` mode knows the next keystroke continues
 /// the same run. Zero before the first.
@@ -531,6 +537,21 @@ pub const Macros = struct {
     }
 };
 
+pub const KeyLayers = struct { owner: usize, names: []u8 };
+
+/// Set `owner`'s key layers to `names` (`\n`-separated); empty clears them.
+pub fn setKeyLayers(self: *Head, gpa: Allocator, owner: usize, names: []const u8) !void {
+    for (self.key_layers.items, 0..) |kl, i| if (kl.owner == owner) {
+        gpa.free(kl.names);
+        _ = self.key_layers.orderedRemove(i);
+        break;
+    };
+    if (names.len == 0) return;
+    const owned = try gpa.dupe(u8, names);
+    errdefer gpa.free(owned);
+    try self.key_layers.insert(gpa, 0, .{ .owner = owner, .names = owned });
+}
+
 pub fn deinit(self: *Head, gpa: Allocator) void {
     gpa.free(self.mode);
     gpa.free(self.pending);
@@ -553,6 +574,8 @@ pub fn deinit(self: *Head, gpa: Allocator) void {
     self.jumps.deinit(gpa);
     self.macros.deinit(gpa);
     self.clipboard.deinit(gpa);
+    for (self.key_layers.items) |kl| gpa.free(kl.names);
+    self.key_layers.deinit(gpa);
     self.* = .{};
 }
 

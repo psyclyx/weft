@@ -137,6 +137,128 @@ pub fn hCapsDecline(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     if (p.caps_builder_session == session) p.capsBuilderClear();
 }
 
+// ── The consumer side: a plugin that RACES the providers ─────────────
+//
+// What `complete_ui` did in core, as doors: fire a race at the caret, read the
+// merged ranking as answers land, finish. What the race is FOR — a popup, an
+// inline hint, nothing at all — is the plugin's.
+
+/// `wl_caps_fire(kind, offset, prefix, prefix_len) -> session`: race the
+/// providers of `kind` (0: completion) over the active entry's document at
+/// `offset`, the word typed so far being `prefix`. The plugin holds one race
+/// at a time: a new fire finishes the last. -1 when nothing was fired.
+pub fn hCapsFire(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = -1;
+    if (args[0] != 0) return;
+    const ctx = p.activeCtx();
+    if (p.caps_fired != 0) {
+        p.capsConsumerDrop();
+        ctx.caps.finish(p.caps_fired);
+        p.caps_fired = 0;
+    }
+    const editor = ctx.buffer().textEditor() orelse return;
+    const prefix = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer p.gpa.free(prefix);
+    const offset: usize = @min(@as(u32, @bitCast(args[1])), editor.text().byteLen());
+    const id = (ctx.fireRace(.completion, &editor.doc, editor.backingPath(), .{ .offset = offset, .text = prefix }) catch return) orelse return;
+    if (id > std.math.maxInt(u31)) {
+        ctx.caps.finish(id);
+        return;
+    }
+    p.caps_fired = id;
+    p.caps_done_told = false;
+    results[0] = @intCast(id);
+}
+
+/// `wl_caps_poll(session) -> count`: fold in what has landed and rank the
+/// whole (`Caps.mergedCompletion`); the count of merged items, read with
+/// `wl_caps_merged`. Bit 30 set: every provider has answered (or timed
+/// out) — nothing more will come. -1 when the session is not this plugin's
+/// or is gone.
+pub fn hCapsPoll(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = -1;
+    const id = sessionOf(args[0]);
+    if (id == 0 or id != p.caps_fired) return;
+    const ctx = p.activeCtx();
+    const s = ctx.caps.session(id) orelse {
+        p.capsConsumerDrop();
+        p.caps_fired = 0;
+        return;
+    };
+    _ = s.poll();
+    const merged = ctx.caps.mergedCompletion(p.gpa, id) catch return;
+    p.capsConsumerDrop();
+    p.caps_merged = merged;
+    const n: i32 = @intCast(@min(merged.len, std.math.maxInt(u16)));
+    results[0] = if (s.done(@import("../task.zig").nowNs())) n | (1 << 30) else n;
+}
+
+/// `wl_caps_merged(session, i, field, ptr, cap) -> i32`: field 0 text, 1
+/// label, 2 detail, 3 documentation of the `i`-th merged item, written to
+/// `ptr` (cap 0 reports the length; a short destination answers -2); field 4
+/// answers its kind (`CompletionItem.kind`). -1 when there is no such item.
+pub fn hCapsMerged(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = -1;
+    const id = sessionOf(args[0]);
+    if (id == 0 or id != p.caps_fired) return;
+    const i: usize = @as(u32, @bitCast(args[1]));
+    if (i >= p.caps_merged.len) return;
+    const it = p.caps_merged[i];
+    const bytes: []const u8 = switch (args[2]) {
+        0 => it.text,
+        1 => it.label,
+        2 => it.detail,
+        3 => it.documentation,
+        4 => {
+            results[0] = it.kind;
+            return;
+        },
+        else => return,
+    };
+    const cap: u32 = @bitCast(args[4]);
+    if (cap == 0) {
+        results[0] = @intCast(@min(bytes.len, std.math.maxInt(i31)));
+        return;
+    }
+    if (bytes.len > cap) {
+        results[0] = -2;
+        return;
+    }
+    const n = caller.writeMemory(@intCast(args[3]), cap, bytes) catch return;
+    results[0] = @intCast(n);
+}
+
+/// Whether the race this plugin fired has something to tell it: answers that
+/// landed since its last poll, or — once — that every provider has answered.
+/// What `on_poll` is raised for, beside streams and watches.
+pub fn raceReady(p: *WasmPlugin) bool {
+    if (p.caps_fired == 0) return false;
+    const s = p.activeCtx().caps.session(p.caps_fired) orelse return true;
+    if (s.fresh < s.results.items.len) return true;
+    if (!p.caps_done_told and s.done(@import("../task.zig").nowNs())) {
+        p.caps_done_told = true;
+        return true;
+    }
+    return false;
+}
+
+/// `wl_caps_finish(session)`: the race is done with — dismissed, accepted,
+/// or replaced.
+pub fn hCapsFinish(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const id = sessionOf(args[0]);
+    if (id == 0 or id != p.caps_fired) return;
+    p.capsConsumerDrop();
+    p.activeCtx().caps.finish(id);
+    p.caps_fired = 0;
+}
+
 /// Caps trampoline: hand the guest the session and let it own the answer. A sync
 /// source commits/declines before returning; an async source stashes the session
 /// and answers off a later poll. On a guest trap we decline so the session isn't

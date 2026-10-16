@@ -167,6 +167,20 @@ pub fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     };
 }
 
+/// `wl_key_layers(names, len)`: the keymap layers (`\n`-separated, in order)
+/// the dispatching head offers a key to before the grammar, on this plugin's
+/// behalf, until it sets others or none (empty). What a popup that leaves the
+/// keyboard to the grammar binds its few keys through.
+pub fn hKeyLayers(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (!requireDispatch(p, caller, "wl_key_layers")) return;
+    const names = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(names);
+    const ctx = p.activeCtx();
+    ctx.head.setKeyLayers(ctx.gpa, @intFromPtr(p), names) catch {};
+}
+
 /// `exitToResting()`: leave a transient mode (insert/visual) back to the active
 /// buffer's RESTING mode — its own tool mode (files) if it has one, else the base
 /// editing mode. Replaces a guest's hardcoded `setMode("normal")` on Escape, so a

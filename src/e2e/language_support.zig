@@ -136,7 +136,7 @@ pub const Peer = struct {
             \\        $result = { signatures => [{ label => "hermetic(first: u8, count: usize) void", parameters => [{ label => "first: u8", documentation => "The first." }, { label => "count: usize", documentation => "How many times." }], documentation => "Hermetic signature docs." }], activeSignature => 0, activeParameter => 1 };
             \\    } elsif ($method eq "textDocument/completion") {
             \\        my $item = "hermetic_${tag}${where}_completion";
-            \\        $result = { items => [{ label => $item, insertText => $item }] };
+            \\        $result = { items => [{ label => $item, insertText => $item, kind => 3, detail => "fn hermetic_detail(n: usize) void", documentation => { kind => "markdown", value => "Hermetic completion **docs**." } }] };
             \\    }
             \\    my $reply = encode_json({ jsonrpc => "2.0", id => $msg->{id}, result => $result });
             \\    print "Content-Length: ", length($reply), "\r\n\r\n", $reply;

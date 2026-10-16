@@ -269,6 +269,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_bind_key", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "bind a key chord in mode `m` to command `c`" },
     .{ .name = "wl_bind_keys", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "bind a key chord in mode `m` to a framed first-applicable intention list (architecture §10.2)" },
     .{ .name = "wl_set_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "switch the active buffer's mode" },
+    .{ .name = "wl_key_layers", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "the keymap layers (newline-separated, in order) the dispatching head offers a key to before the grammar for this plugin — a popup's keys while it shows; empty clears them" },
     .{ .name = "wl_set_fallback", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare mode `m`'s fallback (parent) mode for unbound keys" },
     .{ .name = "wl_text_input", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare mode `m`'s text-input command (and whether it takes the typed char)" },
     .{ .name = "wl_menu_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare a mode a which-key-style menu" },
@@ -359,7 +360,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_surface_caret", .params = &.{.u32}, .results = &.{}, .group = .surface, .doc = "open a retained overlay surface anchored at document offset `offset` (rendering P2)" },
     .{ .name = "wl_surface_doc", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .surface, .doc = "give the caret surface being built a markdown document body (shown beside its rows, or as the popup when it has none); flags bit 0: rather above the caret" },
     .{ .name = "wl_surface_row", .params = &.{}, .results = &.{}, .group = .surface, .doc = "start a new row in the open surface" },
-    .{ .name = "wl_surface_span", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .surface, .doc = "append a styled text span to the current surface row" },
+    .{ .name = "wl_surface_span", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .surface, .doc = "append a styled text span to the current surface row (role in the low byte, a caret surface's column in the next)" },
     .{ .name = "wl_surface_end", .params = &.{.i32}, .results = &.{}, .group = .surface, .doc = "close the open surface, marking a row selected or not" },
     .{ .name = "wl_surface_close", .params = &.{}, .results = &.{}, .group = .surface, .doc = "close the surface without a selection" },
 
@@ -369,6 +370,10 @@ pub const imports = [_]Entry{
     .{ .name = "wl_caps_item", .params = &.{ .i32, .u32, .u32, .u32, .u32, .u32, .u32, .i32, .u32, .u32, .i32 }, .results = &.{}, .group = .capability, .doc = "append one rich completion item to the plugin's pending batch" },
     .{ .name = "wl_caps_commit", .params = &.{.i32}, .results = &.{}, .group = .capability, .doc = "flush the pending completion batch into the session" },
     .{ .name = "wl_caps_decline", .params = &.{.i32}, .results = &.{}, .group = .capability, .doc = "decline to answer a completion session" },
+    .{ .name = "wl_caps_fire", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .capability, .doc = "race the providers of a capability (0: completion) over the active entry at an offset with the typed prefix; the session, or -1 — one race per plugin" },
+    .{ .name = "wl_caps_poll", .params = &.{.i32}, .results = &.{.i32}, .group = .capability, .doc = "fold landed answers into the fired race and rank them; the merged count (bit 30: every provider answered), or -1" },
+    .{ .name = "wl_caps_merged", .params = &.{ .i32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .capability, .doc = "a merged item's field (0 text, 1 label, 2 detail, 3 documentation) into guest memory — cap 0 reports its length — or 4 its kind; -1 when there is none" },
+    .{ .name = "wl_caps_finish", .params = &.{.i32}, .results = &.{}, .group = .capability, .doc = "end the fired race" },
 
     // ── syntax.zig — structural (tree-sitter) read + subbuffers ────────
     .{ .name = "wl_node_at", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .syntax, .doc = "the smallest named tree-sitter node covering `offset`" },
@@ -639,9 +644,9 @@ pub const legacy_callback_names = [_][]const u8{
     "on_semantic_relation_query",
 };
 
-const max_import_count: usize = 279; // +1 wl_surface_doc (a caret popup shows a markdown document: hover, docs, signature help), +1 wl_buffer_docked (a buffer switcher lists documents, not chrome), +1 wl_signal_emit_after (debounced signals), +2 wl_semantic_fs_watch + wl_semantic_fs_changed (a listing follows its directory on disk)
+const max_import_count: usize = 284; // +5 wl_caps_fire/poll/merged/finish + wl_key_layers (the completion UI is a plugin: it races the providers and owns its popup's keys), +1 wl_surface_doc (a caret popup shows a markdown document: hover, docs, signature help), +1 wl_buffer_docked (a buffer switcher lists documents, not chrome), +1 wl_signal_emit_after (debounced signals), +2 wl_semantic_fs_watch + wl_semantic_fs_changed (a listing follows its directory on disk)
 const max_export_count: usize = 22;
-const max_semantic_operation_count: usize = 299; // +1 wl_surface_doc, +1 wl_buffer_docked, +2 wl_semantic_fs_watch + wl_semantic_fs_changed
+const max_semantic_operation_count: usize = 304; // +5 the completion consumer doors, +1 wl_surface_doc, +1 wl_buffer_docked, +2 wl_semantic_fs_watch + wl_semantic_fs_changed
 
 fn censusDoors() [imports.len + exports.len]census_mod.Door {
     var doors: [imports.len + exports.len]census_mod.Door = undefined;

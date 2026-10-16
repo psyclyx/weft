@@ -248,7 +248,7 @@ weft.set("complete", "auto", "on");        // "off": only C-space opens it
 weft.set("complete", "auto-prefix", "2");  // word characters before it pops up
 weft.set("complete", "auto-delay", "120"); // ms of pause first
 weft.set("complete", "auto-quiet-in", ["comment", "string"]);
-weft.bind("complete", "Escape", "pick.cancel");
+weft.bind("complete", "Escape", "complete.dismiss");
 weft.bind("ide", "C-S-b", "plugin.code.run");   // build / run, by language
 weft.bind("ide", "M-S-f", "plugin.code.format");  // format the buffer
 

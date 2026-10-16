@@ -6,10 +6,6 @@
 //! keymap mode, which declares `pick.input` as its commit command — the
 //! picker adds no new input machinery at all.
 //!
-//! An INLINE pick (`InlineKeys` — completion while typing) is the one that
-//! does not take the keyboard: no "pick" mode, typing goes where it was
-//! going, and dispatch offers each key to its two small layers first.
-//!
 //! Entries carry an optional docstring the view renders beside the
 //! text (the palette shows command summaries). Filtering runs a
 //! selectable completion `Style` (default ORDERLESS — space-split tokens,
@@ -52,7 +48,6 @@ pub const Source = types.Source;
 pub const Options = types.Options;
 /// The key layers an INLINE pick (one that leaves the keyboard to the
 /// grammar) answers through.
-pub const InlineKeys = types.InlineKeys;
 /// One selectable item: matchable text plus a display-only docstring.
 pub const Entry = types.Entry;
 
