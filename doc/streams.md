@@ -68,9 +68,21 @@ A caller that needs a shell says so in its argv
   words split into an argv, never shell-parsed.
 - The live search streams rg's lines and kills the previous search.
 
-Left: the fill and filter doors (`proc_to_buffer`, `append`,
-`spool`, `filter`) and their callers, and `exec` as a convenience
-over the stream.
+*Landed (1c):* no door takes a shell string.
+- `proc_to_buffer`, `proc_append_buffer`, `proc_spool` and their
+  `on_fill_token` are deleted.
+- `proc_filter` and `shell_insert` take an argv.
+- `wl_proc_close_input` ends a child's stdin, and stderr can merge into
+  stdout.
+- `wl_buffer_append` is shared by both planes.
+- An exec continuation runs in the place its command was issued in.
+- llm, console, modes, direnv, fmt and shell are migrated. A caller
+  whose input IS a shell line (console, fmt's filter, shell insert)
+  asks for `sh -c` itself.
+
+`exec` stays as its own door. It already takes an argv and never
+blocks; it answers once, which is right for a command whose answer is
+read whole (git's gathers).
 
 ## 2. Incremental projections
 
@@ -79,6 +91,19 @@ insert at the end, a changed row is a replacement of that row, and
 styles and folds are painted for the rows that moved. The output library
 (`*grep*`, run, make and the other tool buffers) appends rows as its
 process streams, so a tool buffer fills while the tool runs.
+
+*Landed:*
+- A full commit writes only the replacement that differs
+  (`Document.becomes`).
+- `wl_proj_extend` opens a build that appends to the committed tree. It
+  lays out and writes only the new rows, as an insert at the end.
+- The output library streams through `weft.spawn` and appends each batch
+  the tool writes. A run is capped at 200,000 rows and says so, and a
+  new run stops the last.
+
+Painting styles and folds still walks every row on each commit. That
+costs about a millisecond for 20,000 rows, and making it incremental is
+left for when it shows.
 
 ## 3. Large inserts at document speed
 
