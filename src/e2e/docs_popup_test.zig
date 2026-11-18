@@ -64,6 +64,10 @@ test "e2e/docs-popup: a hover is the server's markdown, rendered and wrapped ins
     const pixels = try ed.renderComposite();
     gpa.free(pixels);
     const v = try ed.ensureView();
+    // The fenced block is painted in the pane's grammar: `u8` and `usize`
+    // read in the type colour, which the document itself (two consts and
+    // two numbers) has nowhere.
+    try t.expect(glyphIn(ed, v.theme.syn_type));
     const body: h.region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(h.app_w), .h = @floatFromInt(h.app_h) };
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -178,4 +182,13 @@ test "e2e/docs-popup: an item the server sent without docs gets them when chosen
     const s = completionPopup(ed).?;
     try t.expect(std.mem.indexOf(u8, s.info, "fn lazily_resolved() void") != null);
     try t.expectEqual(@as(?usize, 0), s.selected);
+}
+
+/// Whether the last frame drew any glyph in `color`, in any pane.
+fn glyphIn(ed: *h.Editor, color: [4]f32) bool {
+    for (ed.render.fb.built_panes.items) |pane| for (pane.items) |item| switch (item) {
+        .glyph => |g| if (std.meta.eql(g.color, color)) return true,
+        else => {},
+    };
+    return false;
 }

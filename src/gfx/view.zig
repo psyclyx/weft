@@ -26,6 +26,7 @@ pub const MdInline = hud_mod.MdInline;
 pub const Tab = hud_mod.Tab;
 pub const ChromeHit = hud_mod.ChromeHit;
 pub const Hover = hud_mod.Hover;
+pub const CodeHighlighter = hud_mod.CodeHighlighter;
 pub const TabPart = hud_mod.TabPart;
 pub const tab_close_glyph = hud_mod.tab_close_glyph;
 

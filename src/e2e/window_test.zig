@@ -725,3 +725,126 @@ test "app/window: wrap is the pane's — the other half of a split keeps its own
     gpa.free(try ed.renderComposite());
     try t.expect(!focused.wrapped);
 }
+
+/// A caret the last frame drew, in any pane: a filled cell (the focused
+/// pane's) or an outlined one (`hollow` — a pane without the keys, or a
+/// document whose typing lands in a prompt or the picker).
+const CaretDrawn = struct { x: f32, y: f32, hollow: bool };
+
+fn caretsDrawn(ed: *Editor, out: []CaretDrawn) ![]CaretDrawn {
+    const v = try ed.ensureView();
+    var n: usize = 0;
+    for (ed.render.fb.built_panes.items) |pane| for (pane.items) |item| switch (item) {
+        .rect => |r| if (std.meta.eql(r.color, v.theme.cursor) and n < out.len) {
+            out[n] = .{ .x = r.x, .y = r.y, .hollow = false };
+            n += 1;
+        },
+        .rrect => |r| if (std.meta.eql(r.color, v.theme.cursor) and r.stroke_width > 0 and n < out.len) {
+            out[n] = .{ .x = r.x, .y = r.y, .hollow = true };
+            n += 1;
+        },
+        else => {},
+    };
+    return out[0..n];
+}
+
+/// Build a frame inside the caret's visible blink phase, so a caret that
+/// could draw is drawn.
+fn frameShown(ed: *Editor) !void {
+    const deadline = ed.application.blinkDeadline().*;
+    const at = if (deadline > 0) deadline - 1 else core.task.nowNs();
+    const pixels = try ed.renderCompositeAt(at);
+    ed.gpa.free(pixels);
+}
+
+fn inRect(c: CaretDrawn, r: region.Rect) bool {
+    return c.x >= r.x and c.x < r.x + r.w and c.y >= r.y and c.y < r.y + r.h;
+}
+
+/// The focused pane's rect, and the other's, of a two-pane split.
+fn splitRects(ed: *Editor) !struct { focused: region.Rect, other: region.Rect } {
+    const frame: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(app_w), .h = @floatFromInt(app_h) };
+    var slots: [window_layout.max_panes]window_layout.Slot = undefined;
+    const n = ed.win_layout.collect(window_layout.headFocus(ed.win_layout, ed.head), frame, &slots);
+    try t.expectEqual(@as(usize, 2), n);
+    const a_focused = slots[0].pane.id == ed.head.focused_pane;
+    return .{ .focused = if (a_focused) slots[0].rect else slots[1].rect, .other = if (a_focused) slots[1].rect else slots[0].rect };
+}
+
+test "app/window: the focused split draws a filled caret and the other a hollow one; a prompt or the picker leaves the document's caret hollow" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadVim(&ed);
+
+    ed.press("i", "");
+    ed.typeText("one\ntwo\n");
+    ed.press("Escape", "");
+    // Two panes on the SAME buffer: each shows the caret where the buffer
+    // has it — filled in the pane with the keys, hollow in the other.
+    ed.run("window.split-right");
+    ed.applyWindow();
+    ed.run("window.focus-right");
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 2), ed.paneCount());
+
+    var buf: [8]CaretDrawn = undefined;
+    try frameShown(&ed);
+    {
+        const rects = try splitRects(&ed);
+        const drawn = try caretsDrawn(&ed, &buf);
+        try t.expectEqual(@as(usize, 2), drawn.len);
+        for (drawn) |c| {
+            if (c.hollow) try t.expect(inRect(c, rects.other)) else try t.expect(inRect(c, rects.focused));
+        }
+    }
+    // Focus moves: so does the filled caret.
+    ed.run("window.focus-left");
+    ed.applyWindow();
+    try frameShown(&ed);
+    {
+        const rects = try splitRects(&ed);
+        const drawn = try caretsDrawn(&ed, &buf);
+        try t.expectEqual(@as(usize, 2), drawn.len);
+        for (drawn) |c| {
+            if (c.hollow) try t.expect(inRect(c, rects.other)) else try t.expect(inRect(c, rects.focused));
+        }
+    }
+    // The `:` line takes the typing: the document's caret goes hollow in
+    // the focused pane too — no bar claims that typing lands there.
+    ed.press("colon", "");
+    try t.expectEqualStrings("ex", ed.mode());
+    try frameShown(&ed);
+    {
+        const drawn = try caretsDrawn(&ed, &buf);
+        try t.expectEqual(@as(usize, 2), drawn.len);
+        for (drawn) |c| try t.expect(c.hollow);
+    }
+    ed.press("Escape", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    try frameShown(&ed);
+    {
+        const drawn = try caretsDrawn(&ed, &buf);
+        var filled: usize = 0;
+        for (drawn) |c| filled += @intFromBool(!c.hollow);
+        try t.expectEqual(@as(usize, 1), filled);
+    }
+    // The picker likewise.
+    try ed.pick.open(ed.ctx, "x", &.{}, .{ .handler = noopPickAccept });
+    try t.expect(ed.pick.active);
+    try frameShown(&ed);
+    {
+        const drawn = try caretsDrawn(&ed, &buf);
+        try t.expectEqual(@as(usize, 2), drawn.len);
+        for (drawn) |c| try t.expect(c.hollow);
+    }
+    ed.run("pick.cancel");
+    try t.expect(!ed.pick.active);
+}
+
+fn noopPickAccept(ctx: *core.command.Context, data: ?*anyopaque, outcome: core.pick.Outcome) anyerror!void {
+    _ = ctx;
+    _ = data;
+    _ = outcome;
+}

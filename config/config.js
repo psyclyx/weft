@@ -656,6 +656,11 @@ weft.set("palette", "cursor", "#fabd2f");
 weft.set("palette", "selection", "#3c4a5e");
 weft.set("palette", "syn_comment", "#7c6f64");
 weft.set("palette", "diag_error", "#fb4934");
+// Structure has slots of its own — a popup is not "the selection colour"
+// and a chosen row is not "the accent": `panel` and `panel_border` (popups,
+// the picker, menus, a prompt's bar), `chosen` and `chosen_text` (the row a
+// list has chosen), `chrome` (the status and tab bars), `flash` (what an
+// operation just touched). Unset, each is what weft ships.
 
 // A ROW ROLE is themed by its last dotted segment, so one line covers every
 // producer that calls its rows the same thing: `git.hunk` and `fs.hunk` are

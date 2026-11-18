@@ -71,6 +71,11 @@ var top: usize = 0;
 /// start, so Return accepts it. Opened by itself while typing, nothing is
 /// chosen until a row is moved to, and Return stays the grammar's.
 var preselect = false;
+/// Visual lines of the chosen item's docs scrolled off the top (`docsDown`/
+/// `docsUp`); back to the top whenever the chosen row moves.
+var docs_skip: u32 = 0;
+/// How far one docs scroll goes, in lines.
+const docs_step: u32 = 4;
 
 pub fn isOpen() bool {
     return open;
@@ -241,6 +246,7 @@ pub fn move(delta: i32) void {
     const n: i32 = @intCast(shown.items.len);
     const next: i32 = if (chosen) |c| @mod(@as(i32, @intCast(c)) + delta, n) else if (delta > 0) 0 else n - 1;
     chosen = @intCast(next);
+    docs_skip = 0;
     const c = chosen.?;
     if (c < top) top = c;
     if (c >= top + max_rows) top = c + 1 - max_rows;
@@ -275,7 +281,22 @@ pub fn close() void {
     clearItems();
     shown.clearRetainingCapacity();
     chosen = null;
+    docs_skip = 0;
     merged = 0;
+}
+
+/// Scroll the chosen item's docs down a step (`complete.docs-down`).
+pub fn docsDown() void {
+    if (!open or chosen == null) return;
+    docs_skip += docs_step;
+    redraw();
+}
+
+/// Scroll them back up (`complete.docs-up`).
+pub fn docsUp() void {
+    if (!open or chosen == null) return;
+    docs_skip -|= docs_step;
+    redraw();
 }
 
 fn clearItems() void {
@@ -291,6 +312,12 @@ fn redraw() void {
         weft.keyLayers(&.{});
         return;
     }
+    // The layers first: the hint below asks which key runs `complete.next`
+    // HERE, and here means with the popup's keys lent.
+    if (chosen != null)
+        weft.keyLayers(&.{ "complete-chosen", "complete" })
+    else
+        weft.keyLayers(&.{"complete"});
     weft.surfaceCaret(word_start);
     const end = @min(shown.items.len, top + max_rows);
     var detail_buf: [max_detail * 4 + 4]u8 = undefined;
@@ -309,11 +336,36 @@ fn redraw() void {
         docsOf(it);
         resolve(it);
     }
+    hint();
     weft.surfaceEnd(if (chosen) |c| @intCast(c - top) else -1);
-    if (chosen != null)
-        weft.keyLayers(&.{ "complete-chosen", "complete" })
-    else
-        weft.keyLayers(&.{"complete"});
+}
+
+/// The keys that drive the list, in its frame — asked of the keymap as the
+/// person has it, so a rebind shows; a key nobody bound shows nothing. And
+/// where the list stands: the chosen row's place among the rows shown.
+fn hint() void {
+    const has_chosen = chosen != null;
+    const has_docs = has_chosen and blk: {
+        const it = items.items[shown.items[chosen.?]];
+        break :blk it.detail.len > 0 or it.doc.len > 0;
+    };
+    var pos_buf: [32]u8 = undefined;
+    const pos = std.fmt.bufPrint(&pos_buf, "{d}/{d}", .{ if (chosen) |c| c + 1 else 0, shown.items.len }) catch "";
+    weft.surfaceHint(&.{
+        .{ .key = keyOf("complete.next"), .label = "next" },
+        .{ .key = keyOf("complete.prev"), .label = "prev" },
+        .{ .key = if (has_chosen) keyOf("complete.accept") else "", .label = if (has_chosen) "accept" else "" },
+        .{ .key = if (has_docs) keyOf("complete.docs-down") else "", .label = if (has_docs) "docs ↓" else "" },
+        .{ .key = if (has_docs) keyOf("complete.docs-up") else "", .label = if (has_docs) "docs ↑" else "" },
+        .{ .key = keyOf("complete.dismiss"), .label = "close" },
+        .{ .key = "", .label = pos },
+    });
+}
+
+/// The shortest key that runs `name` here, or "" — a pair with no key is
+/// dropped from the hint.
+fn keyOf(name: []const u8) []const u8 {
+    return weft.firstKey(weft.keysFor(name));
 }
 
 /// A chosen item with no docs: ask its provider for them, once.
@@ -342,7 +394,7 @@ fn docsOf(it: Item) void {
         if (md.items.len > 0) md.append(a, '\n') catch return;
         md.appendSlice(a, it.doc) catch return;
     }
-    weft.surfaceDoc(md.items, .{});
+    weft.surfaceDoc(md.items, .{ .skip = docs_skip });
 }
 
 fn firstLine(s: []const u8) []const u8 {
@@ -367,41 +419,45 @@ fn cut(buf: []u8, s: []const u8) []const u8 {
 }
 
 /// What a `CompletionItemKind` (LSP's numbering, the caps contract's) is
-/// called in the list: its icon, `kind-<name>` with its short tag after a
-/// tab for a theme without one (`Role.icon`), and the tag alone.
+/// called in the list: its icon — `kind-<name>`, its short tag for a theme
+/// without one, and its tint, tab-separated (`Role.icon`) — and the tag
+/// alone.
 const Kind = struct { icon: []const u8, tag: []const u8 };
 
 fn kindOf(kind: u8) Kind {
     return switch (kind) {
-        1 => k("text", "txt"),
-        2 => k("method", "fn"),
-        3 => k("function", "fn"),
-        4 => k("constructor", "new"),
-        5 => k("field", "field"),
-        6 => k("variable", "var"),
-        7 => k("class", "type"),
-        8 => k("interface", "iface"),
-        9 => k("module", "mod"),
-        10 => k("property", "prop"),
-        11 => k("unit", "unit"),
-        12 => k("value", "val"),
-        13 => k("enum", "enum"),
-        14 => k("keyword", "kw"),
-        15 => k("snippet", "snip"),
-        16 => k("color", "color"),
-        17 => k("file", "file"),
-        18 => k("reference", "ref"),
-        19 => k("folder", "dir"),
-        20 => k("enum-member", "enum"),
-        21 => k("constant", "const"),
-        22 => k("struct", "type"),
-        23 => k("event", "event"),
-        24 => k("operator", "op"),
-        25 => k("type-parameter", "typaram"),
+        1 => k("text", "txt", ""),
+        2 => k("method", "fn", "function"),
+        3 => k("function", "fn", "function"),
+        4 => k("constructor", "new", "function"),
+        5 => k("field", "field", "attribute"),
+        6 => k("variable", "var", "variable"),
+        7 => k("class", "type", "type"),
+        8 => k("interface", "iface", "type"),
+        9 => k("module", "mod", "type"),
+        10 => k("property", "prop", "attribute"),
+        11 => k("unit", "unit", "number"),
+        12 => k("value", "val", "number"),
+        13 => k("enum", "enum", "type"),
+        14 => k("keyword", "kw", "keyword"),
+        15 => k("snippet", "snip", "string"),
+        16 => k("color", "color", "number"),
+        17 => k("file", "file", "punctuation"),
+        18 => k("reference", "ref", "punctuation"),
+        19 => k("folder", "dir", "punctuation"),
+        20 => k("enum-member", "enum", "constant"),
+        21 => k("constant", "const", "constant"),
+        22 => k("struct", "type", "type"),
+        23 => k("event", "event", "label"),
+        24 => k("operator", "op", "operator"),
+        25 => k("type-parameter", "typaram", "type"),
         else => .{ .icon = "", .tag = "" },
     };
 }
 
-fn k(comptime name: []const u8, comptime tag: []const u8) Kind {
-    return .{ .icon = "kind-" ++ name ++ "\t" ++ tag, .tag = tag };
+/// `tint` names the syntax class the kind reads in (a function in the
+/// function colour, a keyword in the keyword's), so the list's icons carry
+/// the colours the text does; "" is the annotation grey.
+fn k(comptime name: []const u8, comptime tag: []const u8, comptime tint: []const u8) Kind {
+    return .{ .icon = "kind-" ++ name ++ "\t" ++ tag ++ "\t" ++ tint, .tag = tag };
 }

@@ -626,6 +626,32 @@ fn pointerIn(fx: *const FrameCtx, pane: u32) view_mod.Hover {
     };
 }
 
+/// The frame's painter of popup code (`Hud.code_hl`): a fenced block in a
+/// hover's or a completion's document, painted in the grammar its fence
+/// names, else the pane's own. Arena-owned for the frame; null without a
+/// runtime or a grammar to paint in.
+fn codeHighlighter(arena: std.mem.Allocator, act: Active) ?view_mod.CodeHighlighter {
+    const rt = act.grammars orelse return null;
+    const own: ?*const core.syntax.LanguageSpec = if (act.attach.syntax) |syn| &syn.spec else null;
+    const Painter = struct {
+        rt: *core.syntax.Runtime,
+        own: ?*const core.syntax.LanguageSpec,
+        fn paint(ctx: *anyopaque, lang: []const u8, text: []const u8, out: []core.capability.HighlightClass) bool {
+            const self: *const @This() = @ptrCast(@alignCast(ctx));
+            const spec = self.rt.forName(lang) orelse self.own orelse return false;
+            var sfa = std.heap.stackFallback(4096, std.heap.page_allocator);
+            const a = sfa.get();
+            const classes = core.syntax.paintText(a, self.rt, spec, text) catch return false;
+            defer a.free(classes);
+            @memcpy(out, classes);
+            return true;
+        }
+    };
+    const painter = arena.create(Painter) catch return null;
+    painter.* = .{ .rt = rt, .own = own };
+    return .{ .ctx = painter, .paint = Painter.paint };
+}
+
 fn semanticOverlay(fx: *const FrameCtx) ?view_mod.semantic_data.Overlay {
     const active = fx.head.interactions.active() orelse return null;
     const descriptor = active.descriptor;
@@ -1155,6 +1181,11 @@ pub const FrameBuilder = struct {
             break :fblk fs.rangesOf(which, &fx.caps.layers, &ed.doc, buf);
         };
         const cursor_mode = fx.cursor_cfg.resolveMode(fx.keymap, fx.head, fx.head.currentMode());
+        // Typing that lands somewhere other than the document — the picker's
+        // query, a prompt's line (a mode tagged `prompt`) — leaves the
+        // document's caret a hollow box: the position still reads, without
+        // a bar claiming that typing lands there.
+        const keys_elsewhere = fx.head.pick.active or fx.keymap.modeHasTag(fx.head.currentMode(), "prompt");
         const hud: view_mod.Hud = .{
             .mode = fx.head.currentMode(),
             .which_key = if (wk_hints.items.len > 0) wk_hints.items else null,
@@ -1168,10 +1199,11 @@ pub const FrameBuilder = struct {
             // which-key/files/git. This field is dead in production; see
             // `View.build`'s doc for why it stays as a legacy/test-only path.
             .hover = null,
-            .cursor_style = fx.cursor_cfg.styleFor(cursor_mode, core.scene_edit.textCommit(fx.semantic, fx.keymap, fx.head, cursor_mode) != null),
+            .cursor_style = if (keys_elsewhere) .hollow else fx.cursor_cfg.styleFor(cursor_mode, core.scene_edit.textCommit(fx.semantic, fx.keymap, fx.head, cursor_mode) != null),
             .caret_place = fx.cursor_cfg.placeFor(cursor_mode),
-            .cursor_on = if (fx.cursor_cfg.blinkFor(cursor_mode)) act.blink_on else true,
+            .cursor_on = if (!keys_elsewhere and fx.cursor_cfg.blinkFor(cursor_mode)) act.blink_on else true,
             .row_focus = rowFocused(fx, abuf),
+            .code_hl = codeHighlighter(arena, act),
             .brand_mark = std.mem.eql(u8, abuf.tool, "dashboard"),
             // Rendering P2: the picker's scene already went into
             // `hud.surfaces` (`pick_surface`, above) — this field is dead in
@@ -1273,7 +1305,10 @@ pub const FrameBuilder = struct {
                     .status_line = rows.statusLine(slot.pane.attrs),
                     .brand_mark = std.mem.eql(u8, ob.tool, "dashboard"),
                     .semantic_view = semanticDocumentFor(arena, fx, ob, &ob.scene_selection, false),
-                    .cursor_on = false, // the caret belongs to the focused pane
+                    // Its caret still reads — hollow, since the keys are the
+                    // focused pane's — and never blinks.
+                    .cursor_on = true,
+                    .cursor_style = .hollow,
                     // The focused pane, built last, paints the tooltip.
                     .tooltips = false,
                     .pane_border = slot.border,

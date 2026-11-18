@@ -108,11 +108,20 @@ pub const Surface = struct {
     /// below it (signature help, which a completion list below must not
     /// cover). It goes below when there is no room above.
     above: bool = false,
+    /// The keys that drive the surface, shown in its frame as a footer line
+    /// under the rows: one `key\tlabel` pair per line, the key drawn in the
+    /// accent and the label muted; a pair with an empty key is a plain note
+    /// (a position, `3/41`). Owned like `info`; empty when there is none.
+    hint: []u8 = &.{},
+    /// Visual lines of `info` scrolled off its top: a long document is read a
+    /// screen at a time by the owner's keys (`wl_surface_doc`'s flags).
+    info_skip: u32 = 0,
 
     pub fn deinit(self: *Surface, gpa: Allocator) void {
         freeRows(gpa, &self.rows);
         freeRows(gpa, &self.scratch_rows);
         gpa.free(self.info);
+        gpa.free(self.hint);
         self.* = .{};
     }
 
@@ -157,6 +166,14 @@ pub const Surface = struct {
         self.info = gpa.dupe(u8, text) catch &.{};
     }
 
+    /// Set the hint line (replaces any prior copy) — see `hint`. Kept out of
+    /// begin/row/span/end like `setInfo`: the keys that drive a surface are
+    /// a property of the surface, not a row of it.
+    pub fn setHint(self: *Surface, gpa: Allocator, text: []const u8) void {
+        gpa.free(self.hint);
+        self.hint = gpa.dupe(u8, text) catch &.{};
+    }
+
     /// Commit the built rows atomically and mark the surface active. `selected`
     /// is the highlighted row index (e.g. a picker/files cursor), or null.
     pub fn end(self: *Surface, gpa: Allocator, selected: ?usize) void {
@@ -175,6 +192,9 @@ pub const Surface = struct {
         self.rows = .empty;
         gpa.free(self.info);
         self.info = &.{};
+        gpa.free(self.hint);
+        self.hint = &.{};
+        self.info_skip = 0;
         self.active = false;
         self.selected = null;
         self.anchor = null;

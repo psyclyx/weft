@@ -318,6 +318,9 @@ pub const Active = struct {
     editor: ?*core.Editor,
     abuf: *core.Buffers.Buffer,
     attach: *providers.Attach,
+    /// The grammar runtime, for the code a popup's document shows (a hover's
+    /// fenced block painted in the pane's grammar). Null paints none.
+    grammars: ?*core.syntax.Runtime = null,
     frame_start: u64,
     fb: [2]u32,
     blink_on: bool,
@@ -423,6 +426,7 @@ pub const Driver = struct {
             .editor = active.editor,
             .abuf = active.buffer,
             .attach = active.attach,
+            .grammars = self.attach_deps.grammars,
             .frame_start = opts.frame_start,
             .fb = opts.fb,
             .blink_on = opts.blink_on,

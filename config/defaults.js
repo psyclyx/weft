@@ -36,6 +36,10 @@ weft.bind("complete", "Up", "complete.prev");
 weft.bind("complete", "C-n", "complete.next");
 weft.bind("complete", "C-p", "complete.prev");
 weft.bind("complete-chosen", "Return", "complete.accept");
+// A chosen row's docs beside the list scroll a few lines at a time
+// (nvim-cmp's keys); the popup's footer names them.
+weft.bind("complete-chosen", "C-f", "complete.docs-down");
+weft.bind("complete-chosen", "C-b", "complete.docs-up");
 
 // ── which-key navigation keys ─────────────────────────────────────────
 // META keys that act on the which-key hint while you're mid-chord, WITHOUT

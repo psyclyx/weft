@@ -1668,6 +1668,12 @@ pub fn loadWorkspaceWithHints(ed: *Editor) !void {
     try ed.load("which_key", guest.which_key);
 }
 
+/// The hint overlay alone, for a bare Editor that asserts on the which_key
+/// plugin's surface.
+pub fn loadWhichKey(ed: *Editor) !void {
+    try ed.load("which_key", guest.which_key);
+}
+
 /// The whole-app spine's plugin surface for the direct Editor harness. The
 /// config-driven App already owns lsp through config.js; it does not call this
 /// helper, so there is no duplicate plugin instance.

@@ -649,7 +649,7 @@ pub fn paintTooltip(s: Sink, tip: Tip, at: [2]f32, bounds: region.Rect) !void {
     const below = at[1] + v.line_h;
     const y = std.math.clamp(if (below + h <= bounds.y + bounds.h) below else at[1] - h - 4, bounds.y, @max(bounds.y, bounds.y + bounds.h - h));
     const box: region.Rect = .{ .x = x, .y = y, .w = w, .h = h };
-    try paintPanel(s, box, mix(th.background, th.selection, 0.35), th.status, .tooltip);
+    try paintPanel(s, box, th.panel, th.panel_border, .tooltip);
     const tx = x + pad;
     try s.label(tip.label, tx, y + 3, th.foreground, box);
     if (tip.key_hint.len != 0) try s.label(tip.key_hint, tx + v.uiWidth(tip.label) + space, y + 3, th.status, box);

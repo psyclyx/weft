@@ -371,7 +371,7 @@ pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *st
         area.y + (area.h - box_h) / 2;
     const y = std.math.clamp(raw_y, area.y, @max(area.y, area.y + area.h - box_h));
     const sink: chrome_mod.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
-    try chrome_mod.paintPanel(sink, .{ .x = x, .y = y, .w = box_w, .h = box_h }, v.theme.background, v.theme.accent, .popup);
+    try chrome_mod.paintPanel(sink, .{ .x = x, .y = y, .w = box_w, .h = box_h }, v.theme.panel, v.theme.panel_border, .popup);
     const inner: region.Rect = .{ .x = x + pad_x, .y = y + pad_y, .w = @max(0, box_w - 2 * pad_x), .h = @max(0, box_h - 2 * pad_y) };
     var hits: std.ArrayList(Hit) = .empty;
     try drawRows(v, scratch, hit_arena, runs, rects, &hits, overlay.document.view, rows[0..visible_rows], inner, hud, true, 1, false);
@@ -813,7 +813,14 @@ test "a deep tree in a narrow pane gives back indentation evenly, and every labe
 }
 
 fn fieldCaretRect(x: f32, y: f32, cell_w: f32, line_h: f32, style: view.CursorStyle, color: [4]f32) Rect {
-    return .{ .x = x, .y = if (style == .underline) y + line_h - 2 else y, .w = if (style == .bar) 2 else cell_w, .h = if (style == .underline) 2 else line_h, .color = color };
+    return .{
+        .x = x,
+        .y = if (style == .underline) y + line_h - 2 else y,
+        .w = if (style == .bar) 2 else cell_w,
+        .h = if (style == .underline) 2 else line_h,
+        .color = color,
+        .shape = if (style == .hollow) .{ .rounded = .{ .radius = 0, .stroke_width = 1 } } else .fill,
+    };
 }
 
 test "semantic field caret follows shared cursor style" {

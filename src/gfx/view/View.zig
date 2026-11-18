@@ -144,6 +144,9 @@ icon_choice: icons.Bundled = .weft,
 /// chrome style. The choice of set is kept, so turning icons back on by
 /// name restores the set it names.
 icons_on: bool = true,
+/// The frame's code highlighter for popup documents (`Hud.code_hl`), held
+/// for the build so the popup renderers reach it without a `Hud` in hand.
+code_hl: ?hud_mod.CodeHighlighter = null,
 /// The tooltip the current build's hovered element offers — due or not, so
 /// what the pointer rests on is known before the frame that shows it.
 build_tip: ?chrome_mod.Tip = null,
@@ -739,6 +742,7 @@ pub fn build(
     self.build_hits = &.{};
     self.build_chrome = &.{};
     self.build_tip = null;
+    self.code_hl = hud.code_hl;
     const regions = self.carve(frame, hud);
     const content = regions.content;
     self.origin_x = content.x;
@@ -803,7 +807,7 @@ pub fn build(
             for (0..ed.selectionCount()) |i| {
                 if (ed.selectionRange(i)) |r| try decoration.selectionRects(self, scratch, &washes, r, self.theme.selection);
             }
-            for (hud.flash) |fl| try decoration.selectionRects(self, scratch, &washes, fl, self.theme.accent);
+            for (hud.flash) |fl| try decoration.selectionRects(self, scratch, &washes, fl, self.theme.flash);
             // The document's caret is the cursor drawn: at its cell, in the
             // shape the grammar's mode asks for.
             var shown = g.*;
@@ -816,6 +820,7 @@ pub fn build(
                         .block => .block,
                         .bar => .bar,
                         .underline => .underline,
+                        .hollow => .hollow,
                     },
                     .visible = true,
                 };
@@ -895,7 +900,7 @@ pub fn build(
         for (0..ed.selectionCount()) |i| {
             if (ed.selectionRange(i)) |r| try decoration.selectionRects(self, scratch, &rects, r, self.theme.selection);
         }
-        for (hud.flash) |fl| try decoration.selectionRects(self, scratch, &rects, fl, self.theme.accent);
+        for (hud.flash) |fl| try decoration.selectionRects(self, scratch, &rects, fl, self.theme.flash);
         if (hud.cursor_on and !hud.row_focus) {
             try decoration.caretRect(self, scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
             for (0..ed.selectionCount()) |i| {

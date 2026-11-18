@@ -217,9 +217,12 @@ test "e2e/popup-layout: caret-popup layout goldens" {
     var loaded: ?popup_golden.GoldenFile = null;
     defer if (loaded) |f| std.zon.parse.free(gpa, f);
     if (!popup_layout_options.record_popup_layout) {
+        // A golden that is missing or no longer parses (a layout type gained a
+        // field without a re-record) is a FAILURE, not a skip: a gate that
+        // waves through what it cannot read is no gate. Re-record it.
         loaded = popup_golden.loadGoldens(gpa, baseline_path) catch |err| {
-            log.warn("no goldens at {s} ({t}) — run `zig build e2e-popup-layout -Drecord-popup-layout=true` to record them", .{ baseline_path, err });
-            return error.SkipZigTest;
+            log.err("goldens at {s} cannot be read ({t}) — run `zig build e2e-popup-layout -Drecord-popup-layout=true` to record them, then `zig fmt` the file", .{ baseline_path, err });
+            return error.GoldenUnreadable;
         };
     }
 
@@ -543,7 +546,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         try t.expect(std.mem.indexOf(u8, dl.rows[0].text, "find") != null);
         try t.expect(std.mem.indexOf(u8, dl.rows[0].text, "[3/5]") != null);
         try t.expect(dl.rows[3].selected); // header(0) + charlie's item index (2) = 3
-        try t.expectEqual(popup.SpanRole.muted, dl.rows[1].role);
+        try t.expectEqual(popup.SpanRole.normal, dl.rows[1].role); // an item reads in the body colour
         try checkOrRecordDock(gpa, &record_dock_cases, loaded, &any_mismatch, "dock_selected_mid", dl);
     }
 

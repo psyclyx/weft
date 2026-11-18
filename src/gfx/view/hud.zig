@@ -20,7 +20,10 @@ const InlineAttr = core.capability.InlineAttr;
 /// Caret shape. Configurable per mode by the host (vim: block in normal,
 /// bar in insert). `block` covers the glyph (which flips to `cursor_text`);
 /// `bar`/`underline` sit beside/under it and never recolor the glyph.
-pub const CursorStyle = enum { block, bar, underline };
+/// `hollow` is an outlined cell: the caret of a pane that is not taking the
+/// keys — another pane has the focus, or typing lands in a prompt or the
+/// picker — so the position reads without claiming that typing lands there.
+pub const CursorStyle = enum { block, bar, underline, hollow };
 
 /// Where the caret draws relative to its selection, declared per mode like
 /// the style. `head` (the default) draws at the head offset — one past the
@@ -143,6 +146,11 @@ pub const Hud = struct {
     /// as the focused row, and no caret is drawn — typing inserts nothing
     /// there, and a caret would say it does.
     row_focus: bool = false,
+    /// What paints the fenced code in a popup's document (a hover, a
+    /// signature, a completion's detail) with syntax colours: the frame's,
+    /// over the pane's grammar. Null paints none — the markdown code colour
+    /// stands.
+    code_hl: ?CodeHighlighter = null,
     /// Retained plugin overlays (which-key/files/git) to draw this frame.
     /// corner/center placements overlay the body; bottom is reserved for the
     /// dock (the picker/which-key path).
@@ -307,3 +315,12 @@ test "hud: the panel reserves exactly what it renders (no status overlap)" {
     // And the body reservation leaves the panel_top clear of the body.
     try testing.expectEqual(panel_top, rows_total - hud.rows());
 }
+
+/// A painter of code the view did not lay out from a document: `paint`
+/// fills `out` (one class per byte of `text`) for `lang` — a fence's info
+/// string, or "" for the pane's own grammar — and says whether it painted
+/// anything. The view knows no grammar; the frame hands it one of these.
+pub const CodeHighlighter = struct {
+    ctx: *anyopaque,
+    paint: *const fn (ctx: *anyopaque, lang: []const u8, text: []const u8, out: []core.capability.HighlightClass) bool,
+};

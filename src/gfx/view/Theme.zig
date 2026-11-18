@@ -39,6 +39,21 @@ heading: [4]f32 = .{ 0.93, 0.87, 0.72, 1 },
 md_marker: [4]f32 = .{ 0.42, 0.46, 0.52, 1 },
 md_code: [4]f32 = .{ 0.62, 0.79, 0.55, 1 },
 md_link: [4]f32 = .{ 0.53, 0.70, 0.92, 1 },
+// Structure (doc/chrome.md §3): what the UI's surfaces are made of.
+/// A floating panel's face — a popup, the picker's dock, a prompt's bar, a
+/// menu: lifted a step off the background, never the selection wash.
+panel: [4]f32 = .{ 0.125, 0.135, 0.155, 1 },
+/// A panel's outline and the rule under a popup's rows.
+panel_border: [4]f32 = .{ 0.26, 0.28, 0.32, 1 },
+/// The row a list has chosen (a completion, a pick, a menu item), with the
+/// text drawn on it: a cool lift that keeps syntax colours readable, not the
+/// accent filled under inverted text.
+chosen: [4]f32 = .{ 0.22, 0.30, 0.42, 1 },
+chosen_text: [4]f32 = .{ 0.95, 0.96, 0.97, 1 },
+/// The bars: the status line and the tab strip.
+chrome: [4]f32 = .{ 0.105, 0.115, 0.13, 1 },
+/// vim-goggles: the wash over what an operation just touched.
+flash: [4]f32 = .{ 0.42, 0.36, 0.17, 1 },
 
 pub fn linearized(self: Theme) Theme {
     var out: Theme = undefined;

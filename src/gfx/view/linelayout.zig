@@ -242,7 +242,7 @@ pub fn layoutRow(
     out: *std.ArrayList(layout.VisualLine),
 ) !void {
     if (md) |m|
-        try layoutMarkdownLine(v, scratch, la, runs, rope, row, y_top, m, flips, wrap, out)
+        try layoutMarkdownLine(v, scratch, la, runs, rope, row, y_top, m, styles, flips, wrap, out)
     else
         try layoutMonoLine(v, scratch, la, runs, rope, row, y_top, cols_visible, styles, flips, wrap, out);
 }
@@ -743,6 +743,7 @@ fn layoutMarkdownLine(
     row: usize,
     y_top: f32,
     md: MdInline,
+    styles: StyleInputs,
     flips: []const usize,
     wrap: ?Wrap,
     out: *std.ArrayList(layout.VisualLine),
@@ -788,20 +789,21 @@ fn layoutMarkdownLine(
     const Shape = struct {
         v: *View,
         md: MdInline,
+        styles: StyleInputs,
         text: []const u8,
         base: usize,
         lo: usize,
         hi: usize,
 
         fn style(self: @This(), k: usize) InlineStyle {
-            return effStyle(self.v, self.md, self.base + k, self.lo, self.hi);
+            return effStyle(self.v, self.md, self.styles, self.base + k, self.lo, self.hi);
         }
         fn hidden(self: @This(), k: usize) bool {
             const a = self.md.at(self.base + k);
             return self.md.rendered and a.marker and !a.block;
         }
     };
-    const sh: Shape = .{ .v = v, .md = md, .text = text, .base = line.start, .lo = caret_lo, .hi = caret_hi };
+    const sh: Shape = .{ .v = v, .md = md, .styles = styles, .text = text, .base = line.start, .lo = caret_lo, .hi = caret_hi };
 
     // Under wrap, measure the whole line first: each scalar's advance, from
     // the same styled shaping the segments draw with.
@@ -917,8 +919,18 @@ fn inlineStyle(v: *View, a: InlineAttr) InlineStyle {
 }
 
 /// `inlineStyle` with the block-caret glyph recolored to cursor_text.
-fn effStyle(v: *View, md: MdInline, off: usize, caret_lo: usize, caret_hi: usize) InlineStyle {
-    var st = inlineStyle(v, md.at(off));
+/// A byte's style: its markdown attribute's, a syntax class over a fenced
+/// block's code where the frame painted one (`styles.hl` — a popup's
+/// document, doc_popup.zig), and the caret's glyph flipped.
+fn effStyle(v: *View, md: MdInline, styles: StyleInputs, off: usize, caret_lo: usize, caret_hi: usize) InlineStyle {
+    const a = md.at(off);
+    var st = inlineStyle(v, a);
+    if (a.role == .code and !a.marker) if (styles.hl) |h| {
+        if (off >= styles.hl_base and off - styles.hl_base < h.len) {
+            const class = h[off - styles.hl_base];
+            if (class != .none) st.color = v.theme.classColor(class);
+        }
+    };
     if (off >= caret_lo and off < caret_hi) st.color = v.theme.cursor_text;
     return st;
 }

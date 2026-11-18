@@ -79,7 +79,7 @@ pub fn buildHud(
         .y = status_rect.y,
         .w = status_rect.w,
         .h = status_rect.h,
-        .color = v.theme.selection,
+        .color = v.theme.chrome,
     });
 
     // Every segment, left and right, is measured in the style this frame

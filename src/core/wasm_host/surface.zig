@@ -44,7 +44,19 @@ pub fn hSurfaceDoc(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const text = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(text);
     p.surface.setInfo(p.gpa, text);
-    p.surface.above = @as(u32, @bitCast(args[2])) & 1 != 0;
+    const flags: u32 = @bitCast(args[2]);
+    p.surface.above = flags & 1 != 0;
+    // Bits 8+: visual lines scrolled off the document's top.
+    p.surface.info_skip = flags >> 8;
+}
+/// `wl_surface_hint(ptr, len)`: the keys that drive the surface, shown in its
+/// frame — `key\tlabel` per line (`core.surface.Surface.hint`).
+pub fn hSurfaceHint(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const text = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(text);
+    p.surface.setHint(p.gpa, text);
 }
 pub fn hSurfaceRow(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;

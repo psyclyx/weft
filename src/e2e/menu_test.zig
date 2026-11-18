@@ -439,3 +439,55 @@ test "menu: F3 reconcile — a leaf's own setMode-then-resolve mid-handler sees 
     try t.expectEqualStrings("leaf-target", ed.mode());
     try t.expect(!ed.head.hasOpenTransients());
 }
+
+test "menu: a which-key page that does not fit says where it stands and which keys page it, on the popup's hint line" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var edits: usize = 0;
+    _ = try ed.commands.bind(gpa, "test-edit", .{ .name = "test-edit", .summary = "test", .args = &.{}, .handler = countNavigation, .data = &edits });
+    // More bindings than one page holds: C-M-a..z and M-a..n.
+    var names: [40][6]u8 = undefined;
+    for (&names, 0..) |*name, i| {
+        const key = if (i < 26)
+            try std.fmt.bufPrint(name, "C-M-{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))})
+        else
+            try std.fmt.bufPrint(name, "M-{c}", .{@as(u8, 'a') + @as(u8, @intCast(i - 26))});
+        try ed.keymap.bind(gpa, "normal", key, "test-edit", core.Keymap.prio_config, "test");
+    }
+    try ed.keymap.bind(gpa, "normal", "F1", "which-key.show", core.Keymap.prio_config, "test");
+    try ed.keymap.bind(gpa, "menu-nav", "C-n", "which-key.page-down", core.Keymap.prio_config, "test");
+    try h.loadWhichKey(&ed);
+    ed.setMode("normal");
+    ed.press("F1", "");
+    try t.expect(ed.session.menu_overlay.open);
+    // The overlay fires `on_menu` at the frame boundary; fire it as the app's
+    // MenuOverlay does, so the plugin publishes its surface.
+    for (ed.plugins.items) |pl| core.wasm_host.notifyMenu(pl, true);
+    defer for (ed.plugins.items) |pl| core.wasm_host.notifyMenu(pl, false);
+    const hint = for (ed.plugins.items) |pl| {
+        if (pl.surface.active and pl.surface.hint.len > 0) break pl.surface.hint;
+    } else return error.NoHint;
+    // The paging key the keymap has, by its command — and the page's range.
+    try t.expect(std.mem.indexOf(u8, hint, "C-n\tnext page") != null);
+    try t.expect(std.mem.indexOf(u8, hint, "\t1-32/") != null);
+    // No row carries the position any more: the rows are bindings alone.
+    const rows = try whichKeyText(&ed, gpa);
+    defer gpa.free(rows);
+    try t.expect(std.mem.indexOf(u8, rows, "1-32/") == null);
+    ed.press("F1", "");
+}
+
+fn whichKeyText(ed: *Editor, gpa: std.mem.Allocator) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (ed.plugins.items) |pl| {
+        if (!pl.surface.active) continue;
+        for (pl.surface.rows.items) |row| for (row.spans.items) |span| {
+            try out.appendSlice(gpa, span.text);
+            try out.append(gpa, ' ');
+        };
+    }
+    return out.toOwnedSlice(gpa);
+}

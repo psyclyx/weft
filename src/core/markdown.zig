@@ -65,7 +65,7 @@ pub fn analyze(gpa: Allocator, rope: *const stemma.Rope, range: stemma.Range) ![
 }
 
 /// A fenced-code delimiter: 3+ backticks or tildes after optional spaces.
-fn isFence(line: []const u8) bool {
+pub fn isFence(line: []const u8) bool {
     var i: usize = 0;
     while (i < line.len and line[i] == ' ') i += 1;
     if (i >= line.len or (line[i] != '`' and line[i] != '~')) return false;

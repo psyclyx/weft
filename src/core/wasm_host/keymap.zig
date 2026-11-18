@@ -242,6 +242,17 @@ pub fn hMenuMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     p.activeCtx().keymap.tagMode(p.gpa, mode, "menu") catch {};
 }
 
+/// `prompt_mode(mode)`: declare a mode whose typing lands in a surface of its
+/// own (a prompt's line) rather than in the document — so the frame draws
+/// the document's caret as a hollow box there instead of an insert bar.
+pub fn hPromptMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(mode);
+    p.activeCtx().keymap.tagMode(p.gpa, mode, "prompt") catch {};
+}
+
 /// `resting_mode(mode)`: declare a mode a buffer can rest in, so `baseMode` stops
 /// there instead of overshooting to the root `default`.
 pub fn hRestingMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

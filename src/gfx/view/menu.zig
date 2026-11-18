@@ -522,13 +522,9 @@ pub fn draw(
     const boxes = try layout(v, scratch, panels, anchor, bounds, &v.menu_scroll);
     const sink: chrome.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
     const th = &v.theme;
-    const fill = switch (v.chrome) {
-        .text, .text_icons => chrome.mix(th.background, th.selection, 0.22),
-        .widget => chrome.mix(th.background, th.selection, 0.3),
-    };
     var hits: std.ArrayList(Hit) = .empty;
     for (panels, boxes) |panel, pb| {
-        try chrome.paintPanel(sink, pb.box, fill, th.status, .menu);
+        try chrome.paintPanel(sink, pb.box, th.panel, th.panel_border, .menu);
         if (pb.more_up) |r| try chrome.paintMenuMore(sink, r, .up);
         if (pb.more_down) |r| try chrome.paintMenuMore(sink, r, .down);
         for (pb.rows) |rb| {

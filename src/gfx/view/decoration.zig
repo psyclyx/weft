@@ -88,6 +88,7 @@ pub fn caretRect(v: *View, scratch: Allocator, rects: *std.ArrayList(Rect), off:
         .block => .{ .x = c.x, .y = c.y_top, .w = w, .h = c.height, .color = color },
         .bar => .{ .x = c.x - 1, .y = c.y_top, .w = 2, .h = c.height, .color = color },
         .underline => .{ .x = c.x, .y = c.y_top + c.height - 2, .w = w, .h = 2, .color = color },
+        .hollow => .{ .x = c.x, .y = c.y_top, .w = w, .h = c.height, .color = color, .shape = .{ .rounded = .{ .radius = 0, .stroke_width = 1 } } },
     };
     try rects.append(scratch, rect);
 }

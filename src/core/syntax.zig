@@ -506,6 +506,16 @@ pub const Runtime = struct {
         self.pool = pool;
     }
 
+    /// The spec registered under `name` (a fence's info string: `zig`,
+    /// `rust`), or null.
+    pub fn forName(self: *const Runtime, name: []const u8) ?*const LanguageSpec {
+        if (name.len == 0) return null;
+        for (self.specs.items) |*o| {
+            if (std.ascii.eqlIgnoreCase(o.spec.name, name)) return &o.spec;
+        }
+        return null;
+    }
+
     pub fn forPath(self: *const Runtime, path: []const u8) ?*const LanguageSpec {
         // Later registrations shadow earlier (config over builtin).
         var i = self.specs.items.len;
@@ -1266,6 +1276,38 @@ pub const Syntax = struct {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+/// Class-per-byte over a standalone `text` in `spec`'s grammar — code the
+/// editor did not open as a document: a fenced block in a hover's markdown,
+/// a completion's detail. A full parse of a short text, on the frame that
+/// shows it; nothing is cached here, so a caller shows only what fits a
+/// popup. Caller frees.
+pub fn paintText(gpa: Allocator, rt: *Runtime, spec: *const LanguageSpec, text: []const u8) ![]Class {
+    const compiled = try rt.compiledFor(gpa, spec);
+    const parser = c.ts_parser_new() orelse return error.OutOfMemory;
+    defer c.ts_parser_delete(parser);
+    if (!c.ts_parser_set_language(parser, compiled.lang)) return error.GrammarLoad;
+    const tree = c.ts_parser_parse_string(parser, null, text.ptr, @intCast(text.len)) orelse return error.OutOfMemory;
+    defer c.ts_tree_delete(tree);
+    const qcursor = c.ts_query_cursor_new() orelse return error.OutOfMemory;
+    defer c.ts_query_cursor_delete(qcursor);
+    const out = try gpa.alloc(Class, text.len);
+    @memset(out, .none);
+    c.ts_query_cursor_exec(qcursor, compiled.query, c.ts_tree_root_node(tree));
+    var match: c.TSQueryMatch = undefined;
+    while (c.ts_query_cursor_next_match(qcursor, &match)) {
+        if (!compiled.enabled[match.pattern_index]) continue;
+        for (match.captures[0..match.capture_count]) |cap| {
+            const class = compiled.classes[cap.index];
+            if (class == .none) continue;
+            const s: usize = @intCast(c.ts_node_start_byte(cap.node));
+            const e: usize = @min(@as(usize, @intCast(c.ts_node_end_byte(cap.node))), text.len);
+            if (s >= e) continue;
+            @memset(out[s..e], class);
+        }
+    }
+    return out;
 }
 
 // ── Capability wiring ───────────────────────────────────────────────

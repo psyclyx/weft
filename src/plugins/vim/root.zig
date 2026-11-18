@@ -1710,7 +1710,10 @@ fn opLineText() void {
     const l = weft.lineAt(weft.cursor());
     if (op_copies) yankCurrent(l.start, l.end, true);
     const edit = op_edit_cmd orelse {
-        weft.exitToResting(); // yy: yank the line, nothing to edit
+        // yy: yank the line, nothing to edit — and show what was taken, as
+        // `yw` and `Y` do (vim-goggles).
+        weft.flash(l.start, l.end);
+        weft.exitToResting();
         return;
     };
     // A non-delete line operator (gcc) toggles over the line's content in place.

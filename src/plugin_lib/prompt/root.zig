@@ -179,6 +179,7 @@ pub fn Prompt(comptime cfg: Config) type {
         /// prompt in the editor. A config that disagrees rebinds the mode.
         pub fn install() void {
             weft.textInput(mode, cfg.name ++ "-type");
+            weft.promptMode(mode); // typing lands in the bar, not the document
             weft.bindKey(mode, "Return", cfg.name ++ "-accept");
             weft.bindKey(mode, "KP_Enter", cfg.name ++ "-accept");
             weft.bindKey(mode, "BackSpace", cfg.name ++ "-backspace");

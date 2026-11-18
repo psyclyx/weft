@@ -72,17 +72,63 @@ pub fn keysForAt(ctx: *command.Context, gpa: Allocator, target: []const u8, mode
     if (!index.fresh(stamp, mode)) try index.rebuild(ctx, stamp, mode, snap);
 
     const keys = index.by_target.get(target) orelse &.{};
-    const out = try gpa.alloc([]u8, keys.len);
-    var n: usize = 0;
+    var out: std.ArrayList([]u8) = .empty;
     errdefer {
-        for (out[0..n]) |k| gpa.free(k);
-        gpa.free(out);
+        for (out.items) |k| gpa.free(k);
+        out.deinit(gpa);
     }
+    // The layers an owner lent the head (`wl_key_layers`) answer FIRST, as
+    // dispatch offers a key to them first: while a completion popup shows,
+    // Tab is the key that runs `complete.next`, whatever the grammar binds —
+    // and the popup's own hint line asks exactly this question.
+    if (where == .active) try layerKeys(ctx, gpa, target, snap, &out);
     for (keys) |k| {
-        out[n] = try gpa.dupe(u8, k);
-        n += 1;
+        if (hasKey(out.items, k)) continue;
+        try out.append(gpa, try gpa.dupe(u8, k));
     }
-    return out;
+    return out.toOwnedSlice(gpa);
+}
+
+fn hasKey(keys: []const []u8, key: []const u8) bool {
+    for (keys) |k| if (std.mem.eql(u8, k, key)) return true;
+    return false;
+}
+
+/// The keys that run `target` through the head's lent key layers, newest
+/// owner first and shortest first within a layer — each layer read on its
+/// own (a layer is a mode dispatch consults directly, with no fallback walk,
+/// `Keymap.layerArms`). Appended to `out`, owned.
+fn layerKeys(ctx: *command.Context, gpa: Allocator, target: []const u8, snap: ?*const catalog.Snapshot, out: *std.ArrayList([]u8)) Allocator.Error!void {
+    for (ctx.head.key_layers.items) |kl| {
+        var names = std.mem.splitScalar(u8, kl.names, '\n');
+        while (names.next()) |layer| try layerKeysOf(ctx, gpa, layer, target, snap, out);
+    }
+    // The menu-nav layer answers while an overlay scope is open — a chord
+    // pending, a menu mode, or a peek — the same condition dispatch pages
+    // under (app/dispatch.zig): which-key's hint asks for its own keys.
+    const overlay = if (ctx.overlay_navigation_active) |active| active.* else false;
+    if (ctx.head.pending.len > 0 or ctx.keymap.modeHasTag(ctx.head.currentMode(), "menu") or overlay)
+        try layerKeysOf(ctx, gpa, Keymap.menu_nav_mode, target, snap, out);
+}
+
+/// One layer's keys for `target`, shortest first, appended to `out`.
+fn layerKeysOf(ctx: *command.Context, gpa: Allocator, layer: []const u8, target: []const u8, snap: ?*const catalog.Snapshot, out: *std.ArrayList([]u8)) Allocator.Error!void {
+    if (layer.len == 0) return;
+    var bindings: std.ArrayList(Keymap.Binding) = .empty;
+    defer bindings.deinit(gpa);
+    try ctx.keymap.ownBindings(gpa, layer, &bindings);
+    var found: std.ArrayList([]const u8) = .empty;
+    defer found.deinit(gpa);
+    for (bindings.items) |b| {
+        const ran = ranBy(ctx, b.arms, snap) orelse continue;
+        const hit = std.mem.eql(u8, ran.name, target) or (if (ran.via) |via| std.mem.eql(u8, via, target) else false);
+        if (hit) try found.append(gpa, b.key);
+    }
+    std.mem.sort([]const u8, found.items, {}, shorter);
+    for (found.items) |k| {
+        if (hasKey(out.items, k)) continue;
+        try out.append(gpa, try gpa.dupe(u8, k));
+    }
 }
 
 pub fn free(gpa: Allocator, keys: [][]u8) void {
@@ -334,4 +380,59 @@ test "keysFor: the index is read again after a bind, an unbind, a fallback or a 
     }.run;
     _ = try sys.commands.bind(gpa, "zz.later", command.define("zz.later", "Later.", later));
     try t.expectEqual(@as(usize, 1), try count(&ctx, "zz.later"));
+}
+
+test "keysFor: a key layer the head was lent answers first, and only while it is lent" {
+    const gpa = t.allocator;
+    const pool = try @import("task.zig").Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    const sys = try @import("System.zig").create(gpa, pool, "editor", "user");
+    defer sys.destroy();
+    var ctx = sys.contextFor(&sys.default_head);
+    try sys.default_head.setModeRaw(gpa, "normal");
+    const km = &sys.keymap;
+    try km.bind(gpa, "normal", "Z", "edit.redo", Keymap.prio_config, "t");
+    // A popup's layer binds Tab to the same command: nobody is in that mode,
+    // dispatch only consults it while lent.
+    try km.bind(gpa, "complete", "Tab", "edit.redo", Keymap.prio_config, "t");
+
+    const before = try keysFor(&ctx, gpa, "edit.redo", "normal");
+    defer free(gpa, before);
+    try t.expectEqual(@as(usize, 1), before.len);
+    try t.expectEqualStrings("Z", before[0]);
+
+    try sys.default_head.setKeyLayers(gpa, 1, "complete");
+    const lent = try keysFor(&ctx, gpa, "edit.redo", "normal");
+    defer free(gpa, lent);
+    try t.expectEqual(@as(usize, 2), lent.len);
+    try t.expectEqualStrings("Tab", lent[0]);
+    try t.expectEqualStrings("Z", lent[1]);
+
+    try sys.default_head.setKeyLayers(gpa, 1, "");
+    const after = try keysFor(&ctx, gpa, "edit.redo", "normal");
+    defer free(gpa, after);
+    try t.expectEqual(@as(usize, 1), after.len);
+}
+
+test "keysFor: the menu-nav layer answers in a menu mode, not at rest" {
+    const gpa = t.allocator;
+    const pool = try @import("task.zig").Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    const sys = try @import("System.zig").create(gpa, pool, "editor", "user");
+    defer sys.destroy();
+    var ctx = sys.contextFor(&sys.default_head);
+    const km = &sys.keymap;
+    try km.bind(gpa, Keymap.menu_nav_mode, "C-n", "edit.redo", Keymap.prio_config, "t");
+    try km.tagMode(gpa, "leader", "menu");
+
+    try sys.default_head.setModeRaw(gpa, "normal");
+    const at_rest = try keysFor(&ctx, gpa, "edit.redo", "normal");
+    defer free(gpa, at_rest);
+    try t.expect(!hasKey(at_rest, "C-n"));
+
+    try sys.default_head.setModeRaw(gpa, "leader");
+    const in_menu = try keysFor(&ctx, gpa, "edit.redo", "leader");
+    defer free(gpa, in_menu);
+    try t.expect(in_menu.len > 0);
+    try t.expectEqualStrings("C-n", in_menu[0]);
 }

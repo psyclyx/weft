@@ -56,6 +56,8 @@ const cmds = [_]weft.CommandEntry{
     .{ .name = "complete.prev", .call = prev, .arity = .whole, .summary = "Choose the previous completion.", .internal = true },
     .{ .name = "complete.accept", .call = popup.accept, .arity = .whole, .summary = "Put the chosen completion in place of the word.", .internal = true },
     .{ .name = "complete.dismiss", .call = popup.close, .arity = .whole, .summary = "Close the completion list.", .internal = true },
+    .{ .name = "complete.docs-down", .call = popup.docsDown, .arity = .whole, .summary = "Scroll the chosen completion's docs down.", .internal = true },
+    .{ .name = "complete.docs-up", .call = popup.docsUp, .arity = .whole, .summary = "Scroll the chosen completion's docs up.", .internal = true },
     // Internal: what a heard signal or a loop's poll does, run as a dispatch
     // (the popup's doors are a dispatching head's).
     .{ .name = "complete.follow", .call = popup.follow, .arity = .whole, .summary = "Narrow the completion list to the word being typed.", .internal = true },

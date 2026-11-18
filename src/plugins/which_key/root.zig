@@ -7,7 +7,8 @@
 //! carry a semantic Role, not a color): the KEY reads in the group/accent color
 //! so it pops from the plain command text. When there are more bindings than fit
 //! a page, it PAGINATES — `which-key.page-down`/`-up` (bound in `menu-nav`, which
-//! menus fall back to) scroll it, and a footer shows the position.
+//! menus fall back to) scroll it, and the popup's hint line (its frame, not a
+//! row) shows the position and the keys that page it.
 //!
 //! Every row reads by LABEL (doc/chrome.md §1.2): a leaf by its command's
 //! (`Split Editor Right`, `Open File…`), a group by the name config gave it;
@@ -22,7 +23,7 @@
 const std = @import("std");
 const weft = @import("weft");
 
-/// Rows of bindings per page (before the position footer). A long menu — or a
+/// Rows of bindings per page. A long menu — or a
 /// mode's whole resolved set on an F1 peek — paginates instead of overflowing.
 // Keep the guest's page generous and let the host viewport clamp the drawn
 // rows. A fixed dozen rows made a large display look artificially sparse;
@@ -171,14 +172,19 @@ fn render() void {
         }
         shown += 1;
     }
-    // A position footer when it doesn't all fit — shows the range + that C-n/C-p
-    // page it (and Backspace pops a level; the nav keys are `menu-nav` config).
+    // When it doesn't all fit, the popup's frame says where the page stands
+    // and which keys page it — asked of the keymap (the nav keys are
+    // `menu-nav` config), so a rebind shows — on the surface's hint line,
+    // never as a row of its own.
     if (total > PAGE) {
         var buf: [64]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "{d}-{d}/{d}  C-n/C-p", .{ scroll_off + 1, scroll_off + shown, total }) catch "…";
-        weft.surfaceRow();
-        weft.surfaceSpan(msg, .muted);
-    }
+        const pos = std.fmt.bufPrint(&buf, "{d}-{d}/{d}", .{ scroll_off + 1, scroll_off + shown, total }) catch "…";
+        weft.surfaceHint(&.{
+            .{ .key = weft.firstKey(weft.keysFor("which-key.page-down")), .label = "next page" },
+            .{ .key = weft.firstKey(weft.keysFor("which-key.page-up")), .label = "prev page" },
+            .{ .key = "", .label = pos },
+        });
+    } else weft.surfaceHint(&.{});
     weft.surfaceEnd(-1);
 }
 

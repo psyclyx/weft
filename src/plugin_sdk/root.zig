@@ -953,6 +953,14 @@ pub fn textInput(mode: []const u8, cmd: ?[]const u8) void {
 pub fn menuMode(mode: []const u8) void {
     e.wl_menu_mode(p(mode.ptr), @intCast(mode.len));
 }
+/// Declare `mode` a PROMPT mode: its typing lands in a surface of its own (a
+/// prompt's line along the bottom), not in the document — so the frame draws
+/// the document's caret as a hollow box while it is up, never an insert bar
+/// claiming that typing lands there. The prompt library declares it; a
+/// grammar never needs to.
+pub fn promptMode(mode: []const u8) void {
+    e.wl_prompt_mode(p(mode.ptr), @intCast(mode.len));
+}
 /// Declare `mode` a RESTING mode — the base a buffer settles in: the editing base
 /// (`normal`) or a tool projection (`files`, `output`, …). Leaving a buffer in a
 /// transient sub-mode (visual/insert) remembers this instead of overshooting to
@@ -1842,9 +1850,37 @@ pub fn surfaceCaret(offset: usize) void {
 /// `surfaceEnd`) a MARKDOWN document: rendered and wrapped by the host the
 /// way a markdown entry is, beside the surface's rows — or, with no rows,
 /// as the popup itself (a hover). `above`: rather above the caret's line
-/// than below it.
-pub fn surfaceDoc(markdown: []const u8, opts: struct { above: bool = false }) void {
-    e.wl_surface_doc(p(markdown.ptr), @intCast(markdown.len), @intFromBool(opts.above));
+/// than below it. `skip`: visual lines scrolled off the document's top, for
+/// an owner whose keys page through a long one.
+pub fn surfaceDoc(markdown: []const u8, opts: struct { above: bool = false, skip: u32 = 0 }) void {
+    e.wl_surface_doc(p(markdown.ptr), @intCast(markdown.len), @intFromBool(opts.above) | (opts.skip << 8));
+}
+/// One key/label pair of a surface's hint line (`surfaceHint`). An empty
+/// `key` makes the pair a plain note (a position, `3/41`).
+pub const Hint = struct { key: []const u8, label: []const u8 };
+/// The keys that drive the surface being built, shown in its frame as a
+/// footer line — the key in the accent, its label muted, pairs a space
+/// apart: what which-key does for a menu, done for a popup. Pairs with an
+/// empty key AND label are dropped, so a caller can hand in every key it
+/// looked up and let the unbound ones fall away. Nothing shows for none.
+pub fn surfaceHint(pairs: []const Hint) void {
+    var buf: [1024]u8 = undefined;
+    var n: usize = 0;
+    for (pairs) |h| {
+        if (h.key.len == 0 and h.label.len == 0) continue;
+        if (n + h.key.len + h.label.len + 2 > buf.len) break;
+        if (n > 0) {
+            buf[n] = '\n';
+            n += 1;
+        }
+        @memcpy(buf[n..][0..h.key.len], h.key);
+        n += h.key.len;
+        buf[n] = '\t';
+        n += 1;
+        @memcpy(buf[n..][0..h.label.len], h.label);
+        n += h.label.len;
+    }
+    e.wl_surface_hint(p(&buf), @intCast(n));
 }
 /// Start a new row.
 pub fn surfaceRow() void {

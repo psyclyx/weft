@@ -674,9 +674,9 @@ pub fn buildSurface(self: *const Pick, scratch: Allocator, max_rows: usize, plac
 
 /// The window-bottom dock: a header row (prompt + narrow chip + query +
 /// count + style, one `.normal`-role span — always shown, even with zero
-/// candidates) then one `.muted`-role row per shown candidate (item + its
-/// doc joined into a single string, matching the old `drawPickInto`'s
-/// layout exactly — the dock never column-aligns the note like the caret
+/// candidates) then one row per shown candidate: the item as a `.normal`
+/// span, its doc and annotation as `.annotation` spans after it (the dock
+/// draws spans left to right and never column-aligns them like the caret
 /// popup does). `surf.selected` marks the highlighted item row (offset by
 /// the header), or null when nothing is shown.
 fn buildDockSurface(self: *const Pick, scratch: Allocator, max_rows: usize, place: Place) ?surface.Surface {
@@ -714,22 +714,17 @@ fn buildDockSurface(self: *const Pick, scratch: Allocator, max_rows: usize, plac
             else
                 std.fmt.allocPrint(scratch, "{s}", .{item})) catch continue;
             surf.addRow(scratch);
-            surf.addSpan(scratch, main, .muted);
+            surf.addSpan(scratch, main, .normal);
             if (ann.len > 0) surf.addSpan(scratch, ann, .annotation);
             continue;
         }
-        // The dock joins into one span (it never column-aligns), so the
-        // annotation trails the producer's own note with the same separator.
-        const l = (if (doc.len > 0 and ann.len > 0)
-            std.fmt.allocPrint(scratch, "  {s}  · {s} · {s}", .{ item, doc, ann })
-        else if (doc.len > 0)
-            std.fmt.allocPrint(scratch, "  {s}  · {s}", .{ item, doc })
-        else if (ann.len > 0)
-            std.fmt.allocPrint(scratch, "  {s}  · {s}", .{ item, ann })
-        else
-            std.fmt.allocPrint(scratch, "  {s}", .{item})) catch continue;
+        // The dock draws every span left to right (it never column-aligns):
+        // the item in the body's own colour, the producer's note and the
+        // annotation beside it as side notes, each with the same separator.
         surf.addRow(scratch);
-        surf.addSpan(scratch, l, .muted);
+        surf.addSpan(scratch, std.fmt.allocPrint(scratch, "  {s}", .{item}) catch continue, .normal);
+        if (doc.len > 0) surf.addSpan(scratch, std.fmt.allocPrint(scratch, "  · {s}", .{doc}) catch continue, .annotation);
+        if (ann.len > 0) surf.addSpan(scratch, std.fmt.allocPrint(scratch, "{s}· {s}", .{ if (doc.len > 0) " " else "  ", ann }) catch continue, .annotation);
     }
     const selected: ?usize = if (shown > 0) 1 + (self.selected - start) else null;
     surf.end(scratch, selected);

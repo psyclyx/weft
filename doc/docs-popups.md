@@ -84,4 +84,47 @@ Left for later (resolve since done):
   (`wl_caps_item_doc` → `Caps.resolveItem`), which touches the session so
   the popup's `on_poll` hears it (bit 29 of `wl_caps_poll`). The popup keeps
   its race open while the list is, so an item can still be filled in.
-- **Kind icons** instead of tags, once an icon set has them.
+- **Kind icons** — *done:* the `weft` set draws `kind-<name>` icons, each
+  TINTED by the syntax class its kind reads in (`Role.icon` spans carry
+  `name\tfallback\ttint`; `popup.iconColor`), so a function is the function
+  colour in the list as in the text; the `text` chrome style shows the
+  tinted tag instead.
+
+## Landed (2026-10-19, branch `arc/pick-sources`)
+
+- **A popup's frame names the keys that drive it.** `Surface.hint`
+  (`wl_surface_hint`, SDK `surfaceHint`): one `key\tlabel` pair per line,
+  drawn as a footer under the rows — the key in the accent, the label
+  muted — by every panel renderer (caret, corner/center, top). The
+  completion popup asks `keysFor` for each of its commands, so a rebind
+  shows; and `keysFor` now reads the head's lent key layers FIRST, as
+  dispatch does, so the answer while the popup shows is the popup's key.
+  The footer also shows where the list stands (`3/41`).
+- **A chosen item's docs scroll.** `complete.docs-down`/`-up` (C-f/C-b in
+  `complete-chosen`) page the document beside the list; the scroll rides
+  `wl_surface_doc`'s flags (bits 8+ = visual lines off the top,
+  `Surface.info_skip`), and `doc_popup.layoutDoc` never scrolls past the
+  last line.
+- **Fenced code in a popup's document is syntax-highlighted** — a hover's
+  signature, a completion's detail — in the grammar the fence names, else
+  the pane's own: the frame lends the view a `CodeHighlighter`
+  (`Hud.code_hl`, built over `syntax.paintText`, a standalone parse of the
+  block) and the markdown line layout takes the class over the code colour.
+- **Structural colours.** Popups, the picker's dock, menus and tooltips
+  draw on `panel`/`panel_border`; a chosen row on `chosen`/`chosen_text`;
+  the bars on `chrome`; the goggles flash on `flash` — palette slots of
+  their own, no longer the selection wash and the accent. Picker rows carry
+  roles (item `.normal`, notes `.annotation`).
+- **A hollow caret where typing lands elsewhere.** `CursorStyle.hollow`: an
+  unfocused split draws its caret as an outlined cell (it used to draw
+  none), and the focused pane's goes hollow while the picker or a prompt
+  (a mode tagged `prompt` — `wl_prompt_mode`, which the prompt library
+  declares) has the keys.
+- **which-key's page footer is the hint line** too: position and the paging
+  keys, asked by command (`which-key.page-down`/`-up`), so a rebind shows.
+  For that, `keysFor` also reads the `menu-nav` layer whenever an overlay
+  scope is open (a chord, a menu mode, a peek — dispatch's own condition).
+  The corner renderer's "last row is the footer" substitution is gone: rows
+  show in order, and what drives a surface lives in its frame.
+- **The popup-layout gate fails on a golden it cannot read** (it used to
+  warn and skip, which let an unparseable file pass for a while).

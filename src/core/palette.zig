@@ -50,6 +50,15 @@ pub const names = [_][]const u8{
     "md_marker",
     "md_code",
     "md_link",
+    // Structure: the surfaces the UI is built from, apart from the text's
+    // own colours — so a popup is not "the selection colour" and a chosen row
+    // is not "the accent".
+    "panel",
+    "panel_border",
+    "chosen",
+    "chosen_text",
+    "chrome",
+    "flash",
 };
 
 /// The static slot string for a palette name, or null if it is not one.

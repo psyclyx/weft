@@ -82,17 +82,42 @@ fn fromRole(r: core.surface.Role) SpanRole {
     };
 }
 
-/// An icon span's name and its fallback text (`name\tfallback`; the name
-/// alone falls back to nothing).
-fn iconParts(text: []const u8) struct { []const u8, []const u8 } {
-    const tab = std.mem.indexOfScalar(u8, text, '\t') orelse return .{ text, "" };
-    return .{ text[0..tab], text[tab + 1 ..] };
+/// An icon span's name, its fallback text and its tint
+/// (`name\tfallback\ttint`): the name alone falls back to nothing; the tint
+/// names a syntax class (`function`, `keyword`, `type`) the icon and its
+/// fallback are drawn in — a completion's kind reads by colour as it does
+/// in the text — and none means the annotation grey.
+fn iconParts(text: []const u8) struct { []const u8, []const u8, []const u8 } {
+    var it = std.mem.splitScalar(u8, text, '\t');
+    const name = it.next() orelse "";
+    const fallback = it.next() orelse "";
+    const tint = it.next() orelse "";
+    return .{ name, fallback, tint };
+}
+
+/// The colour an icon span draws in: its tint's syntax colour, else the
+/// annotation grey.
+fn iconColor(v: *const View, text: []const u8) [4]f32 {
+    _, _, const tint = iconParts(text);
+    const class = std.meta.stringToEnum(core.capability.HighlightClass, tint) orelse return v.theme.syn_comment;
+    if (class == .none) return v.theme.syn_comment;
+    return v.theme.classColor(class);
+}
+
+test "popup: an icon span's tint names a syntax class; none is the annotation grey" {
+    const font_provider = @import("weft_font_provider");
+    var v = try View.init(std.testing.allocator, font_provider.defaultMono(), 16);
+    defer v.deinit();
+    try std.testing.expectEqual(v.theme.syn_function, iconColor(&v, "kind-function\tfn\tfunction"));
+    try std.testing.expectEqual(v.theme.syn_keyword, iconColor(&v, "kind-keyword\tkw\tkeyword"));
+    try std.testing.expectEqual(v.theme.syn_comment, iconColor(&v, "kind-text\ttxt"));
+    try std.testing.expectEqual(v.theme.syn_comment, iconColor(&v, "kind-text\ttxt\tnonesuch"));
 }
 
 /// The cells an icon span takes: two for the icon where the theme's set has
 /// it, else its fallback text's.
 fn iconCells(v: *const View, text: []const u8) usize {
-    const name, const fallback = iconParts(text);
+    const name, const fallback, _ = iconParts(text);
     if (v.icon(name) != null) return 2;
     return std.unicode.utf8CountCodepoints(fallback) catch fallback.len;
 }
@@ -128,6 +153,67 @@ pub const RowLayout = struct {
     spans: []const SpanLayout,
 };
 
+/// The spans of a surface's hint line (`Surface.hint`: a `key\tlabel` pair
+/// per line), laid out left to right from `x0`: the key in the accent, a
+/// space, its label muted, pairs two cells apart. A pair without a key is a
+/// plain note (a position). Scratch-owned.
+fn hintSpans(v: *const View, scratch: Allocator, hint: []const u8, x0: f32) ![]SpanLayout {
+    var spans: std.ArrayList(SpanLayout) = .empty;
+    var x = x0;
+    var lines = std.mem.splitScalar(u8, hint, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const tab = std.mem.indexOfScalar(u8, line, '\t') orelse line.len;
+        const key = line[0..tab];
+        const label = if (tab < line.len) line[tab + 1 ..] else "";
+        if (!first) x += 2 * v.cell_w;
+        first = false;
+        if (key.len > 0) {
+            try spans.append(scratch, .{ .text = key, .column = 0, .x = x, .role = .accent });
+            x += @as(f32, @floatFromInt(status_layout.cells(key))) * v.cell_w;
+            if (label.len > 0) x += v.cell_w;
+        }
+        if (label.len > 0) {
+            try spans.append(scratch, .{ .text = label, .column = 0, .x = x, .role = .muted });
+            x += @as(f32, @floatFromInt(status_layout.cells(label))) * v.cell_w;
+        }
+    }
+    return spans.items;
+}
+
+/// The cells a hint line takes, as `hintSpans` lays it out.
+fn hintCells(hint: []const u8) usize {
+    var n: usize = 0;
+    var lines = std.mem.splitScalar(u8, hint, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const tab = std.mem.indexOfScalar(u8, line, '\t') orelse line.len;
+        const key = line[0..tab];
+        const label = if (tab < line.len) line[tab + 1 ..] else "";
+        if (!first) n += 2;
+        first = false;
+        n += status_layout.cells(key) + status_layout.cells(label);
+        if (key.len > 0 and label.len > 0) n += 1;
+    }
+    return n;
+}
+
+test "popup: a hint line measures as it lays out — key, space, label; pairs two cells apart; a bare note" {
+    try std.testing.expectEqual(@as(usize, 0), hintCells(""));
+    try std.testing.expectEqual(@as(usize, 8), hintCells("Tab\tnext"));
+    // "Tab next" (8) + 2 + "C-e close" (9) + 2 + "3/41" (4)
+    try std.testing.expectEqual(@as(usize, 25), hintCells("Tab\tnext\nC-e\tclose\n\t3/41"));
+}
+
+/// Draw a surface's hint line as its footer: a rule across the box, the
+/// spans on the row beneath it — the frame of the popup says what drives it.
+fn drawFooter(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), footer: RowLayout, box_x: f32, box_w: f32) !void {
+    try rects.append(scratch, .{ .x = box_x, .y = footer.y, .w = box_w, .h = 1, .color = v.theme.panel_border });
+    for (footer.spans) |sp| try propLine(v, scratch, runs, sp.text, sp.x, footer.y + v.ascent, spanRoleColor(v, sp.role));
+}
+
 /// The document panel's box, already placed: beside the list (right, else
 /// `flipped_left`), else `stacked` below or above it — never over it — or,
 /// for a surface with no rows, at the caret on its own. Its text is a
@@ -156,7 +242,7 @@ fn docMaxH(v: *const View, body: region.Rect) f32 {
 fn docBox(v: *View, scratch: Allocator, surf: *const core.surface.Surface, max_w: f32, body: region.Rect) !struct { doc: doc_popup.Doc, w: f32, h: f32 } {
     const px = doc_popup.padX(v);
     const py = doc_popup.padY(v);
-    const doc = try doc_popup.layoutDoc(v, scratch, surf.info, @max(v.cell_w, max_w - 2 * px), docMaxH(v, body));
+    const doc = try doc_popup.layoutDoc(v, scratch, surf.info, @max(v.cell_w, max_w - 2 * px), docMaxH(v, body), surf.info_skip);
     return .{ .doc = doc, .w = doc.w + 2 * px, .h = doc.h + 2 * py };
 }
 
@@ -181,6 +267,9 @@ pub const CaretLayout = struct {
     col_w: []const usize,
     rows: []const RowLayout,
     info: ?InfoLayout,
+    /// The hint line (`Surface.hint`) as a row under the list, when there
+    /// is one: the keys that drive the popup, in its frame.
+    footer: ?RowLayout = null,
 };
 
 /// Compute a `caret`-placed `Surface`'s layout — resolve the anchor's caret
@@ -251,9 +340,13 @@ pub fn layoutCaretSurface(
         cursor += col_w[ci];
     }
     cursor += 1;
+    // The footer (the keys that drive the popup) takes a row of its own and
+    // widens the box when it is the widest line.
+    const has_hint = surf.hint.len > 0;
+    if (has_hint) cursor = @max(cursor, hintCells(surf.hint) + 2);
 
     const box_w = @as(f32, @floatFromInt(cursor)) * v.cell_w;
-    const box_h = @as(f32, @floatFromInt(nrows)) * v.line_h;
+    const box_h = @as(f32, @floatFromInt(nrows + @intFromBool(has_hint))) * v.line_h;
     // The main text lines up with the anchor (the word being completed),
     // whatever leads it in the row (a kind's icon).
     const lead = @as(f32, @floatFromInt(col_x[main_col])) * v.cell_w - v.cell_w;
@@ -277,6 +370,11 @@ pub fn layoutCaretSurface(
         }
         rows[i] = .{ .y = row_y, .selected = selected, .spans = spans };
     }
+    const footer: ?RowLayout = if (has_hint) .{
+        .y = box_y + @as(f32, @floatFromInt(nrows)) * v.line_h,
+        .selected = false,
+        .spans = try hintSpans(v, scratch, surf.hint, box_x + v.cell_w),
+    } else null;
 
     // The linked document panel (the selected row's docs): beside the list
     // where a readable panel fits — right, else left — else stacked below
@@ -326,6 +424,7 @@ pub fn layoutCaretSurface(
         .col_w = col_w,
         .rows = rows,
         .info = info,
+        .footer = footer,
     };
 }
 
@@ -348,28 +447,32 @@ pub fn drawCaretSurface(
 ) !void {
     const cl = (try layoutCaretSurface(v, scratch, surf, body)) orelse return;
     const sink: chrome.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
-    if (cl.rows.len > 0) try chrome.paintPanel(sink, .{ .x = cl.x, .y = cl.y, .w = cl.w, .h = cl.h }, v.theme.selection, v.theme.accent, .popup);
+    if (cl.rows.len > 0) try chrome.paintPanel(sink, .{ .x = cl.x, .y = cl.y, .w = cl.w, .h = cl.h }, v.theme.panel, v.theme.panel_border, .popup);
 
     for (cl.rows) |row| {
-        if (row.selected) try chrome.paintSelected(sink, .{ .x = cl.x, .y = row.y, .w = cl.w, .h = v.line_h }, v.theme.accent);
+        if (row.selected) try chrome.paintSelected(sink, .{ .x = cl.x, .y = row.y, .w = cl.w, .h = v.line_h }, v.theme.chosen);
         for (row.spans) |sp| {
-            const color = if (row.selected) v.theme.background else spanRoleColor(v, sp.role);
+            const color = if (row.selected) v.theme.chosen_text else spanRoleColor(v, sp.role);
             if (sp.role == .icon) {
-                const name, const fallback = iconParts(sp.text);
+                // Tinted by its kind, chosen or not: the chosen row's lift
+                // keeps a syntax colour readable.
+                const name, const fallback, _ = iconParts(sp.text);
+                const tint = iconColor(v, sp.text);
                 const side = chrome.iconSide(v);
-                if (try chrome.drawIcon(sink, name, sp.x + v.cell_w, row.y + v.line_h / 2, side, color)) continue;
-                try propLine(v, scratch, runs, fallback, sp.x, row.y + v.ascent, color);
+                if (try chrome.drawIcon(sink, name, sp.x + v.cell_w, row.y + v.line_h / 2, side, tint)) continue;
+                try propLine(v, scratch, runs, fallback, sp.x, row.y + v.ascent, tint);
                 continue;
             }
             try propLine(v, scratch, runs, sp.text, sp.x, row.y + v.ascent, color);
         }
     }
+    if (cl.footer) |f| try drawFooter(v, scratch, runs, rects, f, cl.x, cl.w);
 
     if (cl.info) |info| {
         const box: region.Rect = .{ .x = info.x, .y = info.y, .w = info.w, .h = info.h };
-        try chrome.paintPanel(sink, box, v.theme.selection, v.theme.accent, .popup);
+        try chrome.paintPanel(sink, box, v.theme.panel, v.theme.panel_border, .popup);
         // The same document, laid out to the width its box was given.
-        const doc = try doc_popup.layoutDoc(v, scratch, surf.info, @max(v.cell_w, info.w - 2 * doc_popup.padX(v)), @max(0, info.h - 2 * doc_popup.padY(v)));
+        const doc = try doc_popup.layoutDoc(v, scratch, surf.info, @max(v.cell_w, info.w - 2 * doc_popup.padX(v)), @max(0, info.h - 2 * doc_popup.padY(v)), surf.info_skip);
         try doc_popup.drawDoc(scratch, runs, doc, info.x + doc_popup.padX(v), info.y + doc_popup.padY(v), box);
     }
 }
@@ -434,51 +537,37 @@ pub fn layoutDockSurface(v: *View, scratch: Allocator, surf: *const core.surface
 /// same legibility rule `drawCaretSurface` uses.
 pub fn drawDockSurface(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), surf: *const core.surface.Surface, dock: region.Rect) !void {
     const dl = (try layoutDockSurface(v, scratch, surf, dock)) orelse return;
-    try rects.append(scratch, .{ .x = dl.x, .y = dl.y, .w = dl.w, .h = dl.h, .color = v.theme.selection });
-    try rects.append(scratch, .{ .x = dl.x, .y = dl.y, .w = dl.w, .h = 1, .color = v.theme.accent });
+    try rects.append(scratch, .{ .x = dl.x, .y = dl.y, .w = dl.w, .h = dl.h, .color = v.theme.panel });
+    try rects.append(scratch, .{ .x = dl.x, .y = dl.y, .w = dl.w, .h = 1, .color = v.theme.panel_border });
     const sink: chrome.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
     for (dl.rows) |row| {
-        if (row.selected) try chrome.paintSelected(sink, .{ .x = dl.x, .y = row.y, .w = dl.w, .h = v.line_h }, v.theme.accent);
+        if (row.selected) try chrome.paintSelected(sink, .{ .x = dl.x, .y = row.y, .w = dl.w, .h = v.line_h }, v.theme.chosen);
         for (row.spans) |sp| {
             if (sp.text.len == 0) continue;
-            const color = if (row.selected) v.theme.background else spanRoleColor(v, sp.role);
+            const color = if (row.selected) v.theme.chosen_text else spanRoleColor(v, sp.role);
             try propLine(v, scratch, runs, sp.text, sp.x, row.y + v.ascent, color);
         }
     }
-}
-
-/// Which of a surface's `total` rows the `i`th of the `nrows` that fit shows:
-/// the first rows in order, except that the LAST one that fits is the
-/// surface's own last row (its footer), whenever rows were dropped.
-fn shownRow(total: usize, nrows: usize, i: usize) usize {
-    return if (nrows < total and i == nrows - 1) total - 1 else i;
-}
-
-test "popup: a surface that doesn't fit keeps its footer as its last row" {
-    // 10 rows, 4 fit: rows 0, 1, 2, then the footer (9).
-    const want = [_]usize{ 0, 1, 2, 9 };
-    for (want, 0..) |w, i| try std.testing.expectEqual(w, shownRow(10, 4, i));
-    // Everything fits: rows in order, nothing substituted.
-    for (0..3) |i| try std.testing.expectEqual(i, shownRow(3, 3, i));
 }
 
 /// A `top` surface: a panel floating at the top centre of the frame — where a
 /// command palette sits in most editors — with the dock's rows (query line
 /// first). Wide enough to read a label and its key, never the whole window.
 fn drawTopSurface(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), surf: *const core.surface.Surface, area: region.Rect, max_rows: usize) !void {
-    const nrows = @min(surf.rows.items.len, max_rows);
+    const has_hint = surf.hint.len > 0;
+    const nrows = @min(surf.rows.items.len, @max(1, max_rows -| @intFromBool(has_hint)));
     if (nrows == 0) return;
     const pad_y = v.line_h * 0.25;
     const w = @min(@max(0, area.w - 4 * v.cell_w), @max(60 * v.cell_w, area.w * 0.55));
     const x = area.x + (area.w - w) / 2;
     const y = area.y + v.line_h * 0.5 + pad_y;
     const sink: chrome.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
-    try chrome.paintPanel(sink, .{ .x = x, .y = y - pad_y, .w = w, .h = @as(f32, @floatFromInt(nrows)) * v.line_h + 2 * pad_y }, v.theme.selection, v.theme.accent, .popup);
+    try chrome.paintPanel(sink, .{ .x = x, .y = y - pad_y, .w = w, .h = @as(f32, @floatFromInt(nrows + @intFromBool(has_hint))) * v.line_h + 2 * pad_y }, v.theme.panel, v.theme.panel_border, .popup);
     const inner_cols: usize = @intFromFloat(@max(0, (w - 2 * v.cell_w) / v.cell_w));
     for (surf.rows.items[0..nrows], 0..) |row, i| {
         const row_y = y + @as(f32, @floatFromInt(i)) * v.line_h;
         const selected = surf.selected != null and surf.selected.? == i;
-        if (selected) try chrome.paintSelected(sink, .{ .x = x, .y = row_y, .w = w, .h = v.line_h }, v.theme.accent);
+        if (selected) try chrome.paintSelected(sink, .{ .x = x, .y = row_y, .w = w, .h = v.line_h }, v.theme.chosen);
         if (row.spans.items.len == 0) continue;
         // A second span is the row's key: right-aligned, and the label gives
         // way to it — shortened with "…", never running past the panel.
@@ -488,13 +577,17 @@ fn drawTopSurface(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), rects
         const main = row.spans.items[0];
         const cut_buf = try scratch.alloc(u8, main.text.len + 4);
         const text = status_layout.cut(cut_buf, main.text, room, .end);
-        const color = if (selected) v.theme.background else spanRoleColor(v, fromRole(main.role));
+        const color = if (selected) v.theme.chosen_text else spanRoleColor(v, fromRole(main.role));
         try propLine(v, scratch, runs, text, x + v.cell_w, row_y + v.ascent, color);
         if (key_cols > 0 and key_cols < inner_cols) {
             const kx = x + w - v.cell_w - @as(f32, @floatFromInt(key_cols)) * v.cell_w;
-            const kcolor = if (selected) v.theme.background else spanRoleColor(v, .muted);
+            const kcolor = if (selected) v.theme.chosen_text else spanRoleColor(v, .muted);
             try propLine(v, scratch, runs, key, kx, row_y + v.ascent, kcolor);
         }
+    }
+    if (has_hint) {
+        const fy = y + @as(f32, @floatFromInt(nrows)) * v.line_h;
+        try drawFooter(v, scratch, runs, rects, .{ .y = fy, .selected = false, .spans = try hintSpans(v, scratch, surf.hint, x + v.cell_w) }, x, w);
     }
 }
 
@@ -558,14 +651,14 @@ pub fn drawSurfaces(
             continue;
         }
 
-        // When the rows don't all fit, the LAST row still shows: a surface
-        // ends with its footer (which-key's page and paging keys), and a
-        // footer cut off is exactly how a clipped hint stops saying how to
-        // see the rest. The rows dropped are the ones just before it.
+        // When the rows don't all fit, the first ones show; what drives the
+        // surface (which-key's paging keys) is its hint line, in the frame,
+        // so it never falls off with the rows.
+        const has_hint = surf.hint.len > 0;
         const total = surf.rows.items.len;
-        const nrows = @min(total, max_rows);
+        const nrows = @min(total, @max(1, max_rows -| @intFromBool(has_hint)));
         const shown = try scratch.alloc(*const core.surface.Row, nrows);
-        for (shown, 0..) |*slot, i| slot.* = &surf.rows.items[shownRow(total, nrows, i)];
+        for (shown, 0..) |*slot, i| slot.* = &surf.rows.items[i];
         // Width = widest row, in cells (one space between spans).
         var max_cols: usize = 0;
         for (shown) |row| {
@@ -576,10 +669,11 @@ pub fn drawSurfaces(
             }
             max_cols = @max(max_cols, cols);
         }
+        if (has_hint) max_cols = @max(max_cols, hintCells(surf.hint));
         const pad_x: f32 = v.cell_w;
         const pad_y: f32 = v.line_h * 0.25;
         const box_w = @as(f32, @floatFromInt(max_cols)) * v.cell_w + 2 * pad_x;
-        const box_h = @as(f32, @floatFromInt(nrows)) * v.line_h + 2 * pad_y;
+        const box_h = @as(f32, @floatFromInt(nrows + @intFromBool(has_hint))) * v.line_h + 2 * pad_y;
         // Positioned within `body`, then clamped so the box stays inside it
         // (its own background reads as a popup over the text, never over the
         // status/tab strips, which live outside `body`).
@@ -604,13 +698,12 @@ pub fn drawSurfaces(
         // Panel background with a thin accent outline, so the popup reads
         // as a distinct floating box (not text bleeding over the buffer).
         const sink: chrome.Sink = .{ .v = v, .scratch = scratch, .runs = runs, .rects = rects };
-        try chrome.paintPanel(sink, .{ .x = box_x, .y = box_y, .w = box_w, .h = box_h }, v.theme.selection, v.theme.accent, .popup);
+        try chrome.paintPanel(sink, .{ .x = box_x, .y = box_y, .w = box_w, .h = box_h }, v.theme.panel, v.theme.panel_border, .popup);
 
         for (shown, 0..) |row, i| {
             const row_y = box_y + pad_y + @as(f32, @floatFromInt(i)) * v.line_h;
-            const index = shownRow(total, nrows, i);
-            if (surf.selected != null and surf.selected.? == index) {
-                try chrome.paintSelected(sink, .{ .x = box_x, .y = row_y, .w = box_w, .h = v.line_h }, v.theme.accent);
+            if (surf.selected != null and surf.selected.? == i) {
+                try chrome.paintSelected(sink, .{ .x = box_x, .y = row_y, .w = box_w, .h = v.line_h }, v.theme.chosen);
             }
             var x = box_x + pad_x;
             const baseline = row_y + v.ascent;
@@ -624,6 +717,10 @@ pub fn drawSurfaces(
                 });
                 x += shaped.advanceX() * v.em;
             }
+        }
+        if (has_hint) {
+            const fy = box_y + pad_y + @as(f32, @floatFromInt(nrows)) * v.line_h;
+            try drawFooter(v, scratch, runs, rects, .{ .y = fy, .selected = false, .spans = try hintSpans(v, scratch, surf.hint, box_x + pad_x) }, box_x, box_w);
         }
     }
 }
